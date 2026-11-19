@@ -487,9 +487,9 @@ jobs:
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
       # Both hardware suites in the LocalSuites order.  Each runs whenever the deployment succeeded (a
-      # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
-      # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
-      # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
+      # failure in one suite never hides the evidence of the next).  -PriorResultsDir gives the second suite the first
+      # suite's results as evidence: reported, never a veto (#458 comment 7008463710); only a process still running NOW
+      # (a survivor of a timed-out tree, an earlier runner) is a conflict, checked before each non-ReadOnly item.
       - name: Run HardwareUnit
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
@@ -686,9 +686,9 @@ jobs:
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
       # Both hardware suites in the LocalSuites order.  Each runs whenever the deployment succeeded (a
-      # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
-      # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
-      # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
+      # failure in one suite never hides the evidence of the next).  -PriorResultsDir gives the second suite the first
+      # suite's results as evidence: reported, never a veto (#458 comment 7008463710); only a process still running NOW
+      # (a survivor of a timed-out tree, an earlier runner) is a conflict, checked before each non-ReadOnly item.
       - name: Run HardwareUnit
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'

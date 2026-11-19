@@ -136,27 +136,51 @@ function Get-AstStringValue($Node) {   # string literal, or a variable assigned 
 }
 if ($hAst) { foreach ($kv in $hAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $holds[$kv.Item1.Value] = Get-AstStringValue $kv.Item2 } }
 function Get-Cls([string]$e) { $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }; if ($registry.ContainsKey($k)) { return $registry[$k] }; return '' }
-function Get-Gate([string]$e, [string]$Target, [bool]$Gha, [string[]]$Auth = @()) {
+function Get-Gate([string]$e, [string]$Target, [string]$Halt = '') {
     $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }
-    return Get-AvbHilGateDecision -Entry $k -Class (Get-Cls $e) -Target $Target -Halt '' -AuthorizedUnsafe $Auth -UnderGitHubActions $Gha
+    return Get-AvbHilGateDecision -Entry $k -Class (Get-Cls $e) -Target $Target -Halt $Halt
 }
-# 032: no static pre-execution block (Q 2026-11-03).  Unattended (GitHub Actions), with or without an exact target, the
-#      gate dispatches every ReadOnly, Init, Mutating and Mutating:Target entry; only Unsafe and unclassified/Unknown
-#      entries are blocked.  Proven per listed entry by the runner's own decision.
+# 032 (#458, Q 2026-11-17 / 2026-11-19): no static pre-execution block by class.  With or without an exact target, the
+#      gate dispatches every listed ReadOnly, Init, Mutating, Mutating:Target and Unsafe entry with an empty reason
+#      (attendance is no input of the decision); only unclassified/Unknown entries are blocked.  Proven per listed entry
+#      by the runner's own decision.
 $autoBad = @()
 foreach ($s in $autoSuites.Keys) {
     foreach ($e in @($hwLists[$autoSuites[$s]])) {
         $c = Get-Cls $e
-        $want = if ($c -in @('ReadOnly', 'Init', 'Mutating', 'Mutating:Target')) { 'Run' } else { 'Block' }
+        $want = if ($c -in @('ReadOnly', 'Init', 'Mutating', 'Mutating:Target', 'Unsafe')) { 'Run' } else { 'Block' }
         foreach ($t in '', '0x125B') {
-            $d = Get-Gate $e $t $true
-            if ($d.Action -ne $want) { $autoBad += "${s}: $e=$c target='$t' -> $($d.Action) (expected $want) $($d.Reason)" }
+            $d = Get-Gate $e $t
+            if ($d.Action -ne $want -or ($want -eq 'Run' -and $d.Reason)) { $autoBad += "${s}: $e=$c target='$t' -> $($d.Action) '$($d.Reason)' (expected $want, empty reason)" }
         }
     }
 }
 $autoCount = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) }).Count
-tc_check 'TEST-HILGATE-032-unattended-dispatch-runs-every-entry-except-unsafe-and-unclassified' (($autoCount -gt 0) -and $autoBad.Count -eq 0 -and $null -ne (Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue)) `
+tc_check 'TEST-HILGATE-032-dispatch-runs-every-classified-entry-unsafe-included-only-unclassified-blocked' (($autoCount -gt 0) -and $autoBad.Count -eq 0 -and $null -ne (Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue)) `
     ("automatic entries={0}; decided against the rule: {1}" -f $autoCount, ($autoBad -join ', '))
+
+# 099 (#458 clarification 2026-11-19): machine ownership and live competing execution are concrete conditions.  The same
+#      ownership/control halt blocks every non-ReadOnly class (Unsafe included) with the same reason, and the decision has
+#      no attendance or authorization input that could change it.  ReadOnly keeps running (existing rule, 048/051/053/065).
+$gateCmd = Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue
+$gateInputs = @(if ($gateCmd) { $gateCmd.Parameters.Keys | Where-Object { $_ -in @('AuthorizedUnsafe', 'UnderGitHubActions') } } else { 'Get-AvbHilGateDecision missing' })
+$ownHalts = @('machine lock not owned by this execution: held by another live process',
+              'machine lock lost during execution before x.exe: lock file removed',
+              'x.exe (Init) timed out and its process tree did not terminate: termination not observed')
+$ownBad = @()
+if ($gateCmd) {
+    foreach ($cls in 'Init', 'Mutating', 'Mutating:Target', 'Unsafe') {
+        foreach ($h in $ownHalts) {
+            $d = Get-AvbHilGateDecision -Entry 'x' -Class $cls -Target '' -Halt $h
+            if ($d.Action -ne 'Block' -or $d.Reason -ne "state-integrity halt ($h)") { $ownBad += "$cls / '$h' -> $($d.Action) '$($d.Reason)'" }
+        }
+    }
+    $dRo = Get-AvbHilGateDecision -Entry 'x' -Class 'ReadOnly' -Target '' -Halt $ownHalts[0]
+    if ($dRo.Action -ne 'Run') { $ownBad += "ReadOnly under an ownership halt -> $($dRo.Action)" }
+}
+tc_check 'TEST-HILGATE-099-ownership-halt-blocks-every-non-readonly-class-alike-no-attendance-or-authorization-input' `
+    ($null -ne $gateCmd -and $gateInputs.Count -eq 0 -and $ownBad.Count -eq 0) `
+    ("attendance/authorization inputs: [{0}]; decided against the rule: {1}" -f ($gateInputs -join ','), ($ownBad -join '; '))
 
 # 081: #328 hazard annotations (Q 2026-11-03): an entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM keeps its
 #      #328 record in $HilHazardHolds and stays listed, but the record no longer prohibits dispatch - the runner never
@@ -166,9 +190,9 @@ $holdBad = @()
 foreach ($e in $tsnEntries) {
     if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hazard record"; continue }
     if ($hwKeys0 -notcontains $e) { $holdBad += "${e}: no longer listed" }
-    foreach ($tc in @(@('', $true), @('0x125B', $true), @('0x125B', $false))) {
-        $d = Get-Gate $e $tc[0] $tc[1]
-        if ($d.Action -ne 'Run') { $holdBad += "${e}: target='$($tc[0])' gha=$($tc[1]) -> $($d.Action) $($d.Reason)" }
+    foreach ($tgt in '', '0x125B') {
+        $d = Get-Gate $e $tgt
+        if ($d.Action -ne 'Run') { $holdBad += "${e}: target='$tgt' -> $($d.Action) $($d.Reason)" }
     }
 }
 $holdReads = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) |
@@ -228,7 +252,7 @@ $verifiable = @(Get-RunnerList 'HilVerifiableState')
 foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) {
     $isGap = ($null -ne $gapTables[$s] -and $gapTables[$s].Contains($e))
     $listed = (@($hwLists["${s}Tests"]) | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } }) -contains $e
-    $dispatched = (Get-Gate $e '' $true).Action -eq 'Run'
+    $dispatched = (Get-Gate $e '').Action -eq 'Run'
     $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) -and $holds[$e] -match '#328' }
     if (-not ($isGap -or ($listed -and $dispatched -and $accounted))) { $notGap += "${s}: $e (gap=$isGap listed=$listed dispatched=$dispatched accounted=$accounted)" }
 } }
@@ -259,21 +283,44 @@ $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$
 $expectInit = @('avb_comprehensive_test', 'avb_hw_state_test_um',   # registered 2026-10-29 (TEST-COMPLETE-001)
                 'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_dev_lifecycle --init-contract',   # --init-contract: #313 amendment, #404 (2026-11-17)
                 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
+# 118 (#458, Q 2026-11-19): execution exceptions apply at testcase level - only an identified case or mode that needs
+#      interaction or a long-duration lane stays out of automatic HIL, with its reason; nothing is inferred from a program
+#      name.  UT-CORR-009 (test_ptp_phc_lifecycle) and TC-LCY-328 (test_control_device_lifecycle) are standalone cases
+#      with no such requirement: listed in an automatic suite, never a program-level gap.  The identified exceptions stay
+#      declared with their case and requirement: VV-CORR-001 (24-hour run), TC-S3-002 (S3 without an unattended wake
+#      facility; TC-S3-003..005 measure after that wake), TC-LCY-IDLE-001 (user-initiated session lock or display-off).
+$exBad = @()
+$autoListed = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) } | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+foreach ($e in 'test_ptp_phc_lifecycle', 'test_control_device_lifecycle') {
+    if ($autoListed -notcontains $e) { $exBad += "${e}: not listed in an automatic hardware suite" }
+    $asGap = @($gapTables.Keys | Where-Object { $null -ne $gapTables[$_] -and $gapTables[$_].Contains($e) })
+    if ($asGap.Count -gt 0) { $exBad += "${e}: still a program-level coverage gap in [$($asGap -join ',')]" }
+}
+$exWant = [ordered]@{ 'test_vv_corr_001_stability' = 'VV-CORR-001[^\r\n]*24-hour'; 'test_s3_sleep_wake' = 'TC-S3-002[^\r\n]*wake'; 'test_device_idle_regression' = 'TC-LCY-IDLE-001[^\r\n]*(session lock|display-off)' }
+foreach ($e in $exWant.Keys) {
+    $why = @($gapTables.Values | Where-Object { $null -ne $_ -and $_.Contains($e) } | ForEach-Object { [string]$_[$e] })
+    if ($autoListed -contains $e) { $exBad += "${e}: identified exception is listed in an automatic suite" }
+    if ($why.Count -ne 1 -or $why[0] -notmatch $exWant[$e]) { $exBad += "${e}: exception reason does not name its case and requirement: [$($why -join ' | ')]" }
+}
+tc_check 'TEST-HILGATE-118-exceptions-are-testcase-level-lifecycle-cases-registered-identified-exceptions-keep-their-reason' ($exBad.Count -eq 0) ($exBad -join '; ')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
     ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
 
 
-# 003: NIC/driver administration entries stay classified Unsafe; listed or not, dispatch never executes them under
-#      GitHub Actions or without AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry (attended run).
+# 003 (#458): NIC/driver administration entries stay truthfully classified Unsafe; Unsafe describes state-changing
+#      effects and is no execution veto: without a halt every Unsafe entry, listed or not, is dispatched with an empty
+#      reason (no attended-only or per-entry authorization requirement).
 $unsafeKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Unsafe' })
 $needUnsafe = @('test_hot_plug', 'test_lifecycle_coverage' | Where-Object { $registry[$_] -ne 'Unsafe' })
-$unsafeRuns = @(foreach ($e in $unsafeKeys) {
-    if ((Get-Gate $e '0x125B' $true @($e)).Action -ne 'Block') { "${e}: runs under GitHub Actions" }
-    if ((Get-Gate $e '0x125B' $false @()).Action -ne 'Block') { "${e}: runs attended without authorization" }
+$unsafeNotRun = @(foreach ($e in $unsafeKeys) {
+    foreach ($tgt in '', '0x125B') {
+        $d = Get-Gate $e $tgt
+        if ($d.Action -ne 'Run' -or $d.Reason) { "${e}: target='$tgt' -> $($d.Action) '$($d.Reason)'" }
+    }
 })
-tc_check 'TEST-HILGATE-003-nic-admin-tests-unsafe-and-never-dispatched-unattended-or-unauthorized' (($registry.Count -gt 0) -and $unsafeRuns.Count -eq 0 -and $needUnsafe.Count -eq 0) `
-    ("dispatched: {0}; not classified Unsafe: {1}" -f ($unsafeRuns -join ', '), ($needUnsafe -join ', '))
+tc_check 'TEST-HILGATE-003-nic-admin-tests-stay-unsafe-and-are-dispatched-without-a-halt' (($registry.Count -gt 0) -and $unsafeKeys.Count -gt 0 -and $unsafeNotRun.Count -eq 0 -and $needUnsafe.Count -eq 0) `
+    ("not dispatched or with a reason: {0}; not classified Unsafe: {1}" -f ($unsafeNotRun -join ', '), ($needUnsafe -join ', '))
 
 # The runner must never change adapter administration state (it only observes).
 $runnerCode = [regex]::Replace([System.IO.File]::ReadAllText($RunCIPath), '(?m)#.*$', '')
@@ -383,7 +430,8 @@ $tsnNoHold = @(foreach ($k in @($registry.Keys)) {
     if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b') -and -not ($holds.ContainsKey($k) -and $holds[$k] -match '#328')) { $k }
 })
 tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held' ($tsnNoHold.Count -eq 0) ("SETUP_TAS/FP/PTM in source without a #328 hold: {0}" -f ($tsnNoHold -join ', '))
-# 095: this test's own per-test timeout (Q 2026-10-29: test-specific 450 s; measured budget, no issue-level requirement)
+# 095: this test's own per-test timeout (Q 2026-10-29: test-specific, measured budget, no issue-level requirement; 750 s
+#      since #458 round 2: 484 s standalone + 48 %)
 #      is selected for this entry only - every other Unit entry keeps the suite timeout and the global Unit default
 #      stays 60 s.  Offline: the runner's table and its Get-AvbTestTimeoutSeconds, from its syntax tree.
 $toBad = @()
@@ -397,7 +445,7 @@ else {
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1" -SuiteSeconds 60' + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_artifact_completeness.ps1" -SuiteSeconds 60'))
     $toVals = @(& $toCheck)
-    if ($toVals.Count -ne 2 -or [int]$toVals[0] -ne 450) { $toBad += "test_hil_safety_gate.ps1 selects $($toVals[0]) s, expected 450 s" }
+    if ($toVals.Count -ne 2 -or [int]$toVals[0] -ne 750) { $toBad += "test_hil_safety_gate.ps1 selects $($toVals[0]) s, expected 750 s" }
     if ($toVals.Count -ne 2 -or [int]$toVals[1] -ne 60) { $toBad += "another Unit entry selects $($toVals[1]) s, expected the 60 s suite timeout" }
 }
 $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestTimeoutSeconds -eq 0' }, $true)
@@ -526,7 +574,7 @@ $o
         if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 980) = 1000 s (the suite timeout is never lowered)" }
     }
     if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
-    if ([int]$pa['gate@9'] -ne 450) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
+    if ([int]$pa['gate@9'] -ne 750) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
     if ([int]$pa['other@9'] -ne 300) { $paBad += "an unlisted entry depends on the adapter count ($($pa['other@9']) s)" }
     $runnerText = [System.IO.File]::ReadAllText($RunCIPath)
     if ($runnerText -notmatch '\$enumeratedAdapters\s*=\s*if\s*\(\s*\$script:HilBaseline\s+-and\s+\$script:HilBaseline\.ClockOk\s*\)\s*\{\s*@\(\$script:HilBaseline\.Clock\)\.Count\s*\}\s*else\s*\{\s*-1\s*\}' -or
@@ -576,7 +624,8 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
            'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
            'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init;' +
-           'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target;test_sbfake_mutfail=Mutating;test_sbfake_mutcln=Mutating'
+           'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target;test_sbfake_mutfail=Mutating;test_sbfake_mutcln=Mutating;' +
+           'test_sbfake_clnhang=Init;test_sbfake_lockgrab=ReadOnly;test_sbfake_hang=Init;test_sbfake_clnsurv=Init'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: cleanup NOT_VERIFIED.
@@ -651,7 +700,7 @@ function Invoke-Sandbox {
         AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile; AVB_TEST_HIL_LOCK_FILE = $LockFile; AVB_TEST_HIL_SESSION_FILE = $SessionFile
         GITHUB_RUN_ID = ''; GITHUB_RUN_ATTEMPT = ''; GITHUB_JOB = ''
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
-        AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''; AVB_TEST_SANDBOX_TIMEOUTS = ''
+        AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''; AVB_TEST_SANDBOX_TIMEOUTS = ''; AVB_TEST_SANDBOX_LEAVE_RUNNING = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
     }
     foreach ($k in $ExtraEnv.Keys) { $envs[$k] = $ExtraEnv[$k] }
@@ -697,14 +746,14 @@ function Test-FailureCase($r, [string]$idRx) { return ($r.Xml -match ('<testcase
 # Without sandbox support the runner would run its real driver health check (opens the device) - never do
 # that from an offline test.  Fail every behavioral case instead of executing it.
 $behavioralIds = @('010-disabled-supported-adapter-blocked-not-enabled', '011-unsupported-adapter-informational-only',
-    '012-unclassified-blocked-not-executed', '013-unsafe-blocked-authorization-ignored-under-github-actions',
+    '012-unclassified-blocked-not-executed', '013-unsafe-dispatched-under-github-actions-authorization-string-has-no-effect',
     '014-mutating-without-exact-targeting-is-dispatched-without-target-env', '015-target-aware-mutating-fans-out-per-enabled-supported-did',
     '016-readonly-and-init-run-once-without-target-env-also-unattended', '017-blocked-entries-fail-the-suite',
     '018-sandbox-never-exports-hil-identity-or-junit-to-github-env',
     '020-state-change-is-cleanup-failed', '021-halt-blocks-later-non-readonly-but-not-readonly',
     '022-runner-never-restores-or-enables-the-adapter', '023-timeout-kill-still-verifies-post-state',
     '024-after-timeout-cleanup-failed-later-init-blocked', '025-timeout-of-non-readonly-halts-mutation-without-cleanup-failed',
-    '026-timinca-change-is-cleanup-failed-for-that-target-only', '027-unsafe-runs-only-with-exact-entry-authorization',
+    '026-timinca-change-is-cleanup-failed-for-that-target-only', '027-unsafe-dispatch-is-the-same-with-an-exact-or-a-non-matching-authorization-string',
     '028-sandbox-refuses-real-test-binaries', '029-hardware-entry-blocked-outside-hardware-suite',
     '030-sandbox-requires-isolated-logs-dir', '035-coverage-gaps-reported-as-skipped-junit-cases-never-executed',
     '036-hardware-suite-without-a-pass-fails', '039-init-runs-unattended-and-attended',
@@ -737,9 +786,12 @@ tc_check 'TEST-HILGATE-011-unsupported-adapter-informational-only' `
      (@($rA.Ran | Where-Object { $_ -match 'target=0x1539' }).Count -eq 0)) (Tail $rA)
 tc_check 'TEST-HILGATE-012-unclassified-blocked-not-executed' `
     ((Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_unclassified') -and (@($rA.Ran | Where-Object { $_ -match 'test_sbfake_unclassified' }).Count -eq 0)) (Tail $rA)
-tc_check 'TEST-HILGATE-013-unsafe-blocked-authorization-ignored-under-github-actions' `
-    ((Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_unsafe') -and ($rA.Out -match 'ignored under GitHub Actions') -and
-     (@($rA.Ran | Where-Object { $_ -match 'test_sbfake_unsafe' }).Count -eq 0)) (Tail $rA)
+# 013 (#458): unattended (GitHub Actions, the job owns its lock) an Unsafe entry is dispatched like any classified entry;
+#      the authorization variable set in run A has no effect on dispatch and the runner says so (never silently ignored).
+tc_check 'TEST-HILGATE-013-unsafe-dispatched-under-github-actions-authorization-string-has-no-effect' `
+    ((-not (Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_unsafe')) -and ($rA.Out -notmatch 'ignored under GitHub Actions|requires AVB_HIL_AUTHORIZE_UNSAFE') -and
+     ($rA.Out -match 'AVB_HIL_AUTHORIZE_UNSAFE is set[^\r\n]*no effect on dispatch') -and
+     (@($rA.Ran | Where-Object { $_ -match '^RAN test_sbfake_unsafe ' }).Count -eq 1)) (Tail $rA)
 # Q 2026-11-03: missing exact-target support is no reason to refuse execution; the test runs with its own adapter
 # selection (no AVB_HIL_TARGET_DID), also unattended.
 tc_check 'TEST-HILGATE-014-mutating-without-exact-targeting-is-dispatched-without-target-env' `
@@ -773,7 +825,7 @@ function Get-SandboxSafetyEvents($r) { $p = Join-Path $r.Dir 'logs\sandbox-hil-s
 # evidence - never a functional failure row, never a halt, never a machine-safety event (was: CLEANUP_FAILED + halt).
 $tDis = New-Fake 'test_sbfake_disabler' (Edit-StateSnippet "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_125B' })[0]; `$a.Problem = 22; `$a.PnpStatus = 'Error'; `$a.AdminStatus = 'Down'")
 $tRo2 = New-Fake 'test_sbfake_ro2'
-$rB = Invoke-Sandbox 'runB' @($tDis, $tTgt, $tInit, $tRo2)
+$rB = Invoke-Sandbox 'runB' @($tDis, $tTgt, $tInit, $tUns, $tRo2)
 $disB = @(Get-ExecRecords $rB 'test_sbfake_disabler')
 tc_check 'TEST-HILGATE-020-state-change-is-cleanup-failed-reported-separately-functional-verdict-kept' `
     (($rB.Out -match '\[CLEANUP:FAILED\] TC-INFRA-STATE-001: after test_sbfake_disabler\.ps1 \(ReadOnly\): [^\r\n]*DEV_125B[^\r\n]*: Problem 0 -> 22') -and
@@ -785,6 +837,11 @@ tc_check 'TEST-HILGATE-021-cleanup-failure-never-blocks-later-tests-and-is-no-sa
 $sB = Read-State $rB
 $a125 = @($sB.adapters | Where-Object { $_.InstanceId -match 'DEV_125B' })[0]
 tc_check 'TEST-HILGATE-022-runner-never-restores-or-enables-the-adapter' (($a125.Problem -eq 22) -and ($a125.AdminStatus -eq 'Down')) ("final 125B: problem={0} admin={1}" -f $a125.Problem, $a125.AdminStatus)
+# 103 (#458): cleanup history in the same run is no veto for an Unsafe entry either - attended, no authorization string,
+#      after an earlier test's CLEANUP:FAILED, the Unsafe entry is dispatched and attempts its own setup.
+tc_check 'TEST-HILGATE-103-unsafe-dispatched-after-an-in-run-cleanup-failure' `
+    ((Get-RanCount $rB '^RAN test_sbfake_unsafe ') -eq 1 -and $rB.Out -match '\[CLEANUP:FAILED\]' -and $rB.Out -notmatch 'TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_unsafe') `
+    ("ran: {0}; {1}" -f ($rB.Ran -join ' / '), (Tail $rB))
 
 # --- Run C: timeout kill after a state change -> post-test state is still verified ------------------------
 $tSlc = New-Fake 'test_sbfake_sleepchg' ((Edit-StateSnippet "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_1533' })[0]; `$a.AdminStatus = 'Down'") + "`r`nStart-Sleep -Seconds 120")
@@ -821,12 +878,14 @@ tc_check 'TEST-HILGATE-026-timinca-change-is-cleanup-failed-for-that-target-only
      (Get-Prop (Get-CleanupOf $timE1533) 'outcome') -eq 'FAILED' -and (Get-Prop (Get-CleanupOf $timE125) 'outcome') -eq 'SUCCESS' -and
      (Get-Prop $timE1533 'verdict') -eq 'PASSED' -and (Get-RanCount $rE '^RAN test_sbfake_ro ') -eq 1) (Tail $rE)
 
-# --- Run F: Unsafe runs only when the exact entry is authorized outside GitHub Actions -------------------
+# --- Run F (#458): attended, the lock acquired by the run: an exact or a non-matching authorization string makes no
+#     difference - the Unsafe entry is dispatched either way, never blocked, never told it "requires" authorization ------
 $rF1 = Invoke-Sandbox 'runF1' @($tUns) -ExtraEnv @{ AVB_HIL_AUTHORIZE_UNSAFE = $tUns }
 $rF2 = Invoke-Sandbox 'runF2' @($tUns) -ExtraEnv @{ AVB_HIL_AUTHORIZE_UNSAFE = 'test_sbfake_unsafe' }
-tc_check 'TEST-HILGATE-027-unsafe-runs-only-with-exact-entry-authorization' `
-    ((Get-RanCount $rF1 '^RAN test_sbfake_unsafe ') -eq 1 -and (Get-RanCount $rF2 '^RAN test_sbfake_unsafe ') -eq 0 -and
-     ($rF2.Out -match 'requires AVB_HIL_AUTHORIZE_UNSAFE to name this exact entry')) ("F1 ran={0}; F2 ran={1}; {2}" -f (Get-RanCount $rF1 'unsafe'), (Get-RanCount $rF2 'unsafe'), (Tail $rF2))
+tc_check 'TEST-HILGATE-027-unsafe-dispatch-is-the-same-with-an-exact-or-a-non-matching-authorization-string' `
+    ((Get-RanCount $rF1 '^RAN test_sbfake_unsafe ') -eq 1 -and (Get-RanCount $rF2 '^RAN test_sbfake_unsafe ') -eq 1 -and
+     ($rF1.Out + $rF2.Out) -notmatch 'requires AVB_HIL_AUTHORIZE_UNSAFE|TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_unsafe' -and
+     $rF2.Out -match 'AVB_HIL_AUTHORIZE_UNSAFE is set[^\r\n]*no effect on dispatch') ("F1 ran={0}; F2 ran={1}; {2}" -f (Get-RanCount $rF1 'unsafe'), (Get-RanCount $rF2 'unsafe'), (Tail $rF2))
 
 # --- Run G: sandbox never executes real binaries; a hardware entry never runs in a non-Hardware suite -------
 $rG1 = Invoke-Sandbox 'runG1' @('test_ioctl_version')
@@ -906,20 +965,25 @@ function New-PriorDir([string]$Name, [string]$Verdict, [string]$Halt = '', [swit
 }
 $pCf  = New-PriorDir 'priorCleanup' 'CLEANUP_FAILED'
 $pTo  = New-PriorDir 'priorTimeout' 'FAILED(TIMEOUT)'
-$pHl  = New-PriorDir 'priorHalt' 'PASSED' -Halt 'adapter state not observable at baseline'
+# Fixture halt text (#458): a loss of control the runner still halts for.  Was 'adapter state not observable at baseline',
+# which is missing baseline evidence and no longer a halt (TEST-HILGATE-102); the carry-over rule tested here is unchanged.
+$pHl  = New-PriorDir 'priorHalt' 'PASSED' -Halt 'machine lock lost during execution before test_prior.exe: lock file removed'
 $pMk  = New-PriorDir 'priorKilled' '' -Marker
 $pOk  = New-PriorDir 'priorClean' 'PASSED'
 $pUv  = New-PriorDir 'priorUnverified' 'INCONCLUSIVE_RESTORATION'
 $kRes = [ordered]@{}
 $kDirs = [ordered]@{ cleanup = $pCf; timeout = $pTo; halt = $pHl; killed = $pMk; unverified = $pUv; clean = $pOk }
 foreach ($k in $kDirs.GetEnumerator()) {
-    $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $k.Value -AllSupportedEnabled
+    $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $k.Value -AllSupportedEnabled
 }
 $kBad = @()
+# #458 (comment 7008463710, Q 2026-11-19): an earlier suite's timeout, state halt or killed run is evidence about that
+# attempt, reported by this run, never a veto: every later test runs and attempts its own prerequisites.  (Was: Init
+# BLOCKED by a carried 'prior suite' halt.)  A live process named by the record is a separate, current check (108).
 foreach ($k in 'timeout', 'halt', 'killed') {
     $r = $kRes[$k]
-    if ((Get-RanCount $r '^RAN test_sbfake_init ') -ne 0 -or (Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1 -or
-        $r.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_init\.ps1: state-integrity halt \(prior suite') { $kBad += "${k}: " + (Tail $r) }
+    if ((Get-RanCount $r '^RAN test_sbfake_init ') -ne 1 -or (Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1 -or
+        $r.Out -notmatch '\[PRIOR\] [^\r\n]*no veto' -or $r.Out -match 'state-integrity halt \(prior suite') { $kBad += "${k}: " + (Tail $r) }
 }
 $rKc = $kRes['clean']
 if ((Get-RanCount $rKc '^RAN test_sbfake_init ') -ne 1 -or $rKc.Out -match 'prior suite') { $kBad += 'clean prior results must not halt: ' + (Tail $rKc) }
@@ -934,7 +998,15 @@ $rKcf = $kRes['cleanup']
 if ((Get-RanCount $rKcf '^RAN test_sbfake_init ') -ne 1 -or $rKcf.Out -match 'prior suite') { $kBad += 'prior CLEANUP_FAILED must not halt: ' + (Tail $rKcf) }
 $leftMarker = @(Get-ChildItem (Join-Path $rKc.Dir 'logs') -Filter 'run-in-progress.json' -Recurse -ErrorAction SilentlyContinue).Count
 if ($leftMarker -ne 0) { $kBad += 'a completed run left its run-in-progress.json marker behind' }
-tc_check 'TEST-HILGATE-040-earlier-suite-halt-or-killed-run-blocks-later-mutation-readonly-continues' ($kBad.Count -eq 0) ($kBad -join ' ### ')
+tc_check 'TEST-HILGATE-040-earlier-suite-results-are-reported-evidence-and-never-block-later-tests' ($kBad.Count -eq 0) ($kBad -join ' ### ')
+# 104 (#458): the Unsafe entry (attended, no authorization string) runs after every earlier-suite result - timeout
+#      without evidenced termination, state halt, killed run, cleanup history or a clean suite.
+$kUBad = @()
+foreach ($k in 'timeout', 'halt', 'killed', 'cleanup', 'unverified', 'clean') {
+    $r = $kRes[$k]
+    if ((Get-RanCount $r '^RAN test_sbfake_unsafe ') -ne 1 -or $r.Out -match 'TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_unsafe') { $kUBad += "${k}: unsafe not dispatched: " + (Tail $r) }
+}
+tc_check 'TEST-HILGATE-104-unsafe-runs-after-every-earlier-suite-result' ($kUBad.Count -eq 0) ($kUBad -join ' ### ')
 
 # 083: LocalSuites writes its console transcripts (console-<Cfg>-<Suite>.log, including the CURRENT suite's, still being
 # written), local-suites-report.json and repro-*.json into the same -PriorResultsDir.  Only results-*.json documents and
@@ -950,10 +1022,12 @@ $pBad = New-PriorDir 'priorCorrupt' ''
 'console transcript, not a results document' | Set-Content -LiteralPath (Join-Path $pBad 'console-Debug-HardwareUnit.log') -Encoding UTF8
 $rLsA = Invoke-Sandbox 'runK_lsLayout' @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $pLs -AllSupportedEnabled
 $rLsB = Invoke-Sandbox 'runK_corrupt' @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $pBad -AllSupportedEnabled
-tc_check 'TEST-HILGATE-083-only-results-documents-are-prior-suite-evidence-corrupt-results-still-halt' `
-    ((Get-RanCount $rLsA '^RAN test_sbfake_init ') -eq 1 -and $rLsA.Out -notmatch 'prior suite' -and
-     (Get-RanCount $rLsB '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLsB '^RAN test_sbfake_ro ') -eq 1 -and
-     $rLsB.Out -match 'state-integrity halt \(prior suite: unreadable results document results-HardwareUnit-Debug-20261021_120000_000\.json' -and
+# #458: a genuinely corrupt results-*.json is reported as unreadable earlier evidence, never a veto (was: a halt).
+tc_check 'TEST-HILGATE-083-only-results-documents-are-prior-suite-evidence-corrupt-results-reported-no-veto' `
+    ((Get-RanCount $rLsA '^RAN test_sbfake_init ') -eq 1 -and $rLsA.Out -notmatch '\[PRIOR\]' -and
+     (Get-RanCount $rLsB '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rLsB '^RAN test_sbfake_ro ') -eq 1 -and
+     $rLsB.Out -match '\[PRIOR\] [^\r\n]*unreadable results document results-HardwareUnit-Debug-20261021_120000_000\.json[^\r\n]*no veto' -and
+     $rLsB.Out -notmatch 'state-integrity halt \(prior suite' -and
      $rLsB.Out -notmatch 'unreadable results document (console-|local-suites-report|repro-)') `
     ("LocalSuites layout: init ran={0}; {1} ### corrupt results: init ran={2}; {3}" -f (Get-RanCount $rLsA '^RAN test_sbfake_init '), (Tail $rLsA), (Get-RanCount $rLsB '^RAN test_sbfake_init '), (Tail $rLsB))
 
@@ -1039,14 +1113,19 @@ $null = Initialize-AvbHilSafetyRecord -Path $sfHalted -Operator 'test' -Reason '
 # Fixture history: CLEANUP_FAILED -> LOCK_LOST (Q 2026-10-29): a cleanup-only event is reclassified at runner start
 # (TEST-HILGATE-089), so the halted record must come from a genuine loss of controlled execution.
 $null = Add-AvbHilSafetyEvent -Path $sfHalted -Event ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
-$rP1 = Invoke-Sandbox 'runP1' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sfHalted
-tc_check 'TEST-HILGATE-048-halted-machine-record-blocks-mutation-readonly-continues' `
-    ((Get-RanCount $rP1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP1 '^RAN test_sbfake_ro ') -eq 1 -and
-     $rP1.Out -match 'TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_init\.ps1: state-integrity halt \(machine safety record HALTED' -and $rP1.Exit -eq 1) (Tail $rP1)
+# #458 (comment 7008463710): a HALTED record holds unrecovered loss-of-control events of EARLIER runs - history, reported,
+#      never a veto (was: Init/Mutating BLOCKED).  The record is left unchanged (nothing clears it implicitly).
+$hHalted = Get-Content -LiteralPath $sfHalted -Raw
+$rP1 = Invoke-Sandbox 'runP1' @($tInit, $tUns, $tRo) -AllSupportedEnabled -SafetyFile $sfHalted
+tc_check 'TEST-HILGATE-048-halted-machine-record-is-reported-history-never-a-veto-record-unchanged' `
+    ((Get-RanCount $rP1 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rP1 '^RAN test_sbfake_unsafe ') -eq 1 -and (Get-RanCount $rP1 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rP1.Out -match '\[SAFETY-RECORD\] HALTED[^\r\n]*no dispatch veto' -and $rP1.Out -notmatch 'state-integrity halt \(machine safety record' -and
+     (Get-Content -LiteralPath $sfHalted -Raw) -eq $hHalted) (Tail $rP1)
+# A missing record: reported UNAVAILABLE, not created, never a veto (was: fail closed for mutation).
 $rP2 = Invoke-Sandbox 'runP2' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile (Join-Path $Tmp 'safety_absent.json')
-tc_check 'TEST-HILGATE-049-missing-machine-record-fails-closed-for-mutation' `
-    ((Get-RanCount $rP2 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP2 '^RAN test_sbfake_ro ') -eq 1 -and
-     $rP2.Out -match 'state-integrity halt \(machine safety record UNAVAILABLE[^\r\n]*missing' -and -not (Test-Path (Join-Path $Tmp 'safety_absent.json'))) (Tail $rP2)
+tc_check 'TEST-HILGATE-049-missing-machine-record-is-reported-never-a-veto-and-not-created' `
+    ((Get-RanCount $rP2 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rP2 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rP2.Out -match '\[SAFETY-RECORD\] UNAVAILABLE[^\r\n]*missing[^\r\n]*no dispatch veto' -and -not (Test-Path (Join-Path $Tmp 'safety_absent.json'))) (Tail $rP2)
 # A CLEAR record through the real bootstrap path: initialize (UNBASELINED) + authorized baseline under the lock.
 function New-ClearSafetyFile([string]$Name, [object[]]$PhcTolerance = @()) {
     $f = Join-Path $Tmp $Name; $null = Initialize-AvbHilSafetyRecord -Path $f -Operator 'test' -Reason $Name
@@ -1072,10 +1151,11 @@ $rP3 = Invoke-Sandbox 'runP3' @($tLockDrop50, $tInit) -AllSupportedEnabled -Lock
 $sP3 = Read-AvbHilSafetyState -Path $sfShared
 $eP3 = if ($sP3.Record) { @(@($sP3.Record.events) | Where-Object { $_.verdict -eq 'LOCK_LOST' }) | Select-Object -First 1 } else { $null }
 $rP4 = Invoke-Sandbox 'runP4' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sfShared   # later run: fresh clean state
-tc_check 'TEST-HILGATE-050-genuine-loss-of-control-persists-to-a-later-run-cleanup-difference-does-not' `
+# #458: the event is still persisted with its context and reported by the later run - it no longer blocks it.
+tc_check 'TEST-HILGATE-050-genuine-loss-of-control-is-persisted-and-reported-to-a-later-run-cleanup-difference-is-not' `
     ($sP3a.State -eq 'CLEAR' -and @($sP3a.Record.events).Count -eq 0 -and $rP3a.Out -match '\[CLEANUP:FAILED\]' -and
      $sP3.State -eq 'HALTED' -and $eP3 -and $eP3.trigger.suite -eq 'HardwareUnit' -and $null -ne $eP3.initialState -and
-     (Get-RanCount $rP4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP4 '^RAN test_sbfake_ro ') -eq 1 -and $rP4.Out -match 'machine safety record HALTED') `
+     (Get-RanCount $rP4 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rP4 '^RAN test_sbfake_ro ') -eq 1 -and $rP4.Out -match '\[SAFETY-RECORD\] HALTED[^\r\n]*LOCK_LOST') `
     ("after cleanup run: record={0} events={1}; after lock loss: record={2} LOCK_LOST={3}; run2: {4}" -f $sP3a.State, @($sP3a.Record.events).Count, $sP3.State, [bool]$eP3, (Tail $rP4))
 
 # --- Run Q: exclusive hardware access = lock OWNED by this execution (tools/lib/HilLock.ps1; Q 2026-10-21) --------
@@ -1083,7 +1163,7 @@ $tLockDrop = New-Fake 'test_sbfake_lockdrop' "Remove-Item -LiteralPath `$env:AVB
 function New-LockFile([string]$Name, $Owner) { $p = Join-Path $Tmp $Name; ($Owner | ConvertTo-Json) | Set-Content -LiteralPath $p -Encoding UTF8; return $p }
 # 051: another live owner (PID 4 = System: alive, never an ancestor) -> bounded wait, then Init BLOCKED; ReadOnly runs; lock untouched
 $lfOther = New-LockFile 'other.lock' ([ordered]@{ kind = 'local'; label = 'another operator run'; host = $env:COMPUTERNAME; pid = 4; acquiredUtc = '2026-10-21T00:00:00Z' })
-$rQ1 = Invoke-Sandbox 'runQ1' @($tInit, $tRo) -AllSupportedEnabled -LockFile $lfOther -RunnerArgs '-HilLockWaitSeconds 0'
+$rQ1 = Invoke-Sandbox 'runQ1' @($tInit, $tUns, $tRo) -AllSupportedEnabled -LockFile $lfOther -RunnerArgs '-HilLockWaitSeconds 0'
 tc_check 'TEST-HILGATE-051-lock-owned-by-another-process-blocks-mutation-readonly-continues' `
     ((Get-RanCount $rQ1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rQ1 '^RAN test_sbfake_ro ') -eq 1 -and
      $rQ1.Out -match 'state-integrity halt \(machine lock not owned by this execution' -and ((Get-Content $lfOther -Raw) -match 'another operator run')) (Tail $rQ1)
@@ -1094,21 +1174,39 @@ tc_check 'TEST-HILGATE-052-absent-lock-is-acquired-before-mutation-and-released'
     ((Get-RanCount $rQ2 '^RAN test_sbfake_init ') -eq 1 -and $rQ2.Out -match 'machine lock acquired by this run' -and -not (Test-Path $lfAbsent)) (Tail $rQ2)
 # 053: lock lost during execution -> no further mutation, LOCK_LOST persisted in the machine safety record
 $sfLost = New-ClearSafetyFile 'safety_lost.json'
-$rQ3 = Invoke-Sandbox 'runQ3' @($tLockDrop, $tInit, $tRo2) -AllSupportedEnabled -LockFile (Join-Path $Tmp 'lost.lock') -SafetyFile $sfLost
+$rQ3 = Invoke-Sandbox 'runQ3' @($tLockDrop, $tInit, $tUns, $tRo2) -AllSupportedEnabled -LockFile (Join-Path $Tmp 'lost.lock') -SafetyFile $sfLost
 $sQ3 = Read-AvbHilSafetyState -Path $sfLost
-tc_check 'TEST-HILGATE-053-lock-lost-stops-mutation-and-is-recorded' `
-    ((Get-RanCount $rQ3 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rQ3 '^RAN test_sbfake_ro2 ') -eq 1 -and $rQ3.Out -match 'machine lock lost' -and
+# #458: ownership is a CURRENT condition checked before each non-ReadOnly item.  The loss is recorded (LOCK_LOST, once);
+#      the lock is free again, so the attended run re-acquires it and the later items run (was: sticky halt).  A lock
+#      taken by another live owner keeps later items BLOCKED while it persists (100, run Q6).
+tc_check 'TEST-HILGATE-053-lock-lost-is-recorded-ownership-re-established-before-the-next-item' `
+    ((Get-RanCount $rQ3 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rQ3 '^RAN test_sbfake_ro2 ') -eq 1 -and $rQ3.Out -match 'machine lock lost' -and
+     $rQ3.Out -match 'machine lock re-acquired by this run' -and
      $sQ3.State -ne 'CLEAR' -and @(@($sQ3.Record.events) | Where-Object { $_.verdict -eq 'LOCK_LOST' }).Count -eq 1) ("record={0}; {1}" -f $sQ3.State, (Tail $rQ3))
 # 054: unattended (GitHub Actions): owned only by the same run/attempt/job; absent lock is NOT acquired (fail closed)
 $lfCiOther = New-LockFile 'ci_other.lock' ([ordered]@{ kind = 'ci'; label = 'other job'; host = $env:COMPUTERNAME; pid = 1; runId = 'sbx-run'; runAttempt = '1'; job = 'other-job'; acquiredUtc = '2026-10-21T00:00:00Z' })
 $ghEnv = @{ GITHUB_ACTIONS = 'true'; GITHUB_RUN_ID = 'sbx-run'; GITHUB_RUN_ATTEMPT = '1'; GITHUB_JOB = 'sbx-job' }
-$rQ4 = Invoke-Sandbox 'runQ4' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiOther
+$rQ4 = Invoke-Sandbox 'runQ4' @($tTgt, $tUns, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiOther
 $lfCiAbsent = Join-Path $Tmp 'ci_absent.lock'
 $rQ5 = Invoke-Sandbox 'runQ5' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiAbsent
 tc_check 'TEST-HILGATE-054-unattended-run-needs-its-own-job-lock-and-never-acquires-one' `
     ((Get-RanCount $rQ4 '^RAN test_sbfake_tgt ') -eq 0 -and $rQ4.Out -match 'not owned by this execution[^\r\n]*other-job' -and
      (Get-RanCount $rQ5 '^RAN test_sbfake_tgt ') -eq 0 -and -not (Test-Path $lfCiAbsent) -and (Get-RanCount $rQ5 '^RAN test_sbfake_ro ') -eq 1) `
     ("otherJob: {0} ### absent: {1}" -f (Tail $rQ4), (Tail $rQ5))
+# 100 (#458 clarification 2026-11-19): the treatment of an unowned lock does not change with the class, the attendance or
+#      the absence of an authorization string, and it is decided from CURRENT ownership.  The Unsafe entry is BLOCKED while
+#      another live owner holds the lock: attended without authorization (Q1), unattended (Q4, another job's lock), and
+#      after a test handed the lock to another live owner mid-run (Q6: every later non-ReadOnly item, ReadOnly continues).
+#      After a loss with the lock free again (Q3) ownership is re-acquired and the Unsafe entry runs.
+$tLockGrab = New-Fake 'test_sbfake_lockgrab' ("([ordered]@{ kind = 'local'; label = 'grabbed by another live process'; host = `$env:COMPUTERNAME; pid = 4; acquiredUtc = '2026-11-19T00:00:00Z' } | ConvertTo-Json) | Set-Content -LiteralPath `$env:AVB_TEST_HIL_LOCK_FILE -Encoding UTF8")
+$rQ6 = Invoke-Sandbox 'runQ6' @($tInit, $tLockGrab, $tUns, $tTgt, $tRo2) -AllSupportedEnabled -LockFile (Join-Path $Tmp 'grab.lock') -RunnerArgs '-HilLockWaitSeconds 0'
+$uqBad = @()
+foreach ($c in @(@('Q1', $rQ1), @('Q4', $rQ4), @('Q6', $rQ6))) {
+    if ((Get-RanCount $c[1] '^RAN test_sbfake_unsafe ') -ne 0 -or $c[1].Out -notmatch 'TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_unsafe\.ps1: state-integrity halt \(machine lock not owned by this execution') { $uqBad += "$($c[0]): " + (Tail $c[1]) }
+}
+if ((Get-RanCount $rQ6 '^RAN test_sbfake_init ') -ne 1 -or (Get-RanCount $rQ6 '^RAN test_sbfake_tgt ') -ne 0 -or (Get-RanCount $rQ6 '^RAN test_sbfake_ro2 ') -ne 1) { $uqBad += "Q6 order: init before the grab must run, tgt after it blocked, ReadOnly continues: $($rQ6.Ran -join ' / ')" }
+if ((Get-RanCount $rQ3 '^RAN test_sbfake_unsafe ') -ne 1) { $uqBad += 'Q3: unsafe not dispatched after ownership was re-acquired: ' + (Tail $rQ3) }
+tc_check 'TEST-HILGATE-100-unsafe-never-runs-without-current-lock-ownership-attended-or-unattended' ($uqBad.Count -eq 0) ($uqBad -join ' ### ')
 
 # --- Run R: one original SESSION baseline per exclusive HIL session (Q 2026-10-21) -------------------------------
 # Session = ci:<run>:<attempt> (spans hil-debug AND hil-release) or local:<host>:<pid>:<lock acquired>.  Stored beside the
@@ -1390,8 +1488,10 @@ $lsPrior = Join-Path $Tmp 'runLS\logs\LocalSuites_x'; New-Item -ItemType Directo
              records = @([ordered]@{ name = 'test_prior.exe'; verdict = 'FAILED(TIMEOUT)' }) } | ConvertTo-Json -Depth 5) |
     Set-Content -LiteralPath (Join-Path $lsPrior 'results-Debug-HardwareUnit.json') -Encoding UTF8
 $rLS = Invoke-Sandbox 'runLS' @($tInit, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir $lsPrior
-tc_check 'TEST-HILGATE-069-prior-halt-found-when-prior-results-lie-inside-the-runner-logs-dir' `
-    ((Get-RanCount $rLS '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLS '^RAN test_sbfake_ro ') -eq 1 -and $rLS.Out -match 'state-integrity halt \(prior suite') (Tail $rLS)
+# #458: found and reported (location rule unchanged), no longer a halt.
+tc_check 'TEST-HILGATE-069-prior-results-found-and-reported-when-they-lie-inside-the-runner-logs-dir' `
+    ((Get-RanCount $rLS '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rLS '^RAN test_sbfake_ro ') -eq 1 -and
+     $rLS.Out -match '\[PRIOR\] [^\r\n]*test_prior\.exe=FAILED\(TIMEOUT\)' -and $rLS.Out -notmatch 'state-integrity halt \(prior suite') (Tail $rLS)
 
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).
@@ -1497,11 +1597,13 @@ $rTo2a = Invoke-Sandbox 'runTO2a' @($tInit, $tRo) -AllSupportedEnabled -PriorRes
 $rTo2b = Invoke-Sandbox 'runTO2b' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorRoLegacy' 'ReadOnly' '')
 $rTo2c = Invoke-Sandbox 'runTO2c' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorInitTimeout' 'Init' 'TERMINATED')
 $rTo2d = Invoke-Sandbox 'runTO2d' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorInitHalt' 'Init' 'HALT')
-tc_check 'TEST-HILGATE-071-only-a-timeout-without-evidenced-termination-is-a-prior-halt' `
-    ((Get-RanCount $rTo2a '^RAN test_sbfake_init ') -eq 1 -and $rTo2a.Out -notmatch 'prior suite' -and
-     (Get-RanCount $rTo2b '^RAN test_sbfake_init ') -eq 0 -and $rTo2b.Out -match 'state-integrity halt \(prior suite' -and
-     (Get-RanCount $rTo2c '^RAN test_sbfake_init ') -eq 1 -and $rTo2c.Out -notmatch 'prior suite' -and
-     (Get-RanCount $rTo2d '^RAN test_sbfake_init ') -eq 0 -and $rTo2d.Out -match 'state-integrity halt \(prior suite' -and
+# #458: no disposition (older runner) or HALT without a recorded surviving process cannot establish a CURRENT conflict;
+#      reported as such, never a veto (was: halt).  A recorded survivor that is alive now is checked by 108.
+tc_check 'TEST-HILGATE-071-timeout-records-of-any-disposition-are-reported-never-a-veto' `
+    ((Get-RanCount $rTo2a '^RAN test_sbfake_init ') -eq 1 -and $rTo2a.Out -notmatch 'state-integrity halt' -and
+     (Get-RanCount $rTo2b '^RAN test_sbfake_init ') -eq 1 -and $rTo2b.Out -match '\[PRIOR\] [^\r\n]*no surviving process recorded[^\r\n]*no veto' -and
+     (Get-RanCount $rTo2c '^RAN test_sbfake_init ') -eq 1 -and $rTo2c.Out -notmatch 'state-integrity halt' -and
+     (Get-RanCount $rTo2d '^RAN test_sbfake_init ') -eq 1 -and $rTo2d.Out -match '\[PRIOR\] [^\r\n]*no surviving process recorded[^\r\n]*no veto' -and
      (Get-RanCount $rTo2b '^RAN test_sbfake_ro ') -eq 1 -and (Get-RanCount $rTo2d '^RAN test_sbfake_ro ') -eq 1) `
     ("verified: ran={0} | legacy: ran={1} | init terminated: ran={2} | init halt: ran={3} || {4}" -f ($rTo2a.Ran -join '/'), ($rTo2b.Ran -join '/'), ($rTo2c.Ran -join '/'), ($rTo2d.Ran -join '/'), (Tail $rTo2a))
 
@@ -1757,6 +1859,221 @@ if ($obsTxt -notmatch '0x00170110' -or $obsTxt -notmatch '0x00170114') { $idBad 
 if ($obsTxt -notmatch 'snapshot net_luid') { $idBad += 'STATIC: snapshot net_luid is not checked against the bound LUID' }
 tc_check 'TEST-HILGATE-091-adapter-identity-is-the-net-luid-reorder-is-no-diff-changes-stay-attributed-observer-never-opens-adapter' `
     ($idBad.Count -eq 0) ($idBad -join ' || ')
+
+# --- Run T (#458): a timed-out process tree that is still running is a CURRENT live competing operation ------------------
+# AVB_TEST_SANDBOX_LEAVE_RUNNING names fakes whose timed-out tree the runner leaves running (sandbox stand-in for a tree
+# that did not terminate; disposition HALT, survivors recorded with PID and start time).  Attended, no authorization string.
+# T1 with the runner baseline, T2 without one (state file absent: missing baseline evidence is no veto, the live process
+# is).  The survivors are killed by this test afterwards.
+function Stop-Survivors($r) {
+    foreach ($rec in @(Get-ExecRecords $r 'test_sbfake_hang')) {
+        foreach ($s in @(if ($rec.PSObject.Properties['survivors']) { $rec.survivors })) { Stop-Process -Id ([int]$s.pid) -Force -ErrorAction SilentlyContinue }
+    }
+}
+# A dedicated fake (30 s): alive while the later items are checked, gone soon after (its inherited output handle
+# keeps the sandbox wrapper's pipe open until it exits).
+$tHang = New-Fake 'test_sbfake_hang' 'Start-Sleep -Seconds 30'
+$leave = @{ AVB_TEST_SANDBOX_LEAVE_RUNNING = 'test_sbfake_hang' }
+$rT1 = Invoke-Sandbox 'runT1' @($tHang, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv $leave
+Stop-Survivors $rT1
+$rT2 = Invoke-Sandbox 'runT2' @($tHang, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv ($leave + @{ AVB_TEST_ADAPTER_STATE_FILE = (Join-Path $Tmp 'no-such-state-T2.json') })
+Stop-Survivors $rT2
+$tBad = @{}
+foreach ($c in @(@('T1', $rT1), @('T2', $rT2))) {
+    $r = $c[1]; $bad = @()
+    $sl = @(Get-ExecRecords $r 'test_sbfake_hang')
+    if ($sl.Count -ne 1 -or (Get-Prop $sl[0] 'verdict') -ne 'FAILED(TIMEOUT)' -or (Get-Disposition $sl[0]) -ne 'HALT') { $bad += "sleeper verdict/disposition: $(if ($sl.Count) { "$(Get-Prop $sl[0] 'verdict')/$(Get-Disposition $sl[0])" } else { 'no record' })" }
+    if ($sl.Count -eq 1 -and @(Get-Prop $sl[0] 'survivors').Count -lt 1) { $bad += 'no survivor recorded (PID, start time)' }
+    foreach ($f in 'unsafe', 'init') {
+        if ((Get-RanCount $r "^RAN test_sbfake_$f ") -ne 0) { $bad += "$f ran alongside the live operation" }
+        if ($r.Out -notmatch "TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_$f\.ps1: state-integrity halt \(live competing operation[^\r\n]*test_sbfake_hang") { $bad += "$f not blocked by the live operation" }
+    }
+    if ((Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1) { $bad += 'ReadOnly did not continue' }
+    $tBad[$c[0]] = $bad
+}
+if ($rT2.Out -notmatch '\[INFRA_FAILURE\] TC-INFRA-STATE-000: adapter state not observable at baseline') { $tBad['T2'] += 'missing-baseline INFRA_FAILURE row not reported' }
+$slT2 = @(Get-ExecRecords $rT2 'test_sbfake_hang') | Select-Object -First 1
+if ((Get-Prop (Get-CleanupOf $slT2) 'outcome') -ne 'NOT_VERIFIED') { $tBad['T2'] += "sleeper restoration '$(Get-Prop (Get-CleanupOf $slT2) 'outcome')', expected NOT_VERIFIED" }
+tc_check 'TEST-HILGATE-105-live-timed-out-tree-blocks-every-non-readonly-class-unsafe-included' ($tBad['T1'].Count -eq 0) (($tBad['T1'] -join '; ') + ' ### ' + (Tail $rT1))
+tc_check 'TEST-HILGATE-106-live-timed-out-tree-is-detected-also-without-a-runner-baseline' ($tBad['T2'].Count -eq 0) (($tBad['T2'] -join '; ') + ' ### ' + (Tail $rT2))
+
+# --- Run Y (#458): an earlier suite's recorded survivor or runner is a conflict only while it is alive NOW -----------------
+# A real process started here stands in for the survivor (PID + start time recorded as the runner records them); a PID that
+# is not running (or a reused PID with another start time) establishes nothing.  Attended, no authorization string.
+$live = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 600' -WindowStyle Hidden -PassThru
+$liveStart = (Get-Process -Id $live.Id).StartTime.ToUniversalTime().ToString('o')
+function New-SurvivorPrior([string]$Name, $Survivors, [switch]$Marker, [int]$MarkerPid = 0) {
+    $d = Join-Path $Tmp $Name; New-Item -ItemType Directory -Path $d -Force | Out-Null
+    $rec = [ordered]@{ name = 'test_prior.exe'; verdict = 'FAILED(TIMEOUT)'; executed = $true; safetyClass = 'Init'; timeoutDisposition = 'HALT'; survivors = @($Survivors) }
+    ([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = ''; records = @($rec) } |
+        ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Join-Path $d 'results-Debug-HardwareUnit.json') -Encoding UTF8
+    if ($Marker) { ([ordered]@{ suite = 'HardwareUnit'; configuration = 'Debug'; pid = $MarkerPid; startedUtc = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $d 'run-in-progress.json') -Encoding UTF8 }
+    return $d
+}
+$rY1 = Invoke-Sandbox 'runY1' @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir (New-SurvivorPrior 'priorLive' @([ordered]@{ pid = $live.Id; name = 'powershell'; startTimeUtc = $liveStart }))
+$rY2 = Invoke-Sandbox 'runY2' @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir (New-SurvivorPrior 'priorReused' @([ordered]@{ pid = $live.Id; name = 'powershell'; startTimeUtc = '2001-01-01T00:00:00.0000000Z' }))
+$rY3 = Invoke-Sandbox 'runY3' @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir (New-SurvivorPrior 'priorLiveRunner' @() -Marker -MarkerPid $live.Id)
+Stop-Process -Id $live.Id -Force -ErrorAction SilentlyContinue; $null = $live.WaitForExit(10000)
+$rY4 = Invoke-Sandbox 'runY4' @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir (New-SurvivorPrior 'priorEnded' @([ordered]@{ pid = $live.Id; name = 'powershell'; startTimeUtc = $liveStart }))
+$yBad = @()
+foreach ($c in @(@('Y1 live survivor', $rY1), @('Y3 live earlier runner', $rY3))) {
+    foreach ($f in 'init', 'unsafe') {
+        if ((Get-RanCount $c[1] "^RAN test_sbfake_$f ") -ne 0 -or $c[1].Out -notmatch "TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_$f\.ps1: state-integrity halt \(live competing operation[^\r\n]*pid $($live.Id)") { $yBad += "$($c[0]): $f not blocked: " + (Tail $c[1]) }
+    }
+    if ((Get-RanCount $c[1] '^RAN test_sbfake_ro ') -ne 1) { $yBad += "$($c[0]): ReadOnly did not continue" }
+}
+foreach ($c in @(@('Y2 reused pid', $rY2), @('Y4 ended', $rY4))) {
+    if ((Get-RanCount $c[1] '^RAN test_sbfake_init ') -ne 1 -or (Get-RanCount $c[1] '^RAN test_sbfake_unsafe ') -ne 1 -or $c[1].Out -match 'live competing operation') { $yBad += "$($c[0]): not dispatched: " + (Tail $c[1]) }
+}
+tc_check 'TEST-HILGATE-108-earlier-survivor-or-runner-blocks-only-while-alive-now' ($yBad.Count -eq 0) ($yBad -join ' ### ')
+
+# --- Run Z (#458): continuation after earlier failures INSIDE a run and across suites ----------------------------------
+# 109: a driver health failure after one test is recorded (FAILED(INFRA), TC-INFRA-HEALTH-001) and every later test still
+#      runs and attempts its own setup (was: every later item FAILED(INFRA) / SKIPPED(INFRA) without execution).
+$rZ1 = Invoke-Sandbox 'runZ1' @($tRo, $tInit, $tUns, $tRo2) -AllSupportedEnabled -ExtraEnv @{ AVB_TEST_HEALTH_FAIL_AFTER = 'test_sbfake_ro.ps1' }
+$z1Docs = @(Get-ResultsDocs $rZ1); $z1Recs = @($z1Docs | ForEach-Object { @($_.records) })
+tc_check 'TEST-HILGATE-109-health-failure-is-recorded-and-every-later-test-still-runs' `
+    ((Get-RanCount $rZ1 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rZ1 '^RAN test_sbfake_unsafe ') -eq 1 -and (Get-RanCount $rZ1 '^RAN test_sbfake_ro2 ') -eq 1 -and
+     $rZ1.Out -match '\[#328-SENTINEL\] driver health check FAILED after test_sbfake_ro\.ps1' -and @($z1Recs | Where-Object { $_.name -match '\[INFRA-HEALTH\]' -and $_.verdict -eq 'INFRA_FAILURE' }).Count -eq 1 -and
+     @($z1Recs | Where-Object { $_.name -match 'test_sbfake_(init|unsafe|ro2)' -and -not $_.executed }).Count -eq 0 -and $rZ1.Exit -eq 1) `
+    ("ran: {0}; records: {1}; exit {2}" -f ($rZ1.Ran -join ' / '), (($z1Recs | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', '), $rZ1.Exit)
+# 110: earlier build failure, earlier health failure and mixed earlier failure rows never stop later independent tests; each
+#      earlier failure is named in this run's output (evidence kept), and the earlier documents are not altered.
+function New-RowsPrior([string]$Name, [object[]]$Rows, [string]$Halt = '') {
+    $d = Join-Path $Tmp $Name; New-Item -ItemType Directory -Path $d -Force | Out-Null
+    $f = Join-Path $d 'results-HardwareUnit-Debug-20261119_130000_000.json'
+    ([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = $Halt; records = @($Rows) } |
+        ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $f -Encoding UTF8
+    return @{ Dir = $d; File = $f; Hash = (Get-FileHash -LiteralPath $f).Hash }
+}
+$pB = New-RowsPrior 'priorBuild' @([ordered]@{ name = 'test_built_missing.exe'; verdict = 'INFRA_FAILURE'; status = 'FAILED(BUILD)'; executed = $false; reason = '[BUILD-FAIL] binary not found' })
+$pH = New-RowsPrior 'priorHealth' @([ordered]@{ name = 'test_x.exe'; verdict = 'PASSED'; executed = $true },
+                                    [ordered]@{ name = 'test_x.exe[INFRA-HEALTH]'; verdict = 'INFRA_FAILURE'; status = 'FAILED(INFRA)'; executed = $false; reason = '' })
+$pM = New-RowsPrior 'priorMixed' @([ordered]@{ name = 'test_a.exe'; verdict = 'FAILED'; executed = $true },
+                                   [ordered]@{ name = 'test_b.exe'; verdict = 'FAILED(TIMEOUT)'; executed = $true; timeoutDisposition = 'HALT' },
+                                   [ordered]@{ name = 'test_c.exe'; verdict = 'INFRA_FAILURE'; status = 'FAILED(BUILD)'; executed = $false },
+                                   [ordered]@{ name = 'test_d.exe[INFRA-HEALTH]'; verdict = 'INFRA_FAILURE'; status = 'FAILED(INFRA)'; executed = $false },
+                                   [ordered]@{ name = 'test_e.exe'; verdict = 'CLEANUP_FAILED'; executed = $true }) -Halt 'machine lock lost during execution before test_e.exe: lock file removed'
+$zBad = @()
+foreach ($c in @(@('build', $pB, @('test_built_missing\.exe=INFRA_FAILURE')), @('health', $pH, @('test_x\.exe\[INFRA-HEALTH\]=INFRA_FAILURE')),
+                 @('mixed', $pM, @('test_b\.exe=FAILED\(TIMEOUT\)', 'test_c\.exe=INFRA_FAILURE', 'test_d\.exe\[INFRA-HEALTH\]=INFRA_FAILURE', 'state halt')))) {
+    $r = Invoke-Sandbox ("runZ_" + $c[0]) @($tInit, $tUns, $tTgt, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir $c[1].Dir
+    foreach ($f in 'init', 'unsafe', 'ro') { if ((Get-RanCount $r "^RAN test_sbfake_$f ") -ne 1) { $zBad += "$($c[0]): $f not run" } }
+    if ((Get-RanCount $r '^RAN test_sbfake_tgt ') -ne 2) { $zBad += "$($c[0]): tgt ran $(Get-RanCount $r '^RAN test_sbfake_tgt ') of 2 targets" }
+    if ($r.Out -match 'TC-SAFETY-GATE-001|state-integrity halt') { $zBad += "$($c[0]): a block was reported" }
+    foreach ($rx in $c[2]) { if ($r.Out -notmatch ('\[PRIOR\] [^\r\n]*' + $rx)) { $zBad += "$($c[0]): earlier failure '$rx' not reported" } }
+    if ((Get-FileHash -LiteralPath $c[1].File).Hash -ne $c[1].Hash) { $zBad += "$($c[0]): earlier results document altered" }
+    if ($zBad.Count) { $zBad += (Tail $r) }
+}
+tc_check 'TEST-HILGATE-110-earlier-build-health-and-mixed-failures-are-reported-and-never-stop-later-tests' ($zBad.Count -eq 0) ($zBad -join ' ### ')
+
+# --- Copilot review r4628406457 / r4628406514 on PR #485 ----------------------------------------------------------------
+# 111: adapter state observable, PHC clock state not (partial runner baseline): the adapter components are still compared,
+#      a measured adapter change is cleanup FAILED with its observation (never only NOT_VERIFIED); later tests run.
+$noClock = "`$s | Add-Member -NotePropertyName clockError -NotePropertyValue 'sandbox: GET_CLOCK_CONFIG unavailable' -Force"
+$rPb = Invoke-Sandbox 'runPB' @($tDis, $tInit, $tRo2) -StateEdit $noClock
+tc_check 'TEST-HILGATE-111-partial-baseline-still-compares-adapters-and-reports-a-measured-change' `
+    ($rPb.Out -match '\[INFRA_FAILURE\] TC-INFRA-STATE-000: PHC clock state not observable at baseline' -and
+     $rPb.Out -match '\[CLEANUP:FAILED\] TC-INFRA-STATE-001: after test_sbfake_disabler\.ps1 \(ReadOnly\): [^\r\n]*DEV_125B[^\r\n]*Problem 0 -> 22' -and
+     (Get-RanCount $rPb '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rPb '^RAN test_sbfake_ro2 ') -eq 1 -and $rPb.Out -notmatch '\[HALT\]') (Tail $rPb)
+# 112: a test that printed its own cleanup failure and then hung: FAILED(TIMEOUT) and the termination disposition stay its
+#      functional result, and its cleanup is FAILED with the printed line as observation - with and without a runner baseline.
+$tClnHang = New-Fake 'test_sbfake_clnhang' "Write-Host '  [CLEANUP:FAILED] TC-SBFAKE-002: restore write failed before the hang'`r`nStart-Sleep -Seconds 120"
+$rCh1 = Invoke-Sandbox 'runCH1' @($tClnHang, $tRo) -Timeout 5 -AllSupportedEnabled
+$rCh2 = Invoke-Sandbox 'runCH2' @($tClnHang, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv @{ AVB_TEST_ADAPTER_STATE_FILE = (Join-Path $Tmp 'no-such-state-CH2.json') }
+$chBad = @()
+foreach ($c in @(@('baseline', $rCh1), @('no baseline', $rCh2))) {
+    $rec = @(Get-ExecRecords $c[1] 'test_sbfake_clnhang') | Select-Object -First 1
+    $cl = Get-CleanupOf $rec
+    if ((Get-Prop $rec 'verdict') -ne 'FAILED(TIMEOUT)' -or (Get-Disposition $rec) -notin @('TERMINATED', 'TERMINATED_STATE_VERIFIED')) { $chBad += "$($c[0]): verdict/disposition $(Get-Prop $rec 'verdict')/$(Get-Disposition $rec)" }
+    if ((Get-Prop $cl 'outcome') -ne 'FAILED' -or @(@(Get-Prop $cl 'observations') | Where-Object { $_ -match 'restore write failed before the hang' }).Count -ne 1) { $chBad += "$($c[0]): cleanup '$(Get-Prop $cl 'outcome')' observations [$(@(Get-Prop $cl 'observations') -join ' | ')]" }
+    if ((Get-RanCount $c[1] '^RAN test_sbfake_ro ') -ne 1) { $chBad += "$($c[0]): later test did not run" }
+}
+tc_check 'TEST-HILGATE-112-cleanup-failure-printed-before-a-timeout-stays-failed-timeout-verdict-kept' ($chBad.Count -eq 0) ($chBad -join ' ### ')
+
+# --- Run CS (#458, PR #485 r4629829999 / r4628406514): a timed-out tree that SURVIVES keeps its pipes open ----------------
+# The fake flushes a cleanup failure to stdout and a diagnostic line to stderr, then keeps running past its timeout; the
+# runner leaves it running (AVB_TEST_SANDBOX_LEAVE_RUNNING), so its output never reaches EOF.  CS1 with the runner
+# baseline, CS2 without one.  Each property is verified separately (113-117); the survivors are killed afterwards.
+$csLine  = '[CLEANUP:FAILED] TC-SBFAKE-003: restore write failed before the tree survived'
+$csErr   = 'sbfake-stderr: diagnostic written before the tree survived'
+$tClnSurv = New-Fake 'test_sbfake_clnsurv' ("[Console]::Out.WriteLine('  $csLine'); [Console]::Out.Flush()`r`n" +
+                                            "[Console]::Error.WriteLine('$csErr'); [Console]::Error.Flush()`r`nStart-Sleep -Seconds 20")
+$csEnv = @{ AVB_TEST_SANDBOX_LEAVE_RUNNING = 'test_sbfake_clnsurv' }
+$csRuns = [ordered]@{}
+$csRuns['CS1 baseline'] = Invoke-Sandbox 'runCS1' @($tClnSurv, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv $csEnv
+$csRuns['CS2 no baseline'] = Invoke-Sandbox 'runCS2' @($tClnSurv, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv ($csEnv + @{ AVB_TEST_ADAPTER_STATE_FILE = (Join-Path $Tmp 'no-such-state-CS2.json') })
+$csRec = [ordered]@{}
+foreach ($k in $csRuns.Keys) {
+    $csRec[$k] = @(Get-ExecRecords $csRuns[$k] 'test_sbfake_clnsurv') | Select-Object -First 1
+    foreach ($s in @(if ($csRec[$k] -and $csRec[$k].PSObject.Properties['survivors']) { $csRec[$k].survivors })) { Stop-Process -Id ([int]$s.pid) -Force -ErrorAction SilentlyContinue }
+}
+$b113 = @(); $b114 = @(); $b115 = @(); $b116 = @(); $b117 = @()
+foreach ($k in $csRuns.Keys) {
+    $r = $csRuns[$k]; $rec = $csRec[$k]
+    if (-not $rec) { foreach ($v in 'b113', 'b114', 'b115', 'b116') { Set-Variable -Name $v -Value (@(Get-Variable -Name $v -ValueOnly) + "${k}: no executed record") }; continue }
+    # 113: the output the test already emitted stays in the evidence - its log (stdout AND stderr) and the console.
+    $lp = [string](Get-Prop $rec 'logPath'); $logText = if ($lp -and (Test-Path -LiteralPath $lp)) { Get-Content -LiteralPath $lp -Raw } else { '' }
+    foreach ($want in $csLine, $csErr) {
+        if ($logText.IndexOf($want) -lt 0) { $b113 += "${k}: log '$lp' lacks '$want'" }
+        if ($r.Out.IndexOf($want) -lt 0) { $b113 += "${k}: console lacks '$want'" }
+    }
+    # 114: cleanup stays FAILED with the original line as observation.
+    $cl = Get-CleanupOf $rec
+    if ((Get-Prop $cl 'outcome') -ne 'FAILED' -or @(@(Get-Prop $cl 'observations') | Where-Object { $_ -match [regex]::Escape($csLine) }).Count -ne 1) { $b114 += "${k}: cleanup '$(Get-Prop $cl 'outcome')' observations [$(@(Get-Prop $cl 'observations') -join ' | ')]" }
+    # 115: the functional result stays FAILED(TIMEOUT), its own row.
+    if ((Get-Prop $rec 'verdict') -ne 'FAILED(TIMEOUT)') { $b115 += "${k}: verdict '$(Get-Prop $rec 'verdict')'" }
+    # 116: the current survivor information is retained (disposition HALT, survivors with PID and start time).
+    $sv = @(if ($rec.PSObject.Properties['survivors']) { $rec.survivors })
+    if ((Get-Disposition $rec) -ne 'HALT' -or $sv.Count -lt 1 -or -not ($sv[0].pid) -or -not ($sv[0].startTimeUtc)) { $b116 += "${k}: disposition $(Get-Disposition $rec), survivors $($sv.Count)" }
+    # 117: independent runnable work continues under the published ownership rules - ReadOnly runs, the non-ReadOnly items
+    #      are BLOCKED only by the live operation (current evidence), never by the earlier result.
+    if ((Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1) { $b117 += "${k}: ReadOnly did not run" }
+    foreach ($f in 'unsafe', 'init') {
+        if ((Get-RanCount $r "^RAN test_sbfake_$f ") -ne 0 -or $r.Out -notmatch "TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_$f\.ps1: state-integrity halt \(live competing operation[^\r\n]*test_sbfake_clnsurv") { $b117 += "${k}: $f not decided by the live operation" }
+    }
+}
+$csTail = (($csRuns.Keys | ForEach-Object { "$_ :: " + (Tail $csRuns[$_]) }) -join ' ### ')
+tc_check 'TEST-HILGATE-113-surviving-tree-output-already-emitted-stays-in-the-evidence-stdout-and-stderr' ($b113.Count -eq 0) (($b113 -join '; ') + ' ### ' + $csTail)
+tc_check 'TEST-HILGATE-114-surviving-tree-cleanup-failure-stays-failed-with-its-line' ($b114.Count -eq 0) (($b114 -join '; ') + ' ### ' + $csTail)
+tc_check 'TEST-HILGATE-115-surviving-tree-functional-result-stays-failed-timeout' ($b115.Count -eq 0) ($b115 -join '; ')
+tc_check 'TEST-HILGATE-116-surviving-tree-survivor-information-retained' ($b116.Count -eq 0) ($b116 -join '; ')
+tc_check 'TEST-HILGATE-117-surviving-tree-independent-work-continues-under-ownership-rules' ($b117.Count -eq 0) ($b117 -join '; ')
+
+# --- Run V (#458): an UNBASELINED machine record is missing baseline evidence ("state unknown", contract E), no veto ---
+$sfUnb = Join-Path $Tmp 'safety_unbaselined.json'
+$null = Initialize-AvbHilSafetyRecord -Path $sfUnb -Operator 'test' -Reason 'TEST-HILGATE-101'
+$rV = Invoke-Sandbox 'runV' @($tInit, $tUns, $tTgt, $tRo) -AllSupportedEnabled -SafetyFile $sfUnb
+$sV = Read-AvbHilSafetyState -Path $sfUnb
+tc_check 'TEST-HILGATE-101-unbaselined-safety-record-suppresses-no-test-and-is-reported' `
+    ((Get-RanCount $rV '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rV '^RAN test_sbfake_unsafe ') -eq 1 -and (Get-RanCount $rV '^RAN test_sbfake_tgt ') -eq 2 -and
+     (Get-RanCount $rV '^RAN test_sbfake_ro ') -eq 1 -and $rV.Out -notmatch '\[HALT\]|state-integrity halt' -and $rV.Out -match 'Machine safety record: UNBASELINED' -and
+     $sV.State -eq 'UNBASELINED' -and @($sV.Record.events).Count -eq 0) ("ran: {0}; record={1}; {2}" -f ($rV.Ran -join ' / '), $sV.State, (Tail $rV))
+
+# --- Run W (#458): the runner's baseline is not observable (state file absent) - missing baseline evidence, no veto ------
+# The INFRA_FAILURE row stays (non-passing); every executed item gets its own runner restoration NOT_VERIFIED.
+$rW = Invoke-Sandbox 'runW' @($tInit, $tUns, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_TEST_ADAPTER_STATE_FILE = (Join-Path $Tmp 'no-such-state-W.json') }
+$wBad = @()
+foreach ($f in 'init', 'unsafe', 'ro') {
+    if ((Get-RanCount $rW "^RAN test_sbfake_$f ") -ne 1) { $wBad += "$f not dispatched" }
+    $rec = @(Get-ExecRecords $rW "test_sbfake_$f") | Select-Object -First 1
+    $cl = Get-CleanupOf $rec
+    if ((Get-Prop $cl 'outcome') -ne 'NOT_VERIFIED' -or [string](Get-Prop $cl 'reason') -notmatch 'no runner baseline') { $wBad += "$f restoration '$(Get-Prop $cl 'outcome')' '$(Get-Prop $cl 'reason')'" }
+}
+if ($rW.Out -match '\[HALT\]|state-integrity halt') { $wBad += 'halted' }
+if ($rW.Out -notmatch '\[INFRA_FAILURE\] TC-INFRA-STATE-000: adapter state not observable at baseline' -or $rW.Exit -ne 1) { $wBad += "INFRA_FAILURE row missing or suite passing (exit $($rW.Exit))" }
+tc_check 'TEST-HILGATE-102-unobservable-runner-baseline-suppresses-no-test-restoration-not-verified-per-item' ($wBad.Count -eq 0) (($wBad -join '; ') + ' ### ' + (Tail $rW))
+
+# --- Run X (#458): an earlier suite's baseline-observation INFRA_FAILURE rows (TC-INFRA-STATE-000, TC-INFRA-ADAPTER-*) are
+#     that suite's missing baseline evidence, not loss of control: they carry no halt (the current suite observes its own) --
+$pBi = Join-Path $Tmp 'priorBaselineInfra'; $pBiS = Join-Path $pBi 'HardwareUnit'; New-Item -ItemType Directory -Path $pBiS -Force | Out-Null
+([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = ''
+             records = @([ordered]@{ name = 'HIL-BASELINE'; verdict = 'INFRA_FAILURE'; reason = '[INFRA_FAILURE] TC-INFRA-STATE-000: adapter state not observable at baseline: Get-PnpDevice failed' },
+                         [ordered]@{ name = 'adapter 0x125B'; verdict = 'INFRA_FAILURE'; reason = '[INFRA_FAILURE] TC-INFRA-ADAPTER-002: DID 0x125B is enabled in PnP but not enumerated by the driver (filter not attached)' }) } |
+    ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $pBiS 'results-HardwareUnit-Debug-20261119_120000_000.json') -Encoding UTF8
+$rX = Invoke-Sandbox 'runX' @($tInit, $tUns, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $pBi -AllSupportedEnabled
+tc_check 'TEST-HILGATE-107-prior-baseline-observation-infra-rows-carry-no-halt' `
+    ((Get-RanCount $rX '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rX '^RAN test_sbfake_unsafe ') -eq 1 -and $rX.Out -notmatch 'prior suite') (Tail $rX)
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

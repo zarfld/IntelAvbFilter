@@ -823,7 +823,7 @@ int main(int argc, char *argv[])
     /* UT-CORR-009 (driver reinstall) lives in test_ptp_phc_lifecycle.exe (Unsafe) since 2026-10-22; this binary
      * contains no service control or process creation.  An explicit request here is reported, never ignored. */
     if (run_009) {
-        tc_blocked("UT-CORR-009 Driver Reload: not in this executable - run test_ptp_phc_lifecycle.exe (Unsafe, attended, AVB_HIL_AUTHORIZE_UNSAFE)");
+        tc_blocked("UT-CORR-009 Driver Reload: not in this executable - run test_ptp_phc_lifecycle.exe (Unsafe, no attendance or per-entry permission, #458)");
     }
 
     if (hDev != INVALID_HANDLE_VALUE) {

@@ -188,7 +188,9 @@ exemption, unsupported-hardware verdict or passing mock.
 - Read the actual script and its `param()` block before proposing a command; use only parameters that exist (see `run-tests`).
 - Give Q exact, copy-paste-ready PowerShell, plus prerequisites, expected mutations, cleanup behaviour, timeout/stop conditions and evidence paths.
 - Let Q run elevated commands when elevation is needed; wait for the real results before claiming anything.
-- Never initiate, without explicit authorization: driver install/replace/restart, adapter disable/enable, firmware change, `AVB_HIL_AUTHORIZE_UNSAFE`, S3/reboot, or safety-record clearing.
+- Never initiate, without explicit authorization: driver install/replace/restart, adapter disable/enable, firmware change, S3/reboot, or safety-record clearing.  (These are agent actions outside the test runners; a registered testcase that performs such an operation is dispatched by the runners without that authorization.)
+- `Unsafe` execution requires neither operator attendance nor per-entry permission (#458). `AVB_HIL_AUTHORIZE_UNSAFE` is a compatibility variable with no dispatch effect; runners and wrappers say so when it is set.
+- Earlier functional, setup, build, health, timeout, cleanup or infrastructure results never stop later independent tests, suites, configurations or CI test jobs (#458, comment 7008463710): they stay failures in the report and the aggregate result; each later test establishes its own prerequisites. Current machine-lock ownership and a live competing operation (a process still running now) are checked per non-ReadOnly item; ReadOnly entries run without ownership (existing exception).
 - `Unsafe` is a hardware-mutation classification, not a general prohibition against HIL testing. Required hardware-mutating tests remain part of normal HIL-TDD. Use existing authorization mechanisms without introducing additional per-test approval gates solely because a test modifies hardware. Do not bypass safety mechanisms or reclassify mutating tests as ReadOnly.
 
 ## Anti-patterns (observed failures → required behaviour)

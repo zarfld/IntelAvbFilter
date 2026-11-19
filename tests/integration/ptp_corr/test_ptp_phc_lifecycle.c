@@ -4,7 +4,7 @@
  *
  * Split out of test_ptp_phc_stability.c (Q 2026-10-22, TEST-HILSUITE-REAL-003): the driver-lifecycle path
  * (tools\setup\Install-Driver.ps1 -Reinstall by process creation) exists only in this executable.  Run-Tests-CI.ps1
- * classifies it Unsafe: attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this exact entry, never under GitHub Actions.
+ * classifies it Unsafe (a description of its effects; no attendance or per-entry permission, #458).
  *
  * Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 (REQ-F-IOCTL-PHC-004) | Spec: issue #199 | Track A of #317
  *

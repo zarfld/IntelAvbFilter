@@ -18,7 +18,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | Context | Entry point | Hardware | Gates applied |
 |---|---|---|---|
 | GitHub-hosted CI (`ci-standards-compliance.yml`, `windows-latest`, Debug + Release) | `Run-Tests-CI.ps1 -Suite Unit` / `-Suite Integration` | none — hardware-independent tests only | build provenance, verdict contract |
-| Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration` (the only hardware suites, Q 2026-11-03) after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, halt propagation (`-PriorResultsDir`) |
+| Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration` (the only hardware suites, Q 2026-11-03) after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, earlier-suite evidence (`-PriorResultsDir`: reported, never a veto; a process it names counts only while running now, #458) |
 | Local complete run, Debug **and** Release | `tools\archive\deprecated\LocalSuites.ps1` (elevated; builds, reinstalls driver, preflight, four suites per configuration) | real NICs | `Run-Tests-CI.ps1 -LocalDiagnostic`: safety gates as HIL CI, build provenance reported per item but not enforced; evidence class `LOCAL_DIAGNOSTIC` |
 | Local single entry | `Run-Tests-Elevated.ps1 -Suite <Hardware*> -TestName '<entry>'` | real NICs | same as above (`-LocalDiagnostic`) |
 | Local single program | `Run-Tests-Elevated.ps1 -TestName <name>` → `Run-Tests.ps1 -TestExecutable` → its registered runner entry | real NICs | same as above (`-LocalDiagnostic`); unregistered programs fail closed |
@@ -36,7 +36,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | `-Tests <entry>[,...]` | overrides the suite list; names **without** `.exe`; an entry may carry args, e.g. `'test_ptp_phc_stability --case UT-CORR-005'` |
 | `-TestTimeoutSeconds <n>` | default per suite (Unit 60, Integration 120, HardwareUnit 300, HardwareIntegration 600, Mandatory/Mutation 300); per-entry overrides never lower it |
 | `-ResultsJson <path>` | machine-readable results (`avb-runner-results/1`); default `logs\results-<Suite>-<Config>-<timestamp>.json` |
-| `-PriorResultsDir <dir>` | carries an earlier halt so later Init/Mutating entries stay BLOCKED |
+| `-PriorResultsDir <dir>` | earlier results documents of the same run or job: reported as evidence, never a veto (#458); a process they name (survivor of a timed-out tree, an earlier runner) is a conflict for non-ReadOnly entries only while it is running now |
 | `-HilLockWaitSeconds <n>` | attended runs only; default 60 |
 | `-FailFast` | stops after the first failure — **not** for gate or completeness evidence |
 | `-LogsDir` | sandbox/self-test use only; ordinary HIL runs must not pass it |
@@ -53,7 +53,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | `-TestArgs <args>` | appended to the entry |
 | `-Configuration Debug\|Release` | default `Debug` |
 | `-ResultsJson <path>` | with `-Suite` only |
-| `-PriorResultsDir <dir>` | with `-Suite` only: earlier results documents of the same run, so a halt keeps later Init/Mutating tests BLOCKED |
+| `-PriorResultsDir <dir>` | with `-Suite` only: earlier results documents of the same run, reported as evidence by the runner, never a veto (#458) |
 | `-CaptureDbgView` | DebugView kernel capture; the test does not run if the capture cannot be confirmed |
 | `-TimeoutSeconds <n>` | bound for the elevated child, default 1800; expiry = TIMEOUT |
 | `-LogFile <path>` | default `logs\<TestName>_<timestamp>.log` |
@@ -61,7 +61,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 
 `tools/archive/deprecated/LocalSuites.ps1` — despite the folder name, the current operator-driven complete local run: `-Configurations Debug,Release` (default both), `-NoReproduce`, `-ReportDir`.
 
-`tools/archive/deprecated/FullSuite.ps1` — operator script, no parameters: per configuration build driver + tests, reinstall, then `Unit`, `Integration` (`Run-Tests-CI.ps1`) and the two hardware suites HardwareUnit, HardwareIntegration (`Run-Tests-Elevated.ps1 -Suite <suite> -CaptureDbgView`, whole suite), chained through `-PriorResultsDir logs\FullSuite_<timestamp>`; summary from the results documents. Then, per configuration, the operator's authoritative per-program loop: every built `*.exe` through `Run-Tests-Elevated.ps1 -TestName <exe> -CaptureDbgView` (per-test elevation and DebugView; same runner gates), except `test_s3_sleep_wake` and `test_vv_corr_001_stability` until their infrastructure exists. Hardware* suites are NOT_EXECUTED for a configuration whose driver build or installation failed.
+`tools/archive/deprecated/FullSuite.ps1` — operator script, no parameters: per configuration build driver + tests, reinstall, then `Unit`, `Integration` (`Run-Tests-CI.ps1`; they run even when the driver build failed) and the two hardware suites HardwareUnit, HardwareIntegration (`Run-Tests-Elevated.ps1 -Suite <suite> -CaptureDbgView`, whole suite), chained through `-PriorResultsDir logs\FullSuite_<timestamp>`; summary from the results documents. Then, per configuration, the operator's authoritative per-program loop: every built `*.exe` through `Run-Tests-Elevated.ps1 -TestName <exe> -CaptureDbgView` (per-test elevation and DebugView; same runner gates), except `test_s3_sleep_wake` and `test_vv_corr_001_stability` until their infrastructure exists. Hardware* suites are NOT_EXECUTED (reported, nonpassing) for a configuration whose driver build or installation failed; the next configuration still runs, and the per-program loop's exit codes are part of the summary (#458).
 
 `tools/build/Build-Tests.ps1` — `-Configuration`, `-TestName <target>`, `-ShowDetails`, `-BuildDiagnosticTools`, `-RequireDriverSha256`.
 
