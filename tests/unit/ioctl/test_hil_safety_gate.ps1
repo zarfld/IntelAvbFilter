@@ -283,6 +283,26 @@ $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$
 $expectInit = @('avb_comprehensive_test', 'avb_hw_state_test_um',   # registered 2026-10-29 (TEST-COMPLETE-001)
                 'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_dev_lifecycle --init-contract',   # --init-contract: #313 amendment, #404 (2026-11-17)
                 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
+# 118 (#458, Q 2026-11-19): execution exceptions apply at testcase level - only an identified case or mode that needs
+#      interaction or a long-duration lane stays out of automatic HIL, with its reason; nothing is inferred from a program
+#      name.  UT-CORR-009 (test_ptp_phc_lifecycle) and TC-LCY-328 (test_control_device_lifecycle) are standalone cases
+#      with no such requirement: listed in an automatic suite, never a program-level gap.  The identified exceptions stay
+#      declared with their case and requirement: VV-CORR-001 (24-hour run), TC-S3-002 (S3 without an unattended wake
+#      facility; TC-S3-003..005 measure after that wake), TC-LCY-IDLE-001 (user-initiated session lock or display-off).
+$exBad = @()
+$autoListed = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) } | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+foreach ($e in 'test_ptp_phc_lifecycle', 'test_control_device_lifecycle') {
+    if ($autoListed -notcontains $e) { $exBad += "${e}: not listed in an automatic hardware suite" }
+    $asGap = @($gapTables.Keys | Where-Object { $null -ne $gapTables[$_] -and $gapTables[$_].Contains($e) })
+    if ($asGap.Count -gt 0) { $exBad += "${e}: still a program-level coverage gap in [$($asGap -join ',')]" }
+}
+$exWant = [ordered]@{ 'test_vv_corr_001_stability' = 'VV-CORR-001[^\r\n]*24-hour'; 'test_s3_sleep_wake' = 'TC-S3-002[^\r\n]*wake'; 'test_device_idle_regression' = 'TC-LCY-IDLE-001[^\r\n]*(session lock|display-off)' }
+foreach ($e in $exWant.Keys) {
+    $why = @($gapTables.Values | Where-Object { $null -ne $_ -and $_.Contains($e) } | ForEach-Object { [string]$_[$e] })
+    if ($autoListed -contains $e) { $exBad += "${e}: identified exception is listed in an automatic suite" }
+    if ($why.Count -ne 1 -or $why[0] -notmatch $exWant[$e]) { $exBad += "${e}: exception reason does not name its case and requirement: [$($why -join ' | ')]" }
+}
+tc_check 'TEST-HILGATE-118-exceptions-are-testcase-level-lifecycle-cases-registered-identified-exceptions-keep-their-reason' ($exBad.Count -eq 0) ($exBad -join '; ')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
     ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
@@ -605,7 +625,7 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
            'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init;' +
            'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target;test_sbfake_mutfail=Mutating;test_sbfake_mutcln=Mutating;' +
-           'test_sbfake_clnhang=Init;test_sbfake_lockgrab=ReadOnly;test_sbfake_hang=Init'
+           'test_sbfake_clnhang=Init;test_sbfake_lockgrab=ReadOnly;test_sbfake_hang=Init;test_sbfake_clnsurv=Init'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: cleanup NOT_VERIFIED.
@@ -1970,6 +1990,55 @@ foreach ($c in @(@('baseline', $rCh1), @('no baseline', $rCh2))) {
     if ((Get-RanCount $c[1] '^RAN test_sbfake_ro ') -ne 1) { $chBad += "$($c[0]): later test did not run" }
 }
 tc_check 'TEST-HILGATE-112-cleanup-failure-printed-before-a-timeout-stays-failed-timeout-verdict-kept' ($chBad.Count -eq 0) ($chBad -join ' ### ')
+
+# --- Run CS (#458, PR #485 r4629829999 / r4628406514): a timed-out tree that SURVIVES keeps its pipes open ----------------
+# The fake flushes a cleanup failure to stdout and a diagnostic line to stderr, then keeps running past its timeout; the
+# runner leaves it running (AVB_TEST_SANDBOX_LEAVE_RUNNING), so its output never reaches EOF.  CS1 with the runner
+# baseline, CS2 without one.  Each property is verified separately (113-117); the survivors are killed afterwards.
+$csLine  = '[CLEANUP:FAILED] TC-SBFAKE-003: restore write failed before the tree survived'
+$csErr   = 'sbfake-stderr: diagnostic written before the tree survived'
+$tClnSurv = New-Fake 'test_sbfake_clnsurv' ("[Console]::Out.WriteLine('  $csLine'); [Console]::Out.Flush()`r`n" +
+                                            "[Console]::Error.WriteLine('$csErr'); [Console]::Error.Flush()`r`nStart-Sleep -Seconds 20")
+$csEnv = @{ AVB_TEST_SANDBOX_LEAVE_RUNNING = 'test_sbfake_clnsurv' }
+$csRuns = [ordered]@{}
+$csRuns['CS1 baseline'] = Invoke-Sandbox 'runCS1' @($tClnSurv, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv $csEnv
+$csRuns['CS2 no baseline'] = Invoke-Sandbox 'runCS2' @($tClnSurv, $tUns, $tInit, $tRo) -Timeout 5 -AllSupportedEnabled -ExtraEnv ($csEnv + @{ AVB_TEST_ADAPTER_STATE_FILE = (Join-Path $Tmp 'no-such-state-CS2.json') })
+$csRec = [ordered]@{}
+foreach ($k in $csRuns.Keys) {
+    $csRec[$k] = @(Get-ExecRecords $csRuns[$k] 'test_sbfake_clnsurv') | Select-Object -First 1
+    foreach ($s in @(if ($csRec[$k] -and $csRec[$k].PSObject.Properties['survivors']) { $csRec[$k].survivors })) { Stop-Process -Id ([int]$s.pid) -Force -ErrorAction SilentlyContinue }
+}
+$b113 = @(); $b114 = @(); $b115 = @(); $b116 = @(); $b117 = @()
+foreach ($k in $csRuns.Keys) {
+    $r = $csRuns[$k]; $rec = $csRec[$k]
+    if (-not $rec) { foreach ($v in 'b113', 'b114', 'b115', 'b116') { Set-Variable -Name $v -Value (@(Get-Variable -Name $v -ValueOnly) + "${k}: no executed record") }; continue }
+    # 113: the output the test already emitted stays in the evidence - its log (stdout AND stderr) and the console.
+    $lp = [string](Get-Prop $rec 'logPath'); $logText = if ($lp -and (Test-Path -LiteralPath $lp)) { Get-Content -LiteralPath $lp -Raw } else { '' }
+    foreach ($want in $csLine, $csErr) {
+        if ($logText.IndexOf($want) -lt 0) { $b113 += "${k}: log '$lp' lacks '$want'" }
+        if ($r.Out.IndexOf($want) -lt 0) { $b113 += "${k}: console lacks '$want'" }
+    }
+    # 114: cleanup stays FAILED with the original line as observation.
+    $cl = Get-CleanupOf $rec
+    if ((Get-Prop $cl 'outcome') -ne 'FAILED' -or @(@(Get-Prop $cl 'observations') | Where-Object { $_ -match [regex]::Escape($csLine) }).Count -ne 1) { $b114 += "${k}: cleanup '$(Get-Prop $cl 'outcome')' observations [$(@(Get-Prop $cl 'observations') -join ' | ')]" }
+    # 115: the functional result stays FAILED(TIMEOUT), its own row.
+    if ((Get-Prop $rec 'verdict') -ne 'FAILED(TIMEOUT)') { $b115 += "${k}: verdict '$(Get-Prop $rec 'verdict')'" }
+    # 116: the current survivor information is retained (disposition HALT, survivors with PID and start time).
+    $sv = @(if ($rec.PSObject.Properties['survivors']) { $rec.survivors })
+    if ((Get-Disposition $rec) -ne 'HALT' -or $sv.Count -lt 1 -or -not ($sv[0].pid) -or -not ($sv[0].startTimeUtc)) { $b116 += "${k}: disposition $(Get-Disposition $rec), survivors $($sv.Count)" }
+    # 117: independent runnable work continues under the published ownership rules - ReadOnly runs, the non-ReadOnly items
+    #      are BLOCKED only by the live operation (current evidence), never by the earlier result.
+    if ((Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1) { $b117 += "${k}: ReadOnly did not run" }
+    foreach ($f in 'unsafe', 'init') {
+        if ((Get-RanCount $r "^RAN test_sbfake_$f ") -ne 0 -or $r.Out -notmatch "TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_$f\.ps1: state-integrity halt \(live competing operation[^\r\n]*test_sbfake_clnsurv") { $b117 += "${k}: $f not decided by the live operation" }
+    }
+}
+$csTail = (($csRuns.Keys | ForEach-Object { "$_ :: " + (Tail $csRuns[$_]) }) -join ' ### ')
+tc_check 'TEST-HILGATE-113-surviving-tree-output-already-emitted-stays-in-the-evidence-stdout-and-stderr' ($b113.Count -eq 0) (($b113 -join '; ') + ' ### ' + $csTail)
+tc_check 'TEST-HILGATE-114-surviving-tree-cleanup-failure-stays-failed-with-its-line' ($b114.Count -eq 0) (($b114 -join '; ') + ' ### ' + $csTail)
+tc_check 'TEST-HILGATE-115-surviving-tree-functional-result-stays-failed-timeout' ($b115.Count -eq 0) ($b115 -join '; ')
+tc_check 'TEST-HILGATE-116-surviving-tree-survivor-information-retained' ($b116.Count -eq 0) ($b116 -join '; ')
+tc_check 'TEST-HILGATE-117-surviving-tree-independent-work-continues-under-ownership-rules' ($b117.Count -eq 0) ($b117 -join '; ')
 
 # --- Run V (#458): an UNBASELINED machine record is missing baseline evidence ("state unknown", contract E), no veto ---
 $sfUnb = Join-Path $Tmp 'safety_unbaselined.json'

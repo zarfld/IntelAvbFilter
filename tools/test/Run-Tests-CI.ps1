@@ -577,8 +577,13 @@ $HardwareIntegrationTests = @(
     "test_dev_lifecycle --init-retry-fault",  # #313 UT-DEV-LIFECYCLE-002 / #412: Debug-only initialization fault, owned NIC
                                               # cycles, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety;
                                               # class-only dispatch policy is #458, not decided here
-    "test_dev_lifecycle --init-concurrent"    # #313 UT-DEV-INIT-CONCURRENT: overlap by the #412 HOLD, owned NIC cycles, bounded
+    "test_dev_lifecycle --init-concurrent",   # #313 UT-DEV-INIT-CONCURRENT: overlap by the #412 HOLD, owned NIC cycles, bounded
                                               # workers, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety
+    # #458 (Q 2026-11-19): exceptions apply at testcase level only; these standalone cases need neither interaction nor a
+    # long-duration lane, so they run automatically like every other entry (were program-level coverage gaps).  Each owns
+    # its setup, restoration and final-state report; a failure is recorded, never a reason to withhold it.
+    "test_ptp_phc_lifecycle",                 # UT-CORR-009: driver reinstall by process creation, restoration verified by the test
+    "test_control_device_lifecycle"           # TC-LCY-328: service stop/restart cycles, recovery verified by the test
 )
 
 # ===========================
@@ -598,7 +603,6 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
-    'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; not yet registered in an automatic suite list, open under #458; runnable by name, Unsafe needs no attendance or per-entry permission; #149 #317'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 64 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 512 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
@@ -615,7 +619,6 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
-    'test_control_device_lifecycle' = 'Unsafe: TC-LCY-328 stops and restarts the IntelAvbFilter service through ControlService and sc.exe; not yet registered in an automatic suite list, open under #458; runnable by name, Unsafe needs no attendance or per-entry permission; the testcase must verify the service recovery; the restart may interrupt the host network, which is not a reason to withhold it, #328 and #463'
     'test_device_idle_regression'   = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-29 - TC-LCY-IDLE-001 needs a user-initiated session lock or display-off transition inside its window and never triggers one itself, so unattended it can only end INCONCLUSIVE; needs an attended lane or an automated idle trigger, final verdict by Evaluate-IdleTransition.ps1, #328'
     'taef_tests'                    = 'Mutating: SET_TIMESTAMP and INIT_DEVICE, not target-aware; AvbTaefTests.dll is a TAEF module that needs the te.exe host, which this runner does not provide, and it is built only when the TAEF SDK is present'
     'integration_suite'             = 'Mutating: SET_TIMESTAMP and INIT_DEVICE, not target-aware; tests/integration/Makefile.mak links AvbIntegrationTests.exe into build\tests\integration, outside the runner test directory, and Build-Tests declares no Output for it'
@@ -831,7 +834,7 @@ $HilTestSafety = @{
     'taef_tests'                       = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE; declared gap (TAEF host)
     'integration_suite'                = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE; declared gap (output outside the runner directory)
     'target_time_test'                 = 'Mutating'   # SET_TARGET_TIME; declared gap (build disabled)
-    'test_control_device_lifecycle'    = 'Unsafe'     # ControlService STOP/START + sc.exe; declared gap
+    'test_control_device_lifecycle'    = 'Unsafe'     # ControlService STOP/START + sc.exe; HardwareIntegration (#458)
 }
 
 # ===========================
@@ -1964,6 +1967,35 @@ function Get-AvbTestTimeoutSeconds {
     return [Math]::Max($SuiteSeconds, $own)
 }
 
+# Incremental capture of one redirected stream (#458, PR #485 r4629829999), plain PowerShell (no compiled helper: a
+# per-process Add-Type cost about 250 ms in every runner start).  One ReadAsync is outstanding per stream; the runner
+# collects completed reads while it polls the process (Update-AvbStreamCapture) and waits for EOF only for a bounded
+# time (Wait-AvbStreamCapture).  A surviving timed-out tree (or a child that inherited the pipe) keeps the stream open,
+# so EOF may never come; the output received until then is kept - never replaced.
+function New-AvbStreamCapture {
+    param([System.IO.TextReader]$Reader)
+    return [pscustomobject]@{ Reader = $Reader; Text = [System.Text.StringBuilder]::new(); Chunk = (New-Object char[] 4096); Task = $null; Eof = $false }
+}
+function Update-AvbStreamCapture {
+    param($Capture)
+    while (-not $Capture.Eof) {
+        if ($null -eq $Capture.Task) { $Capture.Task = $Capture.Reader.ReadAsync($Capture.Chunk, 0, $Capture.Chunk.Length) }
+        if (-not $Capture.Task.IsCompleted) { return }
+        $n = if ($Capture.Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $Capture.Task.Result } else { 0 }
+        $Capture.Task = $null
+        if ($n -le 0) { $Capture.Eof = $true } else { [void]$Capture.Text.Append($Capture.Chunk, 0, $n) }
+    }
+}
+function Wait-AvbStreamCapture {
+    param($Capture, [int]$Milliseconds)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        Update-AvbStreamCapture $Capture
+        if ($Capture.Eof -or $sw.ElapsedMilliseconds -ge $Milliseconds) { return $Capture.Eof }
+        Start-Sleep -Milliseconds 20
+    }
+}
+
 # Stop-AvbProcessTree (timed-out test + every descendant, verified): tools/lib/NativeExit.ps1, shared with
 # Run-Tests-Elevated.ps1.
 
@@ -2907,10 +2939,10 @@ foreach ($WorkItem in $WorkItems) {
     $proc = [System.Diagnostics.Process]::Start($psi)
     $script:AvbItem.Executed = $true
 
-    # Capture output in background threads, stream to console and log.
-    $outLines = [System.Collections.Generic.List[string]]::new()
-    $outJob = $proc.StandardOutput.ReadToEndAsync()
-    $errJob = $proc.StandardError.ReadToEndAsync()
+    # Capture stdout and stderr incrementally (asynchronous reads collected while polling, New-AvbStreamCapture): what arrives is kept even if
+    # EOF never comes; written to the log and the console below.
+    $outCap = New-AvbStreamCapture -Reader $proc.StandardOutput
+    $errCap = New-AvbStreamCapture -Reader $proc.StandardError
 
     $timedOut  = $false
     # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
@@ -2919,7 +2951,13 @@ foreach ($WorkItem in $WorkItems) {
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
     if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }
     $timeoutMs = $itemTimeoutSeconds * 1000
-    if (-not $proc.WaitForExit($timeoutMs)) {
+    # Wait for exit while collecting output incrementally (bounded by the item timeout).
+    $waitSw = [System.Diagnostics.Stopwatch]::StartNew(); $exited = $false
+    while (-not ($exited = $proc.WaitForExit(50))) {
+        Update-AvbStreamCapture $outCap; Update-AvbStreamCapture $errCap
+        if ($waitSw.ElapsedMilliseconds -ge $timeoutMs) { break }
+    }
+    if (-not $exited) {
         # Sandbox only (tests/unit/ioctl/test_hil_safety_gate.ps1, #458): AVB_TEST_SANDBOX_LEAVE_RUNNING names fakes whose
         # timed-out tree is LEFT RUNNING - a real live process standing in for a tree that did not terminate (the test kills
         # it afterwards).  Every other item is terminated and verified by Stop-AvbProcessTree.
@@ -2931,9 +2969,18 @@ foreach ($WorkItem in $WorkItems) {
         $timedOut = $true
         Write-Fail "$exeName TIMEOUT after ${itemTimeoutSeconds}s --- $($script:AvbItem.Termination.Detail)"
     }
-    # A tree that is still running keeps its output open: bounded wait, never an indefinite block of the run (#458).
-    $outText  = if ($timedOut -and -not $outJob.Wait(3000)) { "[runner] output not complete: the timed-out process tree still holds it open ($($script:AvbItem.Termination.Detail))" } else { $outJob.Result }
-    $errText  = if ($timedOut -and -not $errJob.Wait(1000)) { '' } else { $errJob.Result }
+    # Bounded waits for EOF (#458, PR #485 r4629829999): a surviving timed-out tree, or a child that inherited the pipes
+    # after the test exited, keeps them open.  The output received until then is kept as is (stdout and stderr) and the
+    # missing EOF is noted after it - never a placeholder instead of the evidence.
+    $outEof = Wait-AvbStreamCapture $outCap $(if ($timedOut) { 3000 } else { 30000 })
+    $errEof = Wait-AvbStreamCapture $errCap $(if ($timedOut) { 1000 } else { 5000 })
+    $outText  = $outCap.Text.ToString()
+    $errText  = $errCap.Text.ToString()
+    if (-not ($outEof -and $errEof)) {
+        $held = (@($(if (-not $outEof) { 'stdout' }), $(if (-not $errEof) { 'stderr' })) | Where-Object { $_ }) -join ' and '
+        $outText += ("`n[runner] output capture incomplete: {0} still held open{1}; everything received until now is kept above" -f $held,
+                     $(if ($timedOut) { " by the timed-out process tree ($($script:AvbItem.Termination.Detail))" } else { ' after the test process exited (a child holds the pipe)' }))
+    }
     $exitCode = if ($timedOut) { -999 } else { $proc.ExitCode }
 
     # Write captured output to log and display on console.

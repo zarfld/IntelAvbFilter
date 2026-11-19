@@ -323,13 +323,23 @@ $BenchmarkTests = @(
     }
 
     $FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
-    $BlackList = @("test_s3_sleep_wake.exe","test_vv_corr_001_stability.exe")
+    # Testcase-level exceptions only (#458, Q 2026-11-19): a program is skipped only for an identified case that needs
+    # interaction or a long-duration lane, with that reason shown and recorded NOT_EXECUTED (nonpassing); every other built
+    # program runs.  Neither program supports case selection, so the identified case decides for the program.
+    $Exceptions = [ordered]@{
+        'test_s3_sleep_wake.exe'         = 'TC-S3-002 puts the host into S3 and no unattended wake facility exists; TC-S3-003..005 measure after that wake and TC-S3-001 is their baseline'
+        'test_vv_corr_001_stability.exe' = 'VV-CORR-001 requires a 24-hour run and no long-duration lane exists'
+    }
     
     foreach ($t in $FullSuite) {
-        if ($BlackList -contains $t.Name) { continue }
+        if ($Exceptions.Contains($t.Name)) {
+            Write-Host "[NOT_EXECUTED] $Configuration $($t.Name): $($Exceptions[$t.Name])" -ForegroundColor Yellow
+            $ProgramRuns += [pscustomobject]@{ Configuration = $Configuration; Name = [System.IO.Path]::GetFileNameWithoutExtension($t.Name); Exit = $null; Note = "NOT_EXECUTED: $($Exceptions[$t.Name])" }
+            continue
+        }
         $global:LASTEXITCODE = $null
         .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration
-        $ProgramRuns += [pscustomobject]@{ Configuration = $Configuration; Name = [System.IO.Path]::GetFileNameWithoutExtension([string]$t); Exit = $global:LASTEXITCODE }
+        $ProgramRuns += [pscustomobject]@{ Configuration = $Configuration; Name = [System.IO.Path]::GetFileNameWithoutExtension([string]$t); Exit = $global:LASTEXITCODE; Note = '' }
     }
 
 }
@@ -351,9 +361,10 @@ foreach ($r in $SuiteRuns) {
 }
 # The per-program loop (each program through Run-Tests-Elevated.ps1, its own log): a missing exit code is a failure.
 foreach ($r in $ProgramRuns) {
-    $ok = Test-AvbExitSuccess $r.Exit
+    $ok = (-not $r.Note) -and (Test-AvbExitSuccess $r.Exit)
     if (-not $ok) { $NonPassing++ }
-    Write-Host ("  {0,-8} program {1,-30} exit {2}" -f $r.Configuration, $r.Name, (Format-AvbExitCode $r.Exit)) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+    $detail = if ($r.Note) { $r.Note } else { "exit $(Format-AvbExitCode $r.Exit)" }
+    Write-Host ("  {0,-8} program {1,-30} {2}" -f $r.Configuration, $r.Name, $detail) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
 }
 $runCount = $SuiteRuns.Count + $ProgramRuns.Count
 if ($NonPassing -gt 0) { Write-Host "[FAIL] FullSuite: $NonPassing of $runCount suite/program run(s) not passing" -ForegroundColor Red; exit 1 }

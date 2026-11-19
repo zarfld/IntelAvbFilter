@@ -644,6 +644,25 @@ if ($rF.Out -notmatch 'program test_dummy[^\r\n]*exit 1') { $fsBad += 'per-progr
 if ($rF.Exit -ne 1) { $fsBad += "exit $($rF.Exit), expected 1" }
 tc_check 'TEST-LOCALSUITES-034-fullsuite-continues-after-failed-build-suite-and-program-failures-stay-in-the-summary' ($fsBad.Count -eq 0) (($fsBad -join ' ### ') + ' -- ' + (Format-Orch $rF))
 
+# 035 (#458, Q 2026-11-19): FullSuite's per-program loop skips only the identified exceptions, shows each reason (its case
+#      and requirement) and records it NOT_EXECUTED in the summary; every other built program still runs.
+$ft35 = New-OrchTree 'fsTree35' 'FullSuite.ps1'
+foreach ($cfg in 'Debug', 'Release') {
+    $bd = Join-Path $ft35 "build\tools\avb_test\x64\$cfg"; New-Item -ItemType Directory -Path $bd -Force | Out-Null
+    foreach ($x in 'test_s3_sleep_wake.exe', 'test_vv_corr_001_stability.exe', 'test_other.exe') { Set-Content -LiteralPath (Join-Path $bd $x) -Value 'stub' }
+}
+# Build-Tests (stub) recreates its own program; these three were placed beside it beforehand and stay.
+$r35 = Invoke-OrchTree $ft35 ".\tools\archive\deprecated\FullSuite.ps1; exit `$LASTEXITCODE" @{}
+$b35 = @()
+foreach ($cfg in 'Debug', 'Release') {
+    foreach ($p in 'test_other', 'test_dummy') { if ($r35.Calls -notcontains "ELEVATED-PROGRAM $cfg $p") { $b35 += "$cfg ${p}: not run" } }
+    foreach ($p in 'test_s3_sleep_wake', 'test_vv_corr_001_stability') { if ($r35.Calls -contains "ELEVATED-PROGRAM $cfg $p") { $b35 += "$cfg ${p}: identified exception was run" } }
+    if ($r35.Out -notmatch "$cfg\s+program test_s3_sleep_wake[^\r\n]*NOT_EXECUTED[^\r\n]*TC-S3-002") { $b35 += "$cfg test_s3_sleep_wake: no NOT_EXECUTED summary row naming TC-S3-002" }
+    if ($r35.Out -notmatch "$cfg\s+program test_vv_corr_001_stability[^\r\n]*NOT_EXECUTED[^\r\n]*24-hour") { $b35 += "$cfg test_vv_corr_001_stability: no NOT_EXECUTED summary row naming the 24-hour requirement" }
+}
+if ($r35.Exit -ne 1) { $b35 += "exit $($r35.Exit), expected 1 (not executed exceptions keep the run nonpassing)" }
+tc_check 'TEST-LOCALSUITES-035-fullsuite-skips-only-identified-exceptions-shows-their-reason-and-runs-every-other-program' ($b35.Count -eq 0) (($b35 -join ' ### ') + ' -- ' + (Format-Orch $r35))
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
