@@ -62,7 +62,8 @@ param(
 
     # Evidence root of earlier suites of the same HIL job (hil.yml: RUNNER_TEMP\hil-evidence).  A halt there
     # (TIMEOUT without terminated tree / INFRA / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe
-    # BLOCKED.  Cleanup results of earlier suites never halt (Q 2026-10-28).
+    # BLOCKED.  Cleanup results of earlier suites never halt (Q 2026-10-28), nor do their baseline-observation INFRA
+    # rows (missing baseline evidence, #458).
     [Parameter(Mandatory=$false)]
     [string]$PriorResultsDir = "",
 
@@ -426,8 +427,8 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_tas_query_clean --invalid -- invalid versioned TAS_ACTIVATE requests on 0x80C, legacy function-71 phase (#368), then its own NIC cycle.  Unsafe (#368).
 #   test_tas_query_clean --restore -- TAS_ACTIVATE HOLD, NIC cycle, reported restoration and PHC (#377).  Unsafe (#377).
 #   test_tas_query_clean --link-speed -- NIC cycle, query link_speed_mbps against GetIfEntry2 (#472, K8).  Unsafe (#472).
-#   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
-#   entry, outside GitHub Actions, on an operator-attended machine.
+#   Unsafe entries are dispatched like every classified entry (#458), listed or named in -Tests, attended or under
+#   GitHub Actions; only the state-integrity halt (lock ownership, an unterminated timed-out tree, ...) blocks them.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
@@ -633,10 +634,13 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 #   Mutating:Target changes state only on the adapter named by AVB_HIL_TARGET_DID (AvbTestSelectTarget or the
 #                   shared AvbEnumerateAdapters filter) --- run once per supported, enabled adapter; once with the
 #                   test's own selection when no exact target is available
-#   Unsafe          NIC / driver administration (disable, enable, restart, reinstall) --- BLOCKED unless
-#                   AVB_HIL_AUTHORIZE_UNSAFE names the exact entry; never under GitHub Actions
+#   Unsafe          NIC / driver administration (disable, enable, restart, reinstall) --- runs like Init/Mutating
+#                   (#458: a description of state-changing effects, not an execution veto; no attendance or per-entry
+#                   authorization requirement, under GitHub Actions or attended)
 #   Unknown         no reviewable source --- BLOCKED
-# Init, Mutating and Mutating:Target are blocked only by the runtime state-integrity halt (Set-HilHalt).
+# Init, Mutating, Mutating:Target and Unsafe are blocked only by the runtime state-integrity halt (Set-HilHalt): machine
+# lock not owned or lost, a timed-out process tree that did not terminate, and the machine/prior-suite conditions it keeps.
+# Missing baseline evidence (UNBASELINED record, unobservable runner baseline) is no halt (#458).
 # The table is checked against the suite lists and the sources by tests/unit/ioctl/test_hil_safety_gate.ps1.
 # Init entries run unattended too (Q 2026-11-03: INIT_DEVICE is a valid prerequisite; the 2026-10-21 temporary policy
 # exclusion for GitHub Actions is removed).  INIT_DEVICE re-initializes the targeted adapter's PTP block (I226:
@@ -1100,10 +1104,12 @@ $stateHalt           = ''      # non-empty: every later non-ReadOnly test is BLO
 $HilTargets          = @()     # exact-target DIDs ('0x125B') for Mutating:Target entries
 $HilSupported        = @{}
 $HilBaseline         = $null
+$HilBaselineMissing  = ''      # non-empty: the runner baseline is not observable (why); no halt (#458), restoration NOT_VERIFIED
 $UnderGitHubActions  = ($env:GITHUB_ACTIONS -eq 'true')
-$HilAuthorizedUnsafe = @()
+# #458: AVB_HIL_AUTHORIZE_UNSAFE is no input of the dispatch decision (Unsafe is no execution veto).  A wrapper or an
+# operator may still set it (Run-Tests-Elevated.ps1, LocalSuites): the run says so instead of ignoring it silently.
 if ($env:AVB_HIL_AUTHORIZE_UNSAFE) {
-    $HilAuthorizedUnsafe = @($env:AVB_HIL_AUTHORIZE_UNSAFE -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    Write-Note "AVB_HIL_AUTHORIZE_UNSAFE is set ('$($env:AVB_HIL_AUTHORIZE_UNSAFE)') but has no effect on dispatch (#458): Unsafe entries are decided like every classified entry; machine-lock ownership and the state-integrity halt decide"
 }
 
 function Format-AvbDid { param([int]$Value) return ('0x{0:X4}' -f $Value) }
@@ -1764,6 +1770,9 @@ function Get-AvbPriorHalt {
                 $r.timeoutDisposition -in @('TERMINATED_STATE_VERIFIED', 'TERMINATED')) { continue }
             # CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows (a test's own verdict, or an older runner's cleanup row) are
             # cleanup observations, not loss of control: they never carry over (Q 2026-10-28).
+            # #458: that suite's baseline observation (TC-INFRA-STATE-000, TC-INFRA-ADAPTER-*) is missing baseline evidence,
+            # not loss of control - no carried halt; this suite observes its own baseline.
+            if ($r.verdict -eq 'INFRA_FAILURE' -and [string]$r.reason -match '^\[INFRA_FAILURE\] TC-INFRA-(ADAPTER-\d{3}|STATE-000)\b') { continue }
             if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
         }
     }
@@ -1991,25 +2000,15 @@ function Get-AvbHilTestClass {
 
 # Pure decision: 'Run' | 'Block' (+ Reason).  Q 2026-11-03: no static pre-execution block for Init, Mutating or a
 # Mutating:Target item without an exact target (it runs with its own adapter selection); only the runtime halt blocks them.
+# #458 (Q 2026-11-17 / 2026-11-19): Unsafe is a description of state-changing effects, not an execution veto - it is decided
+# exactly like Init/Mutating.  Attendance and authorization strings are deliberately no inputs: neither can change the
+# treatment of an unowned or lost machine lock or of a live competing operation (both arrive as $Halt).
 function Get-AvbHilGateDecision {
-    param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt,
-          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions)
-    $haltReason = "state-integrity halt ($Halt)"
+    param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt)
     switch ($Class) {
         'ReadOnly' { return @{ Action = 'Run'; Reason = '' } }
-        { $_ -in @('Init', 'Mutating', 'Mutating:Target') } {
-            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
-            return @{ Action = 'Run'; Reason = '' }
-        }
-# no Blocking!!!! issue #458
-        'Unsafe' {
-            if ($UnderGitHubActions) {
-                return @{ Action = 'Run'; Reason = 'Unsafe (NIC/driver administration); AVB_HIL_AUTHORIZE_UNSAFE is ignored under GitHub Actions' }
-            }
-            if ($AuthorizedUnsafe -notcontains $Entry) {
-                return @{ Action = 'Run'; Reason = 'Unsafe (NIC/driver administration); requires AVB_HIL_AUTHORIZE_UNSAFE to name this exact entry on an operator-attended run' }
-            }
-            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
+        { $_ -in @('Init', 'Mutating', 'Mutating:Target', 'Unsafe') } {
+            if ($Halt) { return @{ Action = 'Block'; Reason = "state-integrity halt ($Halt)" } }
             return @{ Action = 'Run'; Reason = '' }
         }
         'Unknown' { return @{ Action = 'Block'; Reason = 'classified Unknown (no reviewable source)' } }
@@ -2230,6 +2229,13 @@ function Test-AvbHilNeedsProvenance {
     return (-not [System.IO.Path]::GetFullPath($ArtifactPath).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
 }
 
+# Missing baseline evidence (#458, Q 2026-11-19): recorded and reported, never a halt - every testcase establishes its own
+# prerequisites; the runner's restoration verdict of each executed item is NOT_VERIFIED (Invoke-HilPostTestCheck).
+function Set-HilBaselineMissing([string]$Why) {
+    $script:HilBaselineMissing = if ($script:HilBaselineMissing) { "$($script:HilBaselineMissing); $Why" } else { $Why }
+    Write-Host "  [STATE] no runner baseline: $Why --- missing baseline evidence is no dispatch veto (#458); the runner's restoration verdict of every executed item is NOT_VERIFIED" -ForegroundColor Yellow
+}
+
 function Invoke-HilBaseline {
     Write-Step "HIL safety gate: adapter + PHC baseline (observation only; the runner never enables, disables or rebinds an adapter)"
     try {
@@ -2237,7 +2243,7 @@ function Invoke-HilBaseline {
     } catch {
         Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-ADAPTER' `
             -Line "[INFRA_FAILURE] TC-INFRA-ADAPTER-000: supported-adapter set unavailable: $($_.Exception.Message)"
-        Set-HilHalt 'supported-adapter set unavailable'
+        Set-HilBaselineMissing "supported-adapter set unavailable: $($_.Exception.Message)"
         return
     }
     $b = Get-AvbHilState
@@ -2245,13 +2251,15 @@ function Invoke-HilBaseline {
     if (-not $b.Ok) {
         Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-STATE' `
             -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: adapter state not observable at baseline: $($b.Error)"
-        Set-HilHalt 'adapter state not observable at baseline'
+        Set-HilBaselineMissing "adapter state not observable at baseline: $($b.Error)"
     }
     if (-not $b.ClockOk) {
         Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-STATE' `
             -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: PHC clock state not observable at baseline: $($b.ClockError)"
-        Set-HilHalt 'PHC clock state not observable at baseline'
+        Set-HilBaselineMissing "PHC clock state not observable at baseline: $($b.ClockError)"
     }
+    # Without readable adapter state there is nothing to evaluate per adapter (it would claim "no supported adapter").
+    if (-not $b.Ok) { $script:HilTargets = @(); return }
     $healthy = @()
     $n = 0
     $supportedPresent = 0
@@ -2329,7 +2337,19 @@ function Set-HilTimeoutDisposition {
 # After every executed test (also after a timeout kill).
 function Invoke-HilPostTestCheck {
     param([string]$Display, [string]$Class, [bool]$TimedOut, [string]$Output)
-    if ($null -eq $script:HilBaseline) { return }
+    if ($null -eq $script:HilBaseline -or -not $script:HilBaseline.Ok -or -not $script:HilBaseline.ClockOk) {
+        # #458: no runner baseline (missing baseline evidence) never blocked this item, and it must not hide what follows
+        # it: a timed-out tree still gets its termination disposition (an unterminated one halts), and the runner reports
+        # its restoration as NOT_VERIFIED - FAILED when the test itself reported its cleanup as failed.  Never SUCCESS.
+        if ($TimedOut) { Set-HilTimeoutDisposition -Display $Display -Class $Class -StateVerified $false -Last $null }
+        $selfLines = @(if (-not $TimedOut) { [regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() } })
+        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
+        Add-AvbCleanupResult -Display $Display -Class $Class -Required $(if ($Class -eq 'ReadOnly') { 'NO' } else { 'UNKNOWN' }) `
+            -Outcome $(if ($selfFail) { 'FAILED' } else { 'NOT_VERIFIED' }) -Observations $selfLines `
+            -Reason ("no runner baseline ({0}) --- the runner cannot compare this item's end state{1}" -f $script:HilBaselineMissing,
+                     $(if ($selfFail) { '; the test reported its own cleanup as failed' } elseif ($TimedOut) { '; timed out' } else { '' }))
+        return
+    }
     $cur = Get-AvbHilState
     $cmp = Compare-AvbHilState $script:HilBaseline $cur
     $first = @($cmp.Diffs)
@@ -2527,7 +2547,11 @@ function Test-AvbHilLockStillOwned {
 
 if ($IsHardwareSuite) {
     Invoke-HilBaseline
-    if ($HilSafetyState.State -ne 'CLEAR') { Set-HilHalt "machine safety record $($HilSafetyState.State): $($HilSafetyState.Why)" }
+    # UNBASELINED = no authorized hardware baseline: missing baseline evidence ("state unknown", contract E), no veto (#458).
+    # HALTED (unrecovered loss-of-control events) and UNAVAILABLE (they cannot be excluded) keep the halt.
+    if ($HilSafetyState.State -eq 'UNBASELINED') {
+        Write-Host "  [SAFETY-RECORD] UNBASELINED: $($HilSafetyState.Why) --- missing baseline evidence, no dispatch veto (#458); no session baseline is established from it and PHC judgements without hardware-derived tolerances stay inconclusive" -ForegroundColor Yellow
+    } elseif ($HilSafetyState.State -ne 'CLEAR') { Set-HilHalt "machine safety record $($HilSafetyState.State): $($HilSafetyState.Why)" }
     # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
     # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
     if ($PriorResultsDir) {
@@ -2749,8 +2773,7 @@ foreach ($WorkItem in $WorkItems) {
             $still = Test-AvbHilLockStillOwned
             if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
         }
-        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt `
-                    -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions
+        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt
         if ($gate.Action -ne 'Run') {
             Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
             continue
@@ -2813,6 +2836,11 @@ foreach ($WorkItem in $WorkItems) {
     $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
         $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
+        # Sandbox only (tests/unit/ioctl/test_hil_safety_gate.ps1, #458): AVB_TEST_SANDBOX_TERMINATION_UNEVIDENCED names
+        # fakes whose tree, killed above, is then treated as not evidenced terminated (a live competing operation).
+        if ($IsSandbox -and @(([string]$env:AVB_TEST_SANDBOX_TERMINATION_UNEVIDENCED) -split ';' | ForEach-Object { $_.Trim() }) -contains (Get-HilBinName $TestName)) {
+            $script:AvbItem.Termination = @{ Ok = $false; Detail = "sandbox: termination treated as not evidenced ($($script:AvbItem.Termination.Detail))" }
+        }
         $timedOut = $true
         Write-Fail "$exeName TIMEOUT after ${itemTimeoutSeconds}s --- $($script:AvbItem.Termination.Detail)"
     }
