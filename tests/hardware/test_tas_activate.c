@@ -44,7 +44,9 @@
  *              COMMIT   under #365's R7 order a header-valid PASS completes STATUS_NOT_IMPLEMENTED, Information 0, before the
  *                       metadata, schedule, link and tier checks and before any register or PHC access, until ADR-TSN-003
  *                       (#363). Measured against the proved-clean pre-state: the TAS record stays CLEAN, the restoration set
- *                       (DES 12.5) stays as captured, and a reported generation stays unchanged (0 is neither a value nor
+ *                       (DES 12.5) stays as captured register by register (a register unread in either reply is a missing
+ *                       measurement and never suppresses the comparison of the others, PR #484), and a reported generation
+ *                       stays unchanged (0 is neither a value nor
  *                       evidence of no change). SKIP_NOT_IMPLEMENTED only for that completion with every applicable
  *                       observation established, never PASS. STATUS_INVALID_DEVICE_REQUEST (0x80C not served), any other
  *                       completion or output, or a measured change is FAIL, also STATE_CONFLICT with zero metadata (PASS
@@ -759,6 +761,48 @@ static unsigned restoration_set_differing(const AVB_TAS_REGS *a, const AVB_TAS_R
     return n;
 }
 
+/** The restoration set register by register (PR #484 r4626979931): every register whose read_failed bit is clear in both valid
+ *  replies is compared and each difference printed and counted; every other register is counted and printed as unread. A
+ *  register unread in one reply never suppresses the comparison of the others. Without two valid replies all 17 are unread */
+static void restoration_set_compare(const QUERY_READ *a, const QUERY_READ *b, unsigned *differing, unsigned *unread)
+{
+    static const char *const names[17] = { "TQAVCTRL", "BASET_L", "BASET_H", "QBVCYCLET", "QBVCYCLET_S", "STQT0", "STQT1", "STQT2",
+                                           "STQT3", "ENDQT0", "ENDQT1", "ENDQT2", "ENDQT3", "TXQCTL0", "TXQCTL1", "TXQCTL2", "TXQCTL3" };
+    avb_u32 va[17], vb[17], failed;
+    unsigned bit;
+    int i;
+
+    *differing = 0;
+    *unread = 0;
+    if (!query_valid(a) || !query_valid(b)) {
+        *unread = 17;
+        printf("    [EVIDENCE] restoration set: no valid query reply %s, none of the 17 registers measured\n",
+               query_valid(a) ? "after" : "before");
+        return;
+    }
+    va[0] = a->q.regs.tqavctrl; va[1] = a->q.regs.baset_l; va[2] = a->q.regs.baset_h; va[3] = a->q.regs.qbvcyclet;
+    va[4] = a->q.regs.qbvcyclet_s;
+    vb[0] = b->q.regs.tqavctrl; vb[1] = b->q.regs.baset_l; vb[2] = b->q.regs.baset_h; vb[3] = b->q.regs.qbvcyclet;
+    vb[4] = b->q.regs.qbvcyclet_s;
+    for (i = 0; i < 4; i++) {
+        va[5 + i] = a->q.regs.stqt[i];   vb[5 + i] = b->q.regs.stqt[i];
+        va[9 + i] = a->q.regs.endqt[i];  vb[9 + i] = b->q.regs.endqt[i];
+        va[13 + i] = a->q.regs.txqctl[i]; vb[13 + i] = b->q.regs.txqctl[i];
+    }
+    failed = (a->q.regs.read_failed | b->q.regs.read_failed) & TAS_RESTORATION_SET_BITS;
+    for (bit = 0; bit < 17; bit++) {
+        if (failed & (1u << bit)) {
+            (*unread)++;
+            printf("    [EVIDENCE] restoration set: %s unread (%s%s%s), not compared\n", names[bit],
+                   (a->q.regs.read_failed & (1u << bit)) ? "before" : "", ((a->q.regs.read_failed & b->q.regs.read_failed) & (1u << bit)) ? " and " : "",
+                   (b->q.regs.read_failed & (1u << bit)) ? "after" : "");
+        } else if (va[bit] != vb[bit]) {
+            (*differing)++;
+            printf("    [EVIDENCE] restoration set: %s before=0x%08X after=0x%08X\n", names[bit], va[bit], vb[bit]);
+        }
+    }
+}
+
 /**
  * Primary cleanup and restoration: NIC cycle, then everything this test can observe without raw register access. Closes h.
  * Restoration follows #361 (tas_act_restore): schedule registers, TSN mode, driver record and the wire decide it; the PHC is
@@ -1376,8 +1420,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         QUERY_READ qa;
         DWORD information = 0;
         LONG st;
-        BOOL state_ok, regs_measured, gen_reported, gen_measured;
-        unsigned differing = 0;
+        BOOL state_ok, gen_reported, gen_measured;
+        unsigned differing = 0, unread = 0;
         char viol[700], miss[300], reason[1100];
 
         if (wire) { wire_stop(); }
@@ -1396,12 +1440,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         if (state_ok) { print_state("after the PASS request", &s); }
         query(h, &qa);
         print_query("after the PASS request", &qa);
-        regs_measured = restoration_set_valid(&qbefore) && restoration_set_valid(&qa);
-        if (regs_measured) {
-            differing = restoration_set_differing(&qbefore.q.regs, &qa.q.regs);
-            printf("    [EVIDENCE] restoration set (DES 12.5, BASET_L/H included): %u of 17 registers differ from the pre-state query\n",
-                   differing);
-        }
+        restoration_set_compare(&qbefore, &qa, &differing, &unread);
+        printf("    [EVIDENCE] restoration set (DES 12.5, BASET_L/H included): %u of %u compared registers differ from the pre-state "
+               "query, %u of 17 unread\n", differing, 17u - unread, unread);
         gen_reported = query_valid(&qbefore) && qbefore.q.generation != 0;
         gen_measured = gen_reported && query_valid(&qa) && qa.q.generation != 0;
         if (!gen_reported) {
@@ -1431,11 +1472,16 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             sprintf_s(reason, sizeof(reason), "; the TAS record is not CLEAN (armed=%u)", s.armed);
             strcat_s(viol, sizeof(viol), reason);
         }
-        if (!regs_measured) {
-            strcat_s(miss, sizeof(miss), "; the restoration set was not measured (no valid set in the query before and after)");
-        } else if (differing != 0) {
-            sprintf_s(reason, sizeof(reason), "; %u restoration-set register(s) differ from the pre-state query (listed above)", differing);
+        /* Each register on its own (PR #484 r4626979931): a measured difference is a violation whatever else is unread, and
+         * unread registers are a missing measurement whatever was found in the others */
+        if (differing != 0) {
+            sprintf_s(reason, sizeof(reason), "; %u measured restoration-set register(s) differ from the pre-state query (listed above)",
+                      differing);
             strcat_s(viol, sizeof(viol), reason);
+        }
+        if (unread != 0) {
+            sprintf_s(reason, sizeof(reason), "; %u of 17 restoration-set register(s) unread before or after (listed above)", unread);
+            strcat_s(miss, sizeof(miss), reason);
         }
         if (gen_reported && !gen_measured) {
             strcat_s(miss, sizeof(miss), "; the generation was reported before the request but not after it");
