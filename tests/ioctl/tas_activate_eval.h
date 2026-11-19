@@ -201,3 +201,88 @@ static __inline const char *tas_act_phc_name(TAS_ACT_PHC_FACT p)
 {
     return p == TAS_ACT_PHC_CONTINUOUS ? "CONTINUOUS" : (p == TAS_ACT_PHC_DISCONTINUOUS ? "DISCONTINUOUS" : "UNMEASURED");
 }
+
+/* ---- #482 TEST-TASACT-FAULT-001 F2 classification (pure; TC-MOCK-058 / TC-MOCK-059 in tests/unit/test_tas_restore_contract.c).
+ * The caller (tests/hardware/test_tas_activate.c --fault-versioned) maps each class to its verdict line and reason. ---- */
+typedef enum {
+    TAS_FV_STATE_DIRTY = 0,          /* PASS: the fault ran and the record is DIRTY */
+    TAS_FV_STATE_NOT_DIRTY,          /* FAIL: the fault ran and the record is not DIRTY */
+    TAS_FV_STATE_UNREAD,             /* INCONCLUSIVE: the record (GET_TAS_STATE) was not read */
+    TAS_FV_STATE_CHANGED_UNREACHED,  /* FAIL: the fault path was not reached, yet the record or a restoration-set register changed */
+    TAS_FV_STATE_NOT_EXERCISED       /* INCONCLUSIVE: the fault path was not reached and nothing measured changed */
+} TAS_FV_STATE_CLASS;
+
+/* fault_ran: the F2 fault completion was observed; record_read/armed: GET_TAS_STATE after the request; differing: restoration-set
+ * registers measured different from the pre-state query. A measured change while the fault path was not reached is a violation
+ * before anything else is considered: an unread record must not hide it (PR #489 review r4631805746). */
+static __inline TAS_FV_STATE_CLASS tas_fv_f2_state(BOOL fault_ran, BOOL record_read, avb_u32 armed, unsigned differing)
+{
+    if (!fault_ran && (differing != 0 || (record_read && armed != AVB_TAS_STATE_CLEAN))) {
+        return TAS_FV_STATE_CHANGED_UNREACHED;
+    }
+    if (!record_read) {
+        return TAS_FV_STATE_UNREAD;
+    }
+    if (fault_ran) {
+        return armed == AVB_TAS_STATE_DIRTY ? TAS_FV_STATE_DIRTY : TAS_FV_STATE_NOT_DIRTY;
+    }
+    return TAS_FV_STATE_NOT_EXERCISED;
+}
+
+/* The further otherwise-valid activation after F2's failure (#482, #369's rule for this probe) */
+typedef struct {
+    BOOL not_served;           /* completed STATUS_INVALID_DEVICE_REQUEST */
+    BOOL status_unavailable;   /* the raw NTSTATUS was not captured */
+    BOOL accepted;             /* completed STATUS_SUCCESS */
+    BOOL output;               /* Information != 0 */
+    BOOL state_refusal;        /* completed STATUS_INVALID_DEVICE_STATE */
+    BOOL record_before;        /* GET_TAS_STATE read after the fault request ... */
+    avb_u32 armed_before;      /* ... and its value */
+    BOOL record_after;         /* GET_TAS_STATE read after the further request ... */
+    avb_u32 armed_after;       /* ... and its value */
+    unsigned differing;        /* restoration-set registers measured different: post-failure query vs after the further request */
+    unsigned unread;           /* restoration-set registers not read in either query (17 when a query failed) */
+    BOOL fault_ran;            /* the F2 fault completion was observed */
+    BOOL metadata_reported;    /* the further request carried a non-zero generation and epoch */
+} TAS_FV_REFUSE_EVIDENCE;
+
+typedef enum {
+    TAS_FV_REFUSE_PASS = 0,                 /* PASS */
+    TAS_FV_REFUSE_NOT_SERVED,               /* FAIL: 0x80C not served */
+    TAS_FV_REFUSE_STATUS_UNAVAILABLE,       /* INCONCLUSIVE */
+    TAS_FV_REFUSE_CHANGED,                  /* FAIL: accepted, output, or a measured change */
+    TAS_FV_REFUSE_OTHER_STATUS,             /* FAIL: refused with another status */
+    TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED,  /* INCONCLUSIVE: the unchanged state is not established by the measurement */
+    TAS_FV_REFUSE_NOT_DIRTY,                /* INCONCLUSIVE: the DIRTY precondition was not established */
+    TAS_FV_REFUSE_METADATA_ZERO             /* INCONCLUSIVE: generation or epoch 0, NOT_CLEAN cannot be told from STATE_CONFLICT */
+} TAS_FV_REFUSE_CLASS;
+
+static __inline TAS_FV_REFUSE_CLASS tas_fv_f2_refuse(const TAS_FV_REFUSE_EVIDENCE *e)
+{
+    BOOL records = e->record_before && e->record_after;
+    /* "unchanged" is measured only when every restoration-set register was read in both queries (PR #489 review r4631805812) */
+    BOOL kept = records && e->armed_after == e->armed_before && e->differing == 0 && e->unread == 0;
+
+    if (e->not_served) {
+        return TAS_FV_REFUSE_NOT_SERVED;
+    }
+    if (e->status_unavailable) {
+        return TAS_FV_REFUSE_STATUS_UNAVAILABLE;
+    }
+    if (e->accepted || e->output || (records && e->armed_after != e->armed_before) || e->differing != 0) {
+        return TAS_FV_REFUSE_CHANGED;
+    }
+    if (!e->state_refusal) {
+        return TAS_FV_REFUSE_OTHER_STATUS;
+    }
+    if (!kept) {
+        return TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED;
+    }
+    if (!e->fault_ran || e->armed_before != AVB_TAS_STATE_DIRTY) {
+        return TAS_FV_REFUSE_NOT_DIRTY;
+    }
+    if (!e->metadata_reported) {
+        return TAS_FV_REFUSE_METADATA_ZERO;
+    }
+    return TAS_FV_REFUSE_PASS;
+}
