@@ -755,6 +755,9 @@ jobs:
     # This includes: GitHub-hosted (Debug+Release), self-hosted hardware (Debug+Release)
     # for both HardwareUnit and HardwareIntegration suites.
     needs: [github-issues-generation, unit-tests, integration-tests]
+    # #458 (comment 7008463710): runs after failed test jobs too (their artifacts are uploaded with if: always());
+    # earlier failures stay failures in the aggregate gate (compliance-report).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -990,6 +993,9 @@ jobs:
     name: Integration Tests (${{ matrix.os }}, ${{ matrix.config }})
     runs-on: ${{ matrix.os }}
     needs: [unit-tests]
+    # #458 (comment 7008463710): an independent test job - it builds its own binaries and runs after a failed Unit job
+    # too; the Unit failure stays a failure in the aggregate gate (compliance-report).
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       checks: write
@@ -1296,6 +1302,9 @@ jobs:
     name: Acceptance Tests (XP - Customer Tests, IEEE 1012)
     runs-on: ubuntu-latest
     needs: [integration-tests]
+    # #458 (comment 7008463710): independent customer tests run after a failed earlier test job too; that failure stays a
+    # failure in the aggregate gate (compliance-report).
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       issues: read

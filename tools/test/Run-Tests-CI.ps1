@@ -60,10 +60,10 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ResultsJson = "",
 
-    # Evidence root of earlier suites of the same HIL job (hil.yml: RUNNER_TEMP\hil-evidence).  A halt there
-    # (TIMEOUT without terminated tree / INFRA / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe
-    # BLOCKED.  Cleanup results of earlier suites never halt (Q 2026-10-28), nor do their baseline-observation INFRA
-    # rows (missing baseline evidence, #458).
+    # Evidence root of earlier suites of the same HIL job or local run (hil.yml: RUNNER_TEMP\hil-evidence).  #458
+    # (comment 7008463710): their results are reported as evidence and never block this run.  A process they name (a
+    # survivor of a timed-out tree that did not terminate, an earlier runner's pid) is a conflict for non-ReadOnly items
+    # only while it is running now (checked before each item).
     [Parameter(Mandatory=$false)]
     [string]$PriorResultsDir = "",
 
@@ -598,7 +598,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
-    'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
+    'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; not yet registered in an automatic suite list, open under #458; runnable by name, Unsafe needs no attendance or per-entry permission; #149 #317'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 64 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 512 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
@@ -615,7 +615,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
-    'test_control_device_lifecycle' = 'Unsafe: TC-LCY-328 stops and restarts the IntelAvbFilter service through ControlService and sc.exe; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; the testcase must verify the service recovery; the restart may interrupt the host network, which is not a reason to withhold it, #328 and #463'
+    'test_control_device_lifecycle' = 'Unsafe: TC-LCY-328 stops and restarts the IntelAvbFilter service through ControlService and sc.exe; not yet registered in an automatic suite list, open under #458; runnable by name, Unsafe needs no attendance or per-entry permission; the testcase must verify the service recovery; the restart may interrupt the host network, which is not a reason to withhold it, #328 and #463'
     'test_device_idle_regression'   = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-29 - TC-LCY-IDLE-001 needs a user-initiated session lock or display-off transition inside its window and never triggers one itself, so unattended it can only end INCONCLUSIVE; needs an attended lane or an automated idle trigger, final verdict by Evaluate-IdleTransition.ps1, #328'
     'taef_tests'                    = 'Mutating: SET_TIMESTAMP and INIT_DEVICE, not target-aware; AvbTaefTests.dll is a TAEF module that needs the te.exe host, which this runner does not provide, and it is built only when the TAEF SDK is present'
     'integration_suite'             = 'Mutating: SET_TIMESTAMP and INIT_DEVICE, not target-aware; tests/integration/Makefile.mak links AvbIntegrationTests.exe into build\tests\integration, outside the runner test directory, and Build-Tests declares no Output for it'
@@ -638,9 +638,10 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 #                   (#458: a description of state-changing effects, not an execution veto; no attendance or per-entry
 #                   authorization requirement, under GitHub Actions or attended)
 #   Unknown         no reviewable source --- BLOCKED
-# Init, Mutating, Mutating:Target and Unsafe are blocked only by the runtime state-integrity halt (Set-HilHalt): machine
-# lock not owned or lost, a timed-out process tree that did not terminate, and the machine/prior-suite conditions it keeps.
-# Missing baseline evidence (UNBASELINED record, unobservable runner baseline) is no halt (#458).
+# Init, Mutating, Mutating:Target and Unsafe are blocked only by CURRENT conditions checked before each item (#458): the
+# machine lock not owned by this execution now, a live competing operation now (a still-running survivor of a timed-out
+# tree, an earlier runner still running), and the run-level not-elevated halt.  Earlier results of this or another suite,
+# the machine safety record and missing baseline evidence are reported, never a veto.
 # The table is checked against the suite lists and the sources by tests/unit/ioctl/test_hil_safety_gate.ps1.
 # Init entries run unattended too (Q 2026-11-03: INIT_DEVICE is a valid prerequisite; the 2026-10-21 temporary policy
 # exclusion for GitHub Actions is removed).  INIT_DEVICE re-initializes the targeted adapter's PTP block (I226:
@@ -894,8 +895,10 @@ $HilTestTimeoutSeconds = [ordered]@{
     # 278 s and 297 s standalone; one Unit run timed out at 300.5 s.  Same rule: 297 s + 48 % = 440 s -> 450 s.  A hung
     # run of this test is detected after 450 s instead of 300 s (each sandbox run keeps its own 300 s guard inside the
     # test).  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095).  No issue-level requirement fixes
-    # this value; the testing contract requires every unattended process to be bounded.
-    'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 450
+    # this value; the testing contract requires every unattended process to be bounded.  #458 round 2 (2026-11-19) added
+    # sandbox runs (orchestration continuation, live operations, ownership per item): 484 s standalone + 48 % = 716 s
+    # -> 750 s.
+    'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 750
 }
 # Per-adapter budget for an entry whose one process runs the adapters one after another (PR #397 R14).  Process timeout =
 # Seconds x the adapters the driver enumerated in the latest observed state (Get-AvbHilState, re-read after every test),
@@ -1356,6 +1359,8 @@ function Get-AvbHilSandboxState {
     $st.Adapters = @(foreach ($a in @($j.adapters)) {
         New-AvbHilAdapter ([string]$a.InstanceId) ([string]$a.PnpStatus) ([int]$a.Problem) ([string]$a.AdminStatus) ([string]$a.MediaStatus) ([string]$a.FilterBound) ([string]$a.Name)
     })
+    # Optional clockError: adapter state observable, PHC clock state not (as a failed driver clock read).
+    if ($j.PSObject.Properties['clockError'] -and $j.clockError) { $st.ClockOk = $false; $st.ClockError = [string]$j.clockError; return $st }
     # Optional PhcOffsetNs: the sandbox PHC runs at the QPC rate with that offset (a fake "sets the PHC" by changing it);
     # absent = no PHC samples, i.e. no PHC window (exactly like a hardware read that returned no SYSTIM).
     $f = [double][System.Diagnostics.Stopwatch]::Frequency
@@ -1744,39 +1749,73 @@ function Add-HilFailureRecord {
     Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check -Incidents $Incidents
 }
 
-# Halt carried over from earlier suites of the same HIL job: '' or the reason.  Same stop rule as LocalSuites
-# (Get-AvbStopReason): FAILED(TIMEOUT) / INFRA_FAILURE / CLEANUP_FAILED record, a stateHalt, plus an unreadable results
-# document or a run-in-progress.json marker (that suite's runner died before completing: state unverified).
+# Earlier suites of the same run or job (#458, comment 7008463710, Q 2026-11-19): their results are EVIDENCE about those
+# attempts, never a veto on this run.  Returns @{ Notes; Live }: Notes = every non-passing record, state halt, unreadable
+# results document and killed-runner marker, reported by this run; Live = the processes such a record names (survivors of a
+# timed-out tree that did not terminate, with PID and start time; an earlier runner's PID from its run-in-progress marker).
+# A Live entry is a conflict only while that process is running NOW (Get-AvbHilLiveConflict, before each non-ReadOnly item).
 # Only this run's own results document is excluded - never a directory: LocalSuites' -PriorResultsDir lies inside the
 # runner's logs directory (TEST-HILGATE-069).  A run-in-progress.json found here is never this run's own: it is written
-# after this check, so it belongs to an earlier suite whose runner died.
-function Get-AvbPriorHalt {
+# after this check, so it belongs to an earlier suite whose runner died (or still runs).
+function Get-AvbPriorEvidence {
     param([string]$Dir, [string]$OwnResultsPath = '')
-    if (-not (Test-Path -LiteralPath $Dir)) { return '' }
+    $res = @{ Notes = @(); Live = @() }
+    if (-not (Test-Path -LiteralPath $Dir)) { return $res }
     $own = if ($OwnResultsPath) { [System.IO.Path]::GetFullPath($OwnResultsPath) } else { $null }
-    $why = @()
     # Name filter in Where-Object: Windows PowerShell 5.1 ignores -Include together with -LiteralPath, which made every
     # file in the directory (LocalSuites' console-*.log transcripts, its report, repro-*.json) a "results document".
     foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction Stop | Where-Object { $_.Name -like 'results-*.json' -or $_.Name -eq 'run-in-progress.json' })) {
         if ($own -and [string]::Equals($f.FullName, $own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-        if ($f.Name -eq 'run-in-progress.json') { $why += "$($f.Directory.Name) did not complete (runner process ended without results; hardware state unverified)"; continue }
-        try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
-        if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
+        if ($f.Name -eq 'run-in-progress.json') {
+            $m = try { Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $null }
+            $mPid = if ($m -and $m.PSObject.Properties['pid']) { [int]$m.pid } else { 0 }
+            $res.Notes += ("{0}: run-in-progress marker - that runner ended without a results document (hardware state unverified){1}" -f $f.Directory.Name,
+                           $(if ($mPid) { "; its pid $mPid is checked for liveness before each non-ReadOnly item" } else { '' }))
+            if ($mPid) { $res.Live += ,([ordered]@{ pid = $mPid; name = ''; startTimeUtc = ''; notAfterUtc = [string]$m.startedUtc; origin = "earlier runner $($m.suite)/$($m.configuration) (run-in-progress marker)" }) }
+            continue
+        }
+        try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $res.Notes += "unreadable results document $($f.Name)"; continue }
+        if ($d.stateHalt) { $res.Notes += "$($d.suite): state halt recorded: $($d.stateHalt)" }
         foreach ($r in @($d.records)) {
-            # D2, revised (Q 2026-10-28): a timeout whose process tree was terminated (TERMINATED_STATE_VERIFIED / TERMINATED,
-            # any class) stays FAILED in its own suite but is no halt; without a disposition (older runner, termination not
-            # evidenced) or with HALT (the tree did not terminate) it is.
-            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and $r.PSObject.Properties['timeoutDisposition'] -and
-                $r.timeoutDisposition -in @('TERMINATED_STATE_VERIFIED', 'TERMINATED')) { continue }
-            # CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows (a test's own verdict, or an older runner's cleanup row) are
-            # cleanup observations, not loss of control: they never carry over (Q 2026-10-28).
-            # #458: that suite's baseline observation (TC-INFRA-STATE-000, TC-INFRA-ADAPTER-*) is missing baseline evidence,
-            # not loss of control - no carried halt; this suite observes its own baseline.
-            if ($r.verdict -eq 'INFRA_FAILURE' -and [string]$r.reason -match '^\[INFRA_FAILURE\] TC-INFRA-(ADAPTER-\d{3}|STATE-000)\b') { continue }
-            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
+            if ($r.verdict -in @('PASSED', 'SKIPPED')) { continue }
+            $what = "$($d.suite): $($r.name)=$($r.verdict)"
+            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and -not ($r.PSObject.Properties['timeoutDisposition'] -and $r.timeoutDisposition -in @('TERMINATED_STATE_VERIFIED', 'TERMINATED'))) {
+                $sv = @(if ($r.PSObject.Properties['survivors']) { @($r.survivors) | Where-Object { $_ } })
+                if ($sv.Count -eq 0) { $what += ': termination not evidenced, no surviving process recorded' }
+                else {
+                    $what += (": termination not evidenced; surviving pid(s) {0} checked for liveness before each non-ReadOnly item" -f (($sv | ForEach-Object { $_.pid }) -join ', '))
+                    foreach ($s in $sv) { $res.Live += ,([ordered]@{ pid = [int]$s.pid; name = [string]$s.name; startTimeUtc = [string]$s.startTimeUtc; notAfterUtc = ''; origin = "$($d.suite) $($r.name) (timed out)" }) }
+                }
+            }
+            $res.Notes += $what
         }
     }
-    return ($why -join '; ')
+    return $res
+}
+
+# Live competing operations (#458): processes that may still act on the hardware - survivors of a timed-out tree of this
+# run or of an earlier suite, an earlier runner still running.  Decided from CURRENT evidence before each non-ReadOnly
+# item: the PID runs now with the recorded start time (or, for a runner marker, started no later than that run).  Ended
+# or PID-reused entries are dropped with a note.  '' = no current conflict.
+$HilLiveOps = @()
+function Get-AvbHilLiveConflict {
+    $keep = @(); $alive = @()
+    foreach ($o in @($script:HilLiveOps)) {
+        $p = Get-Process -Id ([int]$o.pid) -ErrorAction SilentlyContinue
+        $same = $false; $note = ''
+        if ($p) {
+            $st = $null; try { $st = $p.StartTime.ToUniversalTime() } catch { }
+            if ($null -eq $st) { $same = $true; $note = ' (start time unreadable)' }
+            elseif ($o.startTimeUtc) { $same = [Math]::Abs(($st - ([DateTime]::Parse([string]$o.startTimeUtc)).ToUniversalTime()).TotalSeconds) -le 2 }
+            elseif ($o.notAfterUtc) { $same = $st -le ([DateTime]::Parse([string]$o.notAfterUtc)).ToUniversalTime().AddSeconds(2) }
+            else { $same = $true }
+        }
+        if ($same) { $keep += ,$o; $alive += ("pid {0} ({1}) from {2} is still running{3}" -f $o.pid, $p.ProcessName, $o.origin, $note) }
+        else { Write-Host ("  [STATE] earlier operation pid {0} from {1} is no longer running{2} --- no conflict" -f $o.pid, $o.origin, $(if ($p) { ' (PID now used by another process)' } else { '' })) -ForegroundColor DarkGray }
+    }
+    $script:HilLiveOps = $keep
+    if ($alive.Count -gt 0) { return "live competing operation: $($alive -join '; ')" }
+    return ''
 }
 
 # Pure overall decision.  A required test not executed (coverage gap) or a testcase INCOMPLETE (SKIP_NOT_IMPLEMENTED)
@@ -1819,10 +1858,11 @@ function Format-HilIncidentRefs([object[]]$Refs) {
     return (' --- ' + ((@($Refs) | ForEach-Object { "incident $($_.IncidentId) $($_.Role)" }) -join '; '))
 }
 
-function Set-HilHalt {
-    # -Verdict: a safety event caused by the current item; it is persisted in the machine-wide safety record
-    # (tools/lib/HilLock.ps1) so every later run on this machine stays halted until an explicit verified recovery.
-    param([string]$Reason, [string]$Verdict = '', $Last = $null)
+# A loss-of-control event caused by the current item (LOCK_LOST, FAILED(TIMEOUT) with a tree that did not terminate),
+# persisted in the machine-wide safety record (tools/lib/HilLock.ps1) as evidence with its context.  Since #458 the
+# record is history reported by later runs, never a dispatch veto.
+function Save-HilSafetyEvent {
+    param([string]$Reason, [string]$Verdict, $Last = $null)
     if ($Verdict -and $script:IsHardwareSuite -and $script:HilSafetyPath) {
         $it = $script:AvbItem
         $ev = [ordered]@{ verdict = $Verdict; scope = 'GLOBAL'
@@ -1832,9 +1872,16 @@ function Set-HilHalt {
             initialState = $script:HilBaseline; lastKnownState = $Last
             evidence = @(@($(if ($it) { $it.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
         $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev
-        if ($pr.Ok) { Write-Host "  [SAFETY-RECORD] $Verdict persisted (event $($pr.EventId)); Init/Mutating stay BLOCKED on this machine until a verified recovery clears it" -ForegroundColor Red }
+        if ($pr.Ok) { Write-Host "  [SAFETY-RECORD] $Verdict persisted (event $($pr.EventId)) as evidence; later runs report it, it blocks nothing (#458)" -ForegroundColor Red }
         else { Write-Host "  [SAFETY-RECORD] NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
     }
+}
+
+# Run-level halt: since #458 only for a CURRENT condition of this process that is not decided per item (not elevated).
+# Ownership and live competing operations are checked per non-ReadOnly item; earlier results never halt.
+function Set-HilHalt {
+    param([string]$Reason, [string]$Verdict = '', $Last = $null)
+    if ($Verdict) { Save-HilSafetyEvent -Reason $Reason -Verdict $Verdict -Last $Last }
     if ($script:stateHalt) { return }
     $script:stateHalt = $Reason
     Write-Host "  [HALT] state-integrity halt: $Reason --- every later Init/Mutating/Unsafe test is BLOCKED; ReadOnly tests continue" -ForegroundColor Red
@@ -2233,7 +2280,7 @@ function Test-AvbHilNeedsProvenance {
 # prerequisites; the runner's restoration verdict of each executed item is NOT_VERIFIED (Invoke-HilPostTestCheck).
 function Set-HilBaselineMissing([string]$Why) {
     $script:HilBaselineMissing = if ($script:HilBaselineMissing) { "$($script:HilBaselineMissing); $Why" } else { $Why }
-    Write-Host "  [STATE] no runner baseline: $Why --- missing baseline evidence is no dispatch veto (#458); the runner's restoration verdict of every executed item is NOT_VERIFIED" -ForegroundColor Yellow
+    Write-Host "  [STATE] runner baseline incomplete: $Why --- missing baseline evidence is no dispatch veto (#458); the runner compares what it observed, what it could not observe is NOT_VERIFIED" -ForegroundColor Yellow
 }
 
 function Invoke-HilBaseline {
@@ -2320,16 +2367,28 @@ function Invoke-HilBaseline {
 }
 
 # Timed-out item (D2, revised Q 2026-10-28): the only loss of controlled execution here is a process tree that did NOT
-# terminate (an operation may still be outstanding): disposition HALT, persisted halt.  A terminated tree keeps
+# terminate (an operation may still be outstanding): disposition HALT, persisted event, and its surviving PIDs are a live
+# competing operation for later non-ReadOnly items while they run (#458; no run-level halt).  A terminated tree keeps
 # FAILED(TIMEOUT) as the test's own verdict and blocks nothing (TERMINATED_STATE_VERIFIED: ReadOnly with the observable
-# state unchanged; TERMINATED: otherwise - its restoration is reported as cleanup).  Get-AvbPriorHalt reads the same value.
+# state unchanged; TERMINATED: otherwise - its restoration is reported as cleanup).  Get-AvbPriorEvidence reads the same
+# value and the recorded survivors.
 function Set-HilTimeoutDisposition {
     param([string]$Display, [string]$Class, [bool]$StateVerified, $Last)
     $term = if ($script:AvbItem) { $script:AvbItem.Termination } else { $null }
     $disp = if (-not ($term -and $term.Ok)) { 'HALT' } elseif ($Class -eq 'ReadOnly' -and $StateVerified) { 'TERMINATED_STATE_VERIFIED' } else { 'TERMINATED' }
     if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = $disp }
     if ($disp -eq 'HALT') {
-        Set-HilHalt ("$Display ($Class) timed out and its process tree did not terminate: {0}" -f $(if ($term) { $term.Detail } else { 'termination not observed' })) -Verdict 'FAILED(TIMEOUT)' -Last $Last
+        # #458: no run-level halt.  The processes still running are recorded (PID + start time) and are a live competing
+        # operation for every later non-ReadOnly item while they run (Get-AvbHilLiveConflict re-checks before each item).
+        $survivors = @(foreach ($sp in @(if ($term -and $term.Contains('Alive')) { $term.Alive })) {
+            $p = Get-Process -Id ([int]$sp) -ErrorAction SilentlyContinue
+            if ($p) { [ordered]@{ pid = [int]$sp; name = $p.ProcessName; startTimeUtc = $(try { $p.StartTime.ToUniversalTime().ToString('o') } catch { '' }) } }
+        })
+        if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['survivors'] = @($survivors) }
+        foreach ($s in $survivors) { $script:HilLiveOps += ,([ordered]@{ pid = $s.pid; name = $s.name; startTimeUtc = $s.startTimeUtc; notAfterUtc = ''; origin = "$Display ($Class) timed out" }) }
+        $why = "$Display ($Class) timed out and its process tree did not terminate: $(if ($term) { $term.Detail } else { 'termination not observed' })"
+        Save-HilSafetyEvent -Reason $why -Verdict 'FAILED(TIMEOUT)' -Last $Last
+        Write-Host ("  [STATE] {0} --- surviving pid(s) [{1}] are a live competing operation while they run: every later non-ReadOnly item re-checks; ReadOnly tests continue" -f $why, (($survivors | ForEach-Object { $_.pid }) -join ', ')) -ForegroundColor Red
     } else {
         Write-Host ("  [STATE] after {0} ({1}): FAILED(TIMEOUT) kept; process tree terminated ({2}) --- later tests not halted" -f $Display, $Class, $term.Detail) -ForegroundColor Yellow
     }
@@ -2337,13 +2396,15 @@ function Set-HilTimeoutDisposition {
 # After every executed test (also after a timeout kill).
 function Invoke-HilPostTestCheck {
     param([string]$Display, [string]$Class, [bool]$TimedOut, [string]$Output)
-    if ($null -eq $script:HilBaseline -or -not $script:HilBaseline.Ok -or -not $script:HilBaseline.ClockOk) {
-        # #458: no runner baseline (missing baseline evidence) never blocked this item, and it must not hide what follows
-        # it: a timed-out tree still gets its termination disposition (an unterminated one halts), and the runner reports
-        # its restoration as NOT_VERIFIED - FAILED when the test itself reported its cleanup as failed.  Never SUCCESS.
+    if ($null -eq $script:HilBaseline -or -not $script:HilBaseline.Ok) {
+        # #458: adapter state not observable at baseline (missing baseline evidence) never blocked this item, and it must
+        # not hide what follows it: a timed-out tree still gets its termination disposition (survivors are a live
+        # operation), and the runner reports its restoration as NOT_VERIFIED - FAILED when the test itself reported its
+        # cleanup as failed, also before a timeout (PR #485 r4628406514).  Never SUCCESS.  A baseline whose adapter state
+        # is observable but whose PHC clock state is not is compared below for what it holds (PR #485 r4628406457).
         if ($TimedOut) { Set-HilTimeoutDisposition -Display $Display -Class $Class -StateVerified $false -Last $null }
-        $selfLines = @(if (-not $TimedOut) { [regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() } })
-        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
+        $selfLines = @([regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() })
+        $selfFail = ([string]$Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
         Add-AvbCleanupResult -Display $Display -Class $Class -Required $(if ($Class -eq 'ReadOnly') { 'NO' } else { 'UNKNOWN' }) `
             -Outcome $(if ($selfFail) { 'FAILED' } else { 'NOT_VERIFIED' }) -Observations $selfLines `
             -Reason ("no runner baseline ({0}) --- the runner cannot compare this item's end state{1}" -f $script:HilBaselineMissing,
@@ -2388,9 +2449,10 @@ function Invoke-HilPostTestCheck {
         # global halt, option 1).
         # The test's own cleanup report: a cleanup line ([CLEANUP:FAILED] / [CLEANUP:NOT_VERIFIED]; test_ptp_phc_lifecycle,
         # test_ptp_phc_stability, test_ioctl_tas) or the older CLEANUP_FAILED / RESTORE FAILED text.  Kept as observations.
-        $selfLines = @(if (-not $TimedOut) { [regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() } })
-        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
-        $selfNotVerified = (-not $TimedOut) -and -not $selfFail -and ($Output -match '(?m)^\s*\[CLEANUP:NOT_VERIFIED\]')
+        # A cleanup line printed before a timeout is the test's own report too (PR #485 r4628406514): kept as observation.
+        $selfLines = @([regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() })
+        $selfFail = ([string]$Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
+        $selfNotVerified = -not $selfFail -and ([string]$Output -match '(?m)^\s*\[CLEANUP:NOT_VERIFIED\]')
         $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
         $verifiableNow = @(Get-AvbHilVerifiableState -Base $script:HilBaseline -Cur $cur -Target $(if ($script:AvbItem -and $script:AvbItem.Target) { [string]$script:AvbItem.Target } else { '' }))
         $unobserved = @($declared | Where-Object { $verifiableNow -notcontains $_ })
@@ -2474,7 +2536,9 @@ if ($IsHardwareSuite) {
     # Exclusive hardware access: the machine lock must be OWNED by this execution (Resolve-AvbHilLockContext: same CI
     # run/attempt/job, or this process / an OS ancestor holds it) - its mere existence never authorizes.  Attended:
     # acquire it (bounded wait) when no owner context holds it, release it at completion.  GitHub Actions: never acquired
-    # here (the job's deploy step owns it); otherwise fail closed.  Not owned -> every Init/Mutating test BLOCKED.
+    # here (the job's deploy step owns it).  #458: not owned at start is no run-level halt - ownership is a CURRENT
+    # condition checked before each non-ReadOnly item (Get-AvbHilOwnershipConflict: attended runs re-try a free or stale
+    # lock, GitHub Actions never acquires); an item without ownership is BLOCKED, ReadOnly items run (existing exception).
     $HilLockPath = if ($IsSandbox -and $env:AVB_TEST_HIL_LOCK_FILE) { $env:AVB_TEST_HIL_LOCK_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil.lock' } else { Get-AvbHilLockPath }
     $HilGitHubContext = if ($UnderGitHubActions) { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null }
     $HilLockAcquired = $null
@@ -2484,10 +2548,11 @@ if ($IsHardwareSuite) {
     } elseif (-not $UnderGitHubActions) {
         $acq = Enter-AvbHilLock -Kind 'local' -Label "Run-Tests-CI $Suite $Configuration" -Path $HilLockPath -WaitSeconds $HilLockWaitSeconds
         if ($acq.Ok) { $HilLockAcquired = $acq.Owner; Write-Note "Machine lock acquired by this run ($HilLockPath); released at completion" }
-        else { Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why); not acquired within ${HilLockWaitSeconds}s: $($acq.Why)" }
+        else { Write-Note "machine lock not owned by this execution at start: $($lockCtx.Why); not acquired within ${HilLockWaitSeconds}s: $($acq.Why) --- each non-ReadOnly item re-checks ownership (#458)" }
     } else {
-        Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why) (an unattended run never acquires it)"
+        Write-Note "machine lock not owned by this execution at start: $($lockCtx.Why) (an unattended run never acquires it) --- each non-ReadOnly item re-checks ownership (#458)"
     }
+    $HilOwnershipHeld = [bool]($lockCtx.Owned -or $HilLockAcquired)
 
     # Policy reconciliation before the record is read (Q 2026-10-29): safety events persisted by the former rule for a
     # cleanup outcome (CLEANUP_FAILED / INCONCLUSIVE_RESTORATION) are reclassified as cleanup diagnostics - idempotent,
@@ -2545,18 +2610,46 @@ function Test-AvbHilLockStillOwned {
     return @{ Ok = $c.Owned; Why = $c.Why }
 }
 
+# Current exclusive ownership before a non-ReadOnly item (#458): '' = owned now; otherwise the BLOCKED reason for THIS item.
+# A loss of ownership held earlier in this run is recorded once (LOCK_LOST event).  Attended runs try to re-acquire a
+# free or stale lock without waiting (a live foreign owner keeps it); GitHub Actions never acquires (the job's deploy step
+# owns it).  The next item checks again: nothing is decided from an earlier item's result.
+function Get-AvbHilOwnershipConflict([string]$Before) {
+    $still = Test-AvbHilLockStillOwned
+    if ($still.Ok) { $script:HilOwnershipHeld = $true; return '' }
+    if ($script:HilOwnershipHeld) {
+        $lost = "machine lock lost during execution before ${Before}: $($still.Why)"
+        Write-Host "  [STATE] $lost" -ForegroundColor Red
+        Save-HilSafetyEvent -Reason $lost -Verdict 'LOCK_LOST'
+        $script:HilOwnershipHeld = $false; $script:HilLockAcquired = $null
+    }
+    if (-not $script:UnderGitHubActions) {
+        $acq = Enter-AvbHilLock -Kind 'local' -Label "Run-Tests-CI $Suite $Configuration" -Path $script:HilLockPath -WaitSeconds 0
+        if ($acq.Ok) {
+            $script:HilLockAcquired = $acq.Owner; $script:HilOwnershipHeld = $true
+            Write-Note "machine lock re-acquired by this run before ${Before} ($($script:HilLockPath)); released at completion"
+            return ''
+        }
+        return "machine lock not owned by this execution: $($still.Why); not acquired now: $($acq.Why)"
+    }
+    return "machine lock not owned by this execution: $($still.Why) (an unattended run never acquires it)"
+}
+
 if ($IsHardwareSuite) {
     Invoke-HilBaseline
-    # UNBASELINED = no authorized hardware baseline: missing baseline evidence ("state unknown", contract E), no veto (#458).
-    # HALTED (unrecovered loss-of-control events) and UNAVAILABLE (they cannot be excluded) keep the halt.
-    if ($HilSafetyState.State -eq 'UNBASELINED') {
-        Write-Host "  [SAFETY-RECORD] UNBASELINED: $($HilSafetyState.Why) --- missing baseline evidence, no dispatch veto (#458); no session baseline is established from it and PHC judgements without hardware-derived tolerances stay inconclusive" -ForegroundColor Yellow
-    } elseif ($HilSafetyState.State -ne 'CLEAR') { Set-HilHalt "machine safety record $($HilSafetyState.State): $($HilSafetyState.Why)" }
-    # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
-    # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
+    # #458 (comment 7008463710): the machine record is evidence, never a dispatch veto.  UNBASELINED = missing baseline
+    # evidence ("state unknown", contract E); HALTED = unrecovered loss-of-control events of EARLIER runs; UNAVAILABLE = the
+    # record cannot be read.  Reported; the record is never changed implicitly; no session baseline is established unless
+    # CLEAR (below).  Current ownership and live operations are checked per item.
+    if ($HilSafetyState.State -ne 'CLEAR') {
+        $kind = switch ($HilSafetyState.State) { 'UNBASELINED' { 'missing baseline evidence' } 'HALTED' { 'history of earlier runs' } default { 'record not readable' } }
+        Write-Host "  [SAFETY-RECORD] $($HilSafetyState.State): $($HilSafetyState.Why) --- $kind, reported; no dispatch veto (#458); no session baseline is established from it and PHC judgements without hardware-derived tolerances stay inconclusive" -ForegroundColor Yellow
+    }
+    # Earlier suites of the same run or job: evidence, reported; a process they name counts only while it runs NOW.
     if ($PriorResultsDir) {
-        $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnResultsPath $ResultsJsonPath
-        if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
+        $prior = Get-AvbPriorEvidence -Dir $PriorResultsDir -OwnResultsPath $ResultsJsonPath
+        foreach ($n in @($prior.Notes)) { Write-Host "  [PRIOR] $n --- evidence of that earlier attempt, kept; no veto on this run (#458)" -ForegroundColor Yellow }
+        $HilLiveOps += @($prior.Live)
     }
     # In-memory incident correlation, used only when no session record is available (Register-HilIncidents).
     $HilIncidents = [ordered]@{}
@@ -2598,7 +2691,8 @@ if ($IsHardwareSuite) {
     }
     if ($HilSessionNote) { Write-Note $HilSessionNote }
 
-    # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).  Next to
+    # Left behind only if this process dies before Complete-AvbRun; a later suite reports it and checks this pid for
+    # liveness (Get-AvbPriorEvidence, #458).  Next to
     # the results document: hil.yml per-suite LogsDir, LocalSuites' report directory (its -PriorResultsDir).
     $RunMarkerPath = Join-Path (Split-Path -Parent $ResultsJsonPath) 'run-in-progress.json'
     ([ordered]@{ suite = $Suite; configuration = $Configuration; pid = $PID; startedUtc = $AvbRunStartedUtc } | ConvertTo-Json) |
@@ -2660,7 +2754,6 @@ foreach ($t in $TestList) {
 
 Write-Step "Running $($TestList.Count) tests ($($WorkItems.Count) work items)"
 
-$driverLost = $false   # set when driver becomes inaccessible mid-suite
 
 foreach ($WorkItem in $WorkItems) {
     $TestName  = $WorkItem.Entry
@@ -2701,20 +2794,9 @@ foreach ($WorkItem in $WorkItems) {
     $script:AvbItem = @{ Entry = $TestName; Artifact = $exePath; Arguments = $testArgs; Target = $targetDid; Class = ''; Sha256 = $null; Provenance = $null
                          Executed = $false; ProcessExit = $null; LogPath = $null; StartedUtc = $null; DurationSeconds = $null; Output = $null }
 
-    # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
-    if ($driverLost) {
-        if ($IsMandatorySuite) {
-            Write-Fail "$exeName [INFRA-FAIL] driver lost --- #328 sentinel: remaining mandatory tests FAIL"
-            $failedTests++
-            $totalTests++
-            Add-AvbResult -Name $exeName -Status "FAILED(INFRA)" -Exit -1
-        } else {
-            Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
-            $skippedTests++
-            Add-AvbResult -Name $exeName -Status "SKIPPED(INFRA)" -Exit "N/A"
-        }
-        continue
-    }
+    # #458 (comment 7008463710): an earlier driver health failure is recorded where it occurred (TC-INFRA-HEALTH-001,
+    # FAILED(INFRA), #328 sentinel) and never stops this item: it executes and attempts its own setup (was: every later
+    # item FAILED(INFRA) / SKIPPED(INFRA) without execution).
 
     # A known hardware entry never runs outside a Hardware* suite: there is no baseline or gate there.
     if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey((ConvertTo-AvbHilEntryKey $TestName)) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
@@ -2769,11 +2851,14 @@ foreach ($WorkItem in $WorkItems) {
     if ($IsHardwareSuite) {
         $hilClass = Get-AvbHilTestClass $TestName
         $script:AvbItem.Class = $hilClass
-        if ($hilClass -ne 'ReadOnly' -and -not $stateHalt) {
-            $still = Test-AvbHilLockStillOwned
-            if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
+        # #458: current conditions for THIS item only - exclusive ownership now, no live competing operation now.  ReadOnly
+        # entries keep their existing exception (they run without ownership; not changed in this increment).
+        $itemConflict = ''
+        if ($hilClass -in @('Init', 'Mutating', 'Mutating:Target', 'Unsafe') -and -not $stateHalt) {
+            $itemConflict = Get-AvbHilOwnershipConflict -Before $exeName
+            if (-not $itemConflict) { $itemConflict = Get-AvbHilLiveConflict }
         }
-        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt
+        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $(if ($stateHalt) { $stateHalt } else { $itemConflict })
         if ($gate.Action -ne 'Run') {
             Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
             continue
@@ -2835,17 +2920,20 @@ foreach ($WorkItem in $WorkItems) {
     if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }
     $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
-        $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
-        # Sandbox only (tests/unit/ioctl/test_hil_safety_gate.ps1, #458): AVB_TEST_SANDBOX_TERMINATION_UNEVIDENCED names
-        # fakes whose tree, killed above, is then treated as not evidenced terminated (a live competing operation).
-        if ($IsSandbox -and @(([string]$env:AVB_TEST_SANDBOX_TERMINATION_UNEVIDENCED) -split ';' | ForEach-Object { $_.Trim() }) -contains (Get-HilBinName $TestName)) {
-            $script:AvbItem.Termination = @{ Ok = $false; Detail = "sandbox: termination treated as not evidenced ($($script:AvbItem.Termination.Detail))" }
+        # Sandbox only (tests/unit/ioctl/test_hil_safety_gate.ps1, #458): AVB_TEST_SANDBOX_LEAVE_RUNNING names fakes whose
+        # timed-out tree is LEFT RUNNING - a real live process standing in for a tree that did not terminate (the test kills
+        # it afterwards).  Every other item is terminated and verified by Stop-AvbProcessTree.
+        if ($IsSandbox -and @(([string]$env:AVB_TEST_SANDBOX_LEAVE_RUNNING) -split ';' | ForEach-Object { $_.Trim() }) -contains (Get-HilBinName $TestName)) {
+            $script:AvbItem.Termination = @{ Ok = $false; Detail = "sandbox: timed-out process tree left running (root pid $($proc.Id))"; Alive = @($proc.Id) }
+        } else {
+            $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
         }
         $timedOut = $true
         Write-Fail "$exeName TIMEOUT after ${itemTimeoutSeconds}s --- $($script:AvbItem.Termination.Detail)"
     }
-    $outText  = $outJob.Result
-    $errText  = $errJob.Result
+    # A tree that is still running keeps its output open: bounded wait, never an indefinite block of the run (#458).
+    $outText  = if ($timedOut -and -not $outJob.Wait(3000)) { "[runner] output not complete: the timed-out process tree still holds it open ($($script:AvbItem.Termination.Detail))" } else { $outJob.Result }
+    $errText  = if ($timedOut -and -not $errJob.Wait(1000)) { '' } else { $errJob.Result }
     $exitCode = if ($timedOut) { -999 } else { $proc.ExitCode }
 
     # Write captured output to log and display on console.
@@ -2944,7 +3032,6 @@ foreach ($WorkItem in $WorkItems) {
     # when the health check fails --- even when the preceding test PASSED --- so the
     # suite always exits non-zero on driver loss, not silently exit 0.
     if ($Suite -like 'Hardware*' -and -not (Invoke-DriverHealthCheck -AfterTest $exeName)) {
-        $driverLost = $true
         # Record driver identity at the point of failure for traceability.
         $drvVer   = if ($env:HIL_DRIVER_VERSION) { $env:HIL_DRIVER_VERSION } else { 'unknown' }
         $drvSha   = if ($env:HIL_DRIVER_SHA256)  { $env:HIL_DRIVER_SHA256.Substring(0, [Math]::Min(12, $env:HIL_DRIVER_SHA256.Length)) + '...' } else { 'unknown' }
@@ -2952,11 +3039,7 @@ foreach ($WorkItem in $WorkItems) {
         # Increment BOTH counters --- health check failure is a first-class test failure.
         $failedTests++
         $totalTests++
-        if ($IsMandatorySuite) {
-            Write-Fail "INFRA: $infraMsg --- mandatory suite aborting"
-        } else {
-            Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
-        }
+        Write-Fail "INFRA: $infraMsg --- recorded; every later test still runs and attempts its own setup (#458)"
         # Write a synthetic log file so Convert-Logs-To-JUnit / Parse-TestResults
         # can emit a <failure> element for this infrastructure failure in the JUnit XML.
         # TC-INFRA-HEALTH-001 matches the TC-* pattern accepted by Parse-TestResults.

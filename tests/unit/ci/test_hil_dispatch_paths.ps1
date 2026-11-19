@@ -566,6 +566,50 @@ if ($feText -notmatch 'PARTIAL / SMOKE') { $feBad += '-Quick not labelled as a p
 if ($feText -match 'Read-Host') { $feBad += 'interactive prompt still present' }
 tc_check 'TEST-HILPATH-019-run-tests-frontend-resolves-registered-entries-fails-closed-and-runs-every-suite' ($feBad.Count -eq 0) ($feBad -join '; ')
 
+# --- #458 (comment 7008463710, Q 2026-11-19): earlier failures never stop later independent tests at any layer ---------
+# 021 STATIC (workflow text, not a GitHub Actions run): an independent hosted test job runs after a failed earlier job.
+#     integration-tests, acceptance-tests and traceability-coverage keep their needs (order, artifacts) but run unless
+#     the workflow is cancelled; test matrices never cancel their sibling legs; in hil.yml every hardware suite step and the
+#     Release job run after an earlier failure (deployment of the staged package stays the essential input).
+function Get-YamlJobBlock([string]$Text, [string]$Job) {
+    $m = [regex]::Match($Text, "(?ms)^  $([regex]::Escape($Job)):\s*\r?\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*\r?\n|\z)")
+    if ($m.Success) { return $m.Groups[1].Value } else { return $null }
+}
+$ciBad = @()
+$ciText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml'))
+foreach ($j in 'integration-tests', 'acceptance-tests', 'traceability-coverage') {
+    $b = Get-YamlJobBlock $ciText $j
+    if ($null -eq $b) { $ciBad += "${j}: job not found"; continue }
+    $if = [regex]::Match($b, '(?m)^    if:\s*(.+)$')
+    if (-not $if.Success -or $if.Groups[1].Value -notmatch '!cancelled\(\)|always\(\)') { $ciBad += "${j}: no job-level if with !cancelled()/always() - skipped after a failed dependency ($(if ($if.Success) { $if.Groups[1].Value } else { 'no if' }))" }
+}
+foreach ($j in 'unit-tests', 'integration-tests') {
+    $b = Get-YamlJobBlock $ciText $j
+    if ($null -eq $b -or $b -notmatch '(?m)^      fail-fast:\s*false\s*$') { $ciBad += "${j}: matrix fail-fast is not false" }
+}
+$hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
+# Steps are split at their '- name:' lines (a step block may end in blank lines).
+$suiteSteps = @([regex]::Split($hilText, '(?m)^      - name:') | Where-Object { $_ -match '-Suite Hardware(Unit|Integration)\b' })
+if ($suiteSteps.Count -ne 4) { $ciBad += "hil.yml: expected 4 hardware suite steps (2 suites x 2 configurations), found $($suiteSteps.Count)" }
+foreach ($s in $suiteSteps) { if ($s -notmatch "(?m)^        if:\s*\$\{\{\s*!cancelled\(\)") { $ciBad += "hil.yml: a hardware suite step does not run after an earlier failure: $((($s -split "`n")[0]).Trim())" } }
+$rel = Get-YamlJobBlock $hilText 'hil-release'
+if ($null -eq $rel -or $rel -notmatch '(?m)^    if:\s*\$\{\{\s*!cancelled\(\)') { $ciBad += 'hil.yml: hil-release does not run after a failed hil-debug' }
+tc_check 'TEST-HILPATH-021-STATIC-ci-test-jobs-and-hil-suites-run-after-earlier-failures' ($ciBad.Count -eq 0) ($ciBad -join '; ')
+
+# 022 STATIC: Run-Tests.ps1 (needs elevation, so it is not executed offline) records a failed precondition check or a
+#     missing/empty test directory and still dispatches every suite; the only exit before dispatch is the elevation check.
+$rtAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'), [ref]$null, [ref]$null)
+$dispatchAt = $rtAst.Find({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$ReportDir' }, $true)
+$earlyExits = @(if ($dispatchAt) { $rtAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.ExitStatementAst] -and $x.Extent.StartOffset -lt $dispatchAt.Extent.StartOffset }, $true) })
+$rtBad = @()
+if (-not $dispatchAt) { $rtBad += 'dispatch section ($ReportDir assignment) not found' }
+foreach ($x in $earlyExits) {
+    $p = $x.Parent; while ($p -and -not ($p -is [System.Management.Automation.Language.IfStatementAst])) { $p = $p.Parent }
+    $cond = if ($p) { ($p.Clauses[0].Item1.Extent.Text -replace '\s+', ' ') } else { '(not inside an if)' }
+    if ($cond -notmatch 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)') { $rtBad += "line $($x.Extent.StartLineNumber): exit before dispatch ($cond)" }
+}
+tc_check 'TEST-HILPATH-022-STATIC-run-tests-frontend-records-precondition-and-binary-failures-and-still-dispatches' ($rtBad.Count -eq 0) ($rtBad -join '; ')
+
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
 if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILPATH: test binaries can be dispatched outside the authoritative HIL gates (characterization)" -ForegroundColor Red; exit 1 }

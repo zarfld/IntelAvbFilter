@@ -10,10 +10,12 @@ $HardwareSuites = @('HardwareUnit', 'HardwareIntegration')
 # test); per-test timeouts stay with Run-Tests-CI.ps1.
 $SuiteTimeoutSeconds = 21600
 . .\tools\lib\NativeExit.ps1
-# One directory per run: results documents of both configurations; -PriorResultsDir carries a halt forward.
+# One directory per run: results documents of both configurations; -PriorResultsDir gives later suites the earlier results
+# as evidence (reported, never a veto; only a process still running now is a conflict, #458).
 $RunDir = Join-Path (Resolve-Path .\logs).Path ("FullSuite_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
 $SuiteRuns = @()
+$ProgramRuns = @()   # the per-program loop's exit codes: part of the summary and the exit code (#458)
 $Configuration = "Debug"
 foreach ($Configuration in $Configurations){
 
@@ -307,7 +309,7 @@ $BenchmarkTests = @(
         $SuiteRuns += [pscustomobject]@{ Configuration = $Configuration; Suite = $Suite; Exit = $global:LASTEXITCODE; Results = $json; Note = '' }
     }
     # Hardware* suites elevated, whole registered suite each, DebugView capture around each suite run; every suite runs
-    # even after a failed one (a functional FAIL is evidence; a halt keeps later Init/Mutating tests BLOCKED).
+    # even after a failed one (an earlier failure is evidence, never a veto, #458).
     foreach ($Suite in $HardwareSuites) {
         $json = Join-Path $RunDir ("results-{0}-{1}.json" -f $Configuration, $Suite)
         if (-not $DriverReady) {
@@ -323,10 +325,12 @@ $BenchmarkTests = @(
     $FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
     $BlackList = @("test_s3_sleep_wake.exe","test_vv_corr_001_stability.exe")
     
-    foreach ($t in $FullSuite) { 
+    foreach ($t in $FullSuite) {
         if ($BlackList -contains $t.Name) { continue }
-        .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
-    } 
+        $global:LASTEXITCODE = $null
+        .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration
+        $ProgramRuns += [pscustomobject]@{ Configuration = $Configuration; Name = [System.IO.Path]::GetFileNameWithoutExtension([string]$t); Exit = $global:LASTEXITCODE }
+    }
 
 }
 
@@ -345,6 +349,13 @@ foreach ($r in $SuiteRuns) {
     if (-not $ok) { $NonPassing++ }
     Write-Host ("  {0,-8} {1,-20} exit {2,-6} {3}" -f $r.Configuration, $r.Suite, (Format-AvbExitCode $r.Exit), $detail) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
 }
-if ($NonPassing -gt 0) { Write-Host "[FAIL] FullSuite: $NonPassing of $($SuiteRuns.Count) suite run(s) not passing" -ForegroundColor Red; exit 1 }
-Write-Host "[PASS] FullSuite: all $($SuiteRuns.Count) suite runs passed" -ForegroundColor Green
+# The per-program loop (each program through Run-Tests-Elevated.ps1, its own log): a missing exit code is a failure.
+foreach ($r in $ProgramRuns) {
+    $ok = Test-AvbExitSuccess $r.Exit
+    if (-not $ok) { $NonPassing++ }
+    Write-Host ("  {0,-8} program {1,-30} exit {2}" -f $r.Configuration, $r.Name, (Format-AvbExitCode $r.Exit)) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+}
+$runCount = $SuiteRuns.Count + $ProgramRuns.Count
+if ($NonPassing -gt 0) { Write-Host "[FAIL] FullSuite: $NonPassing of $runCount suite/program run(s) not passing" -ForegroundColor Red; exit 1 }
+Write-Host "[PASS] FullSuite: all $runCount suite/program runs passed" -ForegroundColor Green
 exit 0

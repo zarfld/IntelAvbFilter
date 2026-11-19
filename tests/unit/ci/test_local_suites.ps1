@@ -290,24 +290,28 @@ Set-Content -LiteralPath '$seen' -Value "[`$env:AVB_HIL_AUTHORIZE_UNSAFE]" -Enco
 } catch { $authIssues += $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-030-unsafe-authorization-reaches-the-elevated-runner-unchanged-and-is-absent-when-not-set' ($authIssues.Count -eq 0) ($authIssues -join ' || ')
 
-# Manual runs are operator-attended (Q 2026-11-04): naming an entry here authorizes exactly that entry, on by default.
-# The gate in Run-Tests-CI.ps1 is unchanged and still ignores the variable under GitHub Actions.
+# #458 (Q 2026-11-19): Unsafe execution requires neither attendance nor per-entry permission, so naming an entry creates
+# no authorization (was: on by default).  An operator-set AVB_HIL_AUTHORIZE_UNSAFE is a compatibility variable only: it is
+# forwarded unchanged (030) and every message about it says it has no dispatch effect.
 $a31 = @(
-    @{ Existing = ''; Name = 'test_x'; Args = ''; Want = 'test_x' }
-    @{ Existing = ''; Name = 'test_x.exe'; Args = ''; Want = 'test_x' }
-    @{ Existing = ''; Name = 'test_x'; Args = '--case TC-1'; Want = 'test_x --case TC-1' }
-    @{ Existing = 'test_a,test_b'; Name = 'test_x'; Args = ''; Want = 'test_a,test_b,test_x' }
+    @{ Existing = ''; Name = 'test_x'; Args = ''; Want = '' }
+    @{ Existing = ''; Name = 'test_x.exe'; Args = ''; Want = '' }
+    @{ Existing = ''; Name = 'test_x'; Args = '--case TC-1'; Want = '' }
+    @{ Existing = 'test_a,test_b'; Name = 'test_x'; Args = ''; Want = 'test_a,test_b' }
     @{ Existing = 'test_x'; Name = 'test_x'; Args = ''; Want = 'test_x' }
     @{ Existing = 'test_a'; Name = ''; Args = ''; Want = 'test_a' }
     @{ Existing = ''; Name = ''; Args = ''; Want = '' }
-    @{ Existing = ''; Name = 'scan.ps1'; Args = ''; Want = '' }
 )
 $bad31 = @()
 foreach ($c in $a31) {
     $got = try { Get-AvbElevatedAuthorization -Existing $c.Existing -TestName $c.Name -TestArgs $c.Args } catch { "threw: $($_.Exception.Message)" }
     if ("$got" -cne $c.Want) { $bad31 += "existing='$($c.Existing)' name='$($c.Name)' args='$($c.Args)': got '$got', want '$($c.Want)'" }
 }
-tc_check 'TEST-LOCALSUITES-031-named-entry-is-authorized-by-default-on-manual-runs-and-the-existing-list-is-kept' ($bad31.Count -eq 0) ($bad31 -join ' || ')
+$elevTxt31 = Get-Content -LiteralPath $ElevPath -Raw
+$msg31 = @([regex]::Matches($elevTxt31, '(?m)^.*Write-Host[^\r\n]*AVB_HIL_AUTHORIZE_UNSAFE[^\r\n]*') | ForEach-Object { $_.Value })
+if ($msg31.Count -eq 0 -or @($msg31 | Where-Object { $_ -notmatch 'no dispatch effect' }).Count -gt 0) { $bad31 += "STATIC: wrapper messages about the variable must say 'no dispatch effect': [$($msg31 -join ' | ')]" }
+if ($elevTxt31 -match '(?i)authorizes exactly that entry|operator-attended') { $bad31 += 'STATIC: wrapper still describes manual runs as attended or entry-authorizing' }
+tc_check 'TEST-LOCALSUITES-031-named-entry-gets-no-authorization-an-operator-value-is-forwarded-with-no-dispatch-effect' ($bad31.Count -eq 0) ($bad31 -join ' || ')
 
 # STATIC, not runtime evidence: a literal at the call site passed every check above while the child received '1' (2026-11-04).
 $elevSrc = Get-Content -LiteralPath $ElevPath -Raw
@@ -513,6 +517,132 @@ $migrated = @('test_ioctl_version', 'test_ioctl_routing', 'test_ioctl_simple', '
 $lost = @($migrated | Where-Object { $hwDispatch -notcontains $_ })
 if ($lost.Count -gt 0) { $migBad += "former HardwareMandatory/HardwareMutation entries not dispatched by a hardware suite: $($lost -join ', ')" }
 tc_check 'TEST-LOCALSUITES-029-STATIC-every-migrated-entry-dispatched-exactly-once-by-a-hardware-suite' ($migBad.Count -eq 0) ($migBad -join ' ### ')
+
+# --- End-to-end orchestration (#458 comment 7008463710, Q 2026-11-19): earlier failures never stop later suites or
+#     configurations.  The REAL LocalSuites.ps1 / FullSuite.ps1 run from a temporary tree whose step scripts (driver and
+#     test build, install, pre-flight, Run-Tests-CI, Run-Tests-Elevated) are stubs that log each call and write
+#     avb-runner-results/1 documents; tools\lib\HilLock.ps1 is a stub (the real machine lock is never touched).  Nothing is
+#     built, installed or executed against hardware.  Behavioural evidence of the orchestration only, not of any test.
+function New-OrchTree([string]$Name, [string]$Script) {
+    $t = Join-Path $Tmp $Name
+    foreach ($d in 'tools\archive\deprecated', 'tools\lib', 'tools\build', 'tools\setup', 'tools\test', 'logs') { New-Item -ItemType Directory -Path (Join-Path $t $d) -Force | Out-Null }
+    Copy-Item (Join-Path $RepoRoot "tools\archive\deprecated\$Script") (Join-Path $t "tools\archive\deprecated\$Script")
+    Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $t 'tools\lib\NativeExit.ps1')
+    $log = 'Add-Content -LiteralPath $env:ORCH_CALLS -Value'
+    Set-Content -LiteralPath (Join-Path $t 'tools\lib\HilLock.ps1') -Encoding ASCII -Value @"
+function Enter-AvbHilLock { param([string]`$Kind, [string]`$Label, [string]`$Path, [int]`$WaitSeconds) $log 'LOCK enter'; return @{ Ok = `$true; Owner = [ordered]@{ kind = 'local'; label = `$Label; pid = `$PID }; PreviousOwner = `$null; Why = '' } }
+function Exit-AvbHilLock { param(`$Owner, [string]`$Path) $log 'LOCK exit'; return @{ Ok = `$true; Why = '' } }
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\build\Build-Driver.ps1') -Encoding ASCII -Value @"
+param([string]`$Configuration)
+$log "BUILD-DRIVER `$Configuration"
+if ((`$env:ORCH_FAIL_DRIVER -split ',') -contains `$Configuration) { exit 1 }
+`$d = Join-Path `$PSScriptRoot "..\..\build\x64\`$Configuration\IntelAvbFilter"; New-Item -ItemType Directory -Path `$d -Force | Out-Null
+Set-Content -LiteralPath (Join-Path `$d 'IntelAvbFilter.sys') -Value "stub `$Configuration"
+exit 0
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\build\Build-Tests.ps1') -Encoding ASCII -Value @"
+param([string]`$Configuration)
+$log "BUILD-TESTS `$Configuration"
+`$d = Join-Path `$PSScriptRoot "..\..\build\tools\avb_test\x64\`$Configuration"; New-Item -ItemType Directory -Path `$d -Force | Out-Null
+([ordered]@{ schemaVersion = 1; configuration = `$Configuration; provenanceMode = 'clean-commit'; sourceDigest = 'stub'; entries = @() } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path `$d 'test-build-manifest.json') -Encoding UTF8
+Set-Content -LiteralPath (Join-Path `$d 'test_dummy.exe') -Value 'stub'
+exit 0
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\setup\Install-Driver-Elevated.ps1') -Encoding ASCII -Value @"
+param([string]`$Configuration, [string]`$Action, [switch]`$CaptureDbgView)
+$log "INSTALL `$Configuration"
+if ((`$env:ORCH_FAIL_INSTALL -split ',') -contains `$Configuration) { exit 1 }
+exit 0
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\test\Test-DriverPreFlight.ps1') -Encoding ASCII -Value "$log 'PREFLIGHT'`r`nexit 0"
+    # One stub writes the runner's results document for Run-Tests-CI.ps1 and for Run-Tests-Elevated.ps1 -Suite.
+    $writer = @"
+`$fail = (`$env:ORCH_FAIL_SUITE -split ',') -contains "`$Configuration/`$Suite"
+`$recs = if (`$fail) { @([ordered]@{ name = 'test_t.exe'; entry = 'test_t'; arguments = ''; verdict = 'FAILED(TIMEOUT)'; status = 'FAILED(TIMEOUT)'; executed = `$true; check = `$false; exitCode = -999; safetyClass = 'Init'; targetDid = `$null; timeoutDisposition = 'HALT'; testcases = @(); reason = ''; logPath = '' },
+                        [ordered]@{ name = 'test_b.exe'; entry = 'test_b'; arguments = ''; verdict = 'INFRA_FAILURE'; status = 'FAILED(BUILD)'; executed = `$false; check = `$false; exitCode = `$null; safetyClass = 'ReadOnly'; targetDid = `$null; testcases = @(); reason = '[BUILD-FAIL] binary not found'; logPath = '' }) }
+         else { @([ordered]@{ name = 'test_ok.exe'; entry = 'test_ok'; arguments = ''; verdict = 'PASSED'; status = 'PASSED'; executed = `$true; check = `$false; exitCode = 0; safetyClass = 'ReadOnly'; targetDid = `$null; testcases = @(); reason = ''; logPath = '' }) }
+`$ec = if (`$fail) { 1 } else { 0 }
+if (`$ResultsJson) {
+    ([ordered]@{ schema = 'avb-runner-results/1'; suite = `$Suite; configuration = `$Configuration; overall = `$(if (`$fail) { 'FAILED' } else { 'PASSED' }); exitCode = `$ec
+                 executedCount = @(`$recs | Where-Object { `$_.executed }).Count; notExecutedCount = 0; evidenceClass = 'LOCAL_DIAGNOSTIC'; counts = [ordered]@{ PASSED = 1 }
+                 stateHalt = `$(if (`$fail) { 'machine lock lost during execution before test_b.exe' } else { '' }); records = @(`$recs) } | ConvertTo-Json -Depth 6) |
+        Set-Content -LiteralPath `$ResultsJson -Encoding UTF8
+}
+exit `$ec
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\test\Run-Tests-CI.ps1') -Encoding ASCII -Value @"
+param([string]`$Suite, [string]`$Configuration, [string]`$ResultsJson, [string]`$PriorResultsDir, [switch]`$LocalDiagnostic)
+$log "RUNCI `$Configuration `$Suite"
+$writer
+"@
+    Set-Content -LiteralPath (Join-Path $t 'tools\test\Run-Tests-Elevated.ps1') -Encoding ASCII -Value @"
+param([string]`$Suite, [string]`$Configuration = 'Debug', [string]`$TestName, [switch]`$CaptureDbgView, [string]`$ResultsJson, [string]`$PriorResultsDir, [int]`$TimeoutSeconds)
+if (-not `$Suite) {
+    `$n = [System.IO.Path]::GetFileNameWithoutExtension([string]`$TestName)
+    $log "ELEVATED-PROGRAM `$Configuration `$n"
+    if ((`$env:ORCH_FAIL_PROGRAM -split ',') -contains `$n) { exit 1 }
+    exit 0
+}
+$log "ELEVATED-SUITE `$Configuration `$Suite"
+$writer
+"@
+    # A repository of its own, so the orchestrator's 'git rev-parse HEAD' reads this tree, never the real checkout.
+    try { $null = & git -C $t init -q; $null = & git -C $t -c user.name=orch -c user.email=orch@example.invalid commit -q --allow-empty -m orch } catch { }
+    return $t
+}
+function Invoke-OrchTree([string]$Tree, [string]$Command, [hashtable]$Env) {
+    $calls = Join-Path $Tree 'calls.log'; if (Test-Path $calls) { Remove-Item $calls -Force }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'; $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$Command`""
+    $psi.WorkingDirectory = $Tree; $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+    foreach ($k in 'ORCH_FAIL_DRIVER', 'ORCH_FAIL_INSTALL', 'ORCH_FAIL_SUITE', 'ORCH_FAIL_PROGRAM', 'GITHUB_ACTIONS') { $psi.EnvironmentVariables.Remove($k) }
+    $psi.EnvironmentVariables['ORCH_CALLS'] = $calls
+    foreach ($k in $Env.Keys) { $psi.EnvironmentVariables[$k] = $Env[$k] }
+    $p = [System.Diagnostics.Process]::Start($psi); $p.StandardInput.Close()
+    $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(240000)) { $p.Kill(); return @{ Exit = -999; Out = 'TIMEOUT'; Calls = @() } }
+    return @{ Exit = $p.ExitCode; Out = ($o.Result + "`n" + $e.Result); Calls = @(if (Test-Path $calls) { Get-Content $calls }) }
+}
+function Format-Orch($r) { return ("exit {0}; calls: {1}; tail: {2}" -f $r.Exit, ($r.Calls -join ' / '), ((($r.Out -split "`n") | Select-Object -Last 15) -join ' | ')) }
+
+# 033: LocalSuites - a failed driver build (A) or driver installation (B) of the FIRST configuration does not stop the
+#      second: its hardware suites run, and a failed suite there does not stop the next suite.  The first configuration's
+#      suites are recorded NOT_EXECUTED with the reason (its own driver, an essential input, is absent), the second's
+#      failures stay in the inventory, and the run exits nonpassing.  (Was: break - Release never ran.)
+$lsBad = @()
+foreach ($sc in @(@{ Id = 'A'; Env = @{ ORCH_FAIL_DRIVER = 'Debug'; ORCH_FAIL_SUITE = 'Release/HardwareUnit' }; Why = 'driver build' },
+                  @{ Id = 'B'; Env = @{ ORCH_FAIL_INSTALL = 'Debug'; ORCH_FAIL_SUITE = 'Release/HardwareUnit' }; Why = 'install' })) {
+    $lt = New-OrchTree ("lsTree" + $sc.Id) 'LocalSuites.ps1'
+    $rd = Join-Path $lt 'report'
+    $r = Invoke-OrchTree $lt (".\tools\archive\deprecated\LocalSuites.ps1 -Configurations Debug,Release -NoReproduce -ReportDir '$rd'; exit `$LASTEXITCODE") $sc.Env
+    $rep = $null; $rp = Join-Path $rd 'local-suites-report.json'; if (Test-Path $rp) { $rep = Get-Content -LiteralPath $rp -Raw | ConvertFrom-Json }
+    foreach ($want in 'RUNCI Release HardwareUnit', 'RUNCI Release HardwareIntegration', 'INSTALL Release', 'PREFLIGHT') { if ($r.Calls -notcontains $want) { $lsBad += "$($sc.Id): '$want' never happened -- $(Format-Orch $r)" } }
+    if (@($r.Calls | Where-Object { $_ -like 'RUNCI Debug *' }).Count -ne 0) { $lsBad += "$($sc.Id): Debug suites ran against a driver that was not built/installed" }
+    if ($r.Exit -ne 1) { $lsBad += "$($sc.Id): exit $($r.Exit), expected 1 (nonpassing)" }
+    if (-not $rep) { $lsBad += "$($sc.Id): no local-suites-report.json"; continue }
+    $inv = @($rep.inventory)
+    $dbgNe = @($inv | Where-Object { $_.Configuration -eq 'Debug' -and $_.Verdict -eq 'NOT_EXECUTED' -and $_.Category -eq 'Failure' -and -not $_.Executed -and $_.Reason -match $sc.Why })
+    if (($dbgNe | ForEach-Object { $_.Suite } | Sort-Object) -join ',' -ne 'HardwareIntegration,HardwareUnit') { $lsBad += "$($sc.Id): Debug suites not recorded NOT_EXECUTED with the $($sc.Why) reason: $(@($inv | Where-Object { $_.Configuration -eq 'Debug' } | ForEach-Object { "$($_.Suite)=$($_.Verdict) '$($_.Reason)'" }) -join '; ')" }
+    foreach ($v in 'FAILED(TIMEOUT)', 'INFRA_FAILURE') { if (@($inv | Where-Object { $_.Configuration -eq 'Release' -and $_.Suite -eq 'HardwareUnit' -and $_.Verdict -eq $v }).Count -ne 1) { $lsBad += "$($sc.Id): Release HardwareUnit $v row missing from the report" } }
+    if ($rep.stopped) { $lsBad += "$($sc.Id): report says stopped: $($rep.stopped)" }
+}
+tc_check 'TEST-LOCALSUITES-033-failed-first-configuration-never-stops-the-next-and-every-failure-stays-in-the-report' ($lsBad.Count -eq 0) ($lsBad -join ' ### ')
+
+# 034: FullSuite - a failed Debug driver build does not stop Debug's offline suites, the Release configuration, a failed
+#      Release suite or the per-program loop; the Debug hardware suites are NOT_EXECUTED with the reason; the per-program
+#      loop's failures are part of the summary; the run exits nonpassing.
+$ft = New-OrchTree 'fsTree' 'FullSuite.ps1'
+$rF = Invoke-OrchTree $ft ".\tools\archive\deprecated\FullSuite.ps1; exit `$LASTEXITCODE" @{ ORCH_FAIL_DRIVER = 'Debug'; ORCH_FAIL_SUITE = 'Release/HardwareUnit'; ORCH_FAIL_PROGRAM = 'test_dummy' }
+$fsBad = @()
+foreach ($want in 'RUNCI Debug Unit', 'RUNCI Debug Integration', 'RUNCI Release Unit', 'RUNCI Release Integration', 'ELEVATED-SUITE Release HardwareUnit',
+                  'ELEVATED-SUITE Release HardwareIntegration', 'ELEVATED-PROGRAM Release test_dummy') { if ($rF.Calls -notcontains $want) { $fsBad += "'$want' never happened" } }
+if (@($rF.Calls | Where-Object { $_ -like 'ELEVATED-SUITE Debug *' }).Count -ne 0) { $fsBad += 'Debug hardware suites ran against a driver that was not built' }
+if ($rF.Out -notmatch 'Debug\s+HardwareUnit[^\r\n]*NOT_EXECUTED: driver build exit 1') { $fsBad += 'Debug HardwareUnit not reported NOT_EXECUTED with the driver build exit' }
+if ($rF.Out -notmatch 'Release\s+HardwareUnit\s+exit 1') { $fsBad += 'failed Release HardwareUnit missing from the summary' }
+if ($rF.Out -notmatch 'program test_dummy[^\r\n]*exit 1') { $fsBad += 'per-program failure (test_dummy exit 1) missing from the summary' }
+if ($rF.Exit -ne 1) { $fsBad += "exit $($rF.Exit), expected 1" }
+tc_check 'TEST-LOCALSUITES-034-fullsuite-continues-after-failed-build-suite-and-program-failures-stay-in-the-summary' ($fsBad.Count -eq 0) (($fsBad -join ' ### ') + ' -- ' + (Format-Orch $rF))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
