@@ -35,10 +35,25 @@
  *            nothing. Expected RED against a driver without the 0x80C producer: COMMIT FAIL (not served), the dependent lines
  *            BLOCKED, ACCESS PASS (the I/O manager refuses the read-only handle whatever the handler). Passing COMMIT's status
  *            check does not establish K2 (#352).
- *   --pass   TEST-TAS-API-005 (#370, Verifies #357), case TC-TASAPI-005. Until ADR-TSN-003 is accepted (#357 AC2) the driver
- *            refuses a valid PASS request with STATUS_NOT_IMPLEMENTED and no output, before any register access (#363 interim
- *            Option C, Q 2026-11-13). The run then records SKIP_NOT_IMPLEMENTED from the exact NTSTATUS, never a PASS, and
- *            FAIL for any other completion; COMMIT, STATE, REFUSE and WIRE do not apply to it.
+ *   --pass   TEST-TAS-API-005 (#370, Verifies #357), case TC-TASAPI-005, per its amendment of 2026-11-19: the 144-byte
+ *            version-1 AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030) with pre_activation PASS (2), debug_fault 0,
+ *            flags 0, a distinct non-zero client_op_id, the bound net_luid and the generation and epoch of the test's own query
+ *            (0 = not reported, printed as such, never fabricated), the HOLD schedule and the same BaseT lead. Function 71 is not
+ *            called by this mode (its withdrawal is #368's LEGACY_FUNCTION_71).
+ *              ACCESS   as for --hold: a read-only bound handle gets STATUS_ACCESS_DENIED on 0x80C, GET_TAS_STATE still served.
+ *              COMMIT   under #365's R7 order a header-valid PASS completes STATUS_NOT_IMPLEMENTED, Information 0, before the
+ *                       metadata, schedule, link and tier checks and before any register or PHC access, until ADR-TSN-003
+ *                       (#363). Measured against the proved-clean pre-state: the TAS record stays CLEAN, the restoration set
+ *                       (DES 12.5) stays as captured register by register (a register unread in either reply is a missing
+ *                       measurement and never suppresses the comparison of the others, PR #484), and a reported generation
+ *                       stays unchanged (0 is neither a value nor
+ *                       evidence of no change). SKIP_NOT_IMPLEMENTED only for that completion with every applicable
+ *                       observation established, never PASS. STATUS_INVALID_DEVICE_REQUEST (0x80C not served), any other
+ *                       completion or output, or a measured change is FAIL, also STATE_CONFLICT with zero metadata (PASS
+ *                       is recognized first under R7). Expected completion without an observed change but with a
+ *                       measurement missing is INCONCLUSIVE, each missing measurement named; observed violations are kept
+ *                       even when other measurements are missing. STATE, REFUSE and WIRE do not apply.
+ *            No link is required by the request (it carries no link speed); the cleanup's TX probe still needs one.
  *   --fault  the failed-rollback path of #357 (PR #397 review), case TC-TASACT-FAULT-001. Debug drivers fail schedule write
  *            13 and the first restore write on request (devices/i226_tas_activate.h); Release drivers must refuse that request.
  *
@@ -648,33 +663,6 @@ static void print_state(const char *label, const AVB_TAS_STATE *s)
     printf("\n");
 }
 
-/** The check of a handle without write access. Invalid request: even a missing access check writes nothing */
-static void check_access(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
-{
-    AVB_TAS_ACTIVATE_REQUEST r;
-    AVB_TAS_STATE s;
-    DWORD error;
-    BOOL ok, state_ok;
-    HANDLE h = open_bound(GENERIC_READ, id->net_luid);
-
-    if (h == INVALID_HANDLE_VALUE) {
-        verdict("BLOCKED", "ACCESS", index, id->device_id, "cannot open and bind a read-only handle");
-        return;
-    }
-    ZeroMemory(&r, sizeof(r));   /* version 0: INVALID if it reached the driver */
-    ok = activate(h, &r, &error);
-    state_ok = read_state(h, &s);
-    printf("    read-only handle: TAS_ACTIVATE ok=%d win32=%lu result=%u; GET_TAS_STATE ok=%d\n", ok, error, r.result, state_ok);
-    CloseHandle(h);
-    if (!ok && error == ERROR_ACCESS_DENIED && state_ok) {
-        verdict("PASS", "ACCESS", index, id->device_id, NULL);
-    } else {
-        verdict("FAIL", "ACCESS", index, id->device_id, ok ? "TAS_ACTIVATE reached the driver through a handle without write access"
-                                                           : (error != ERROR_ACCESS_DENIED ? "refused, but not with ERROR_ACCESS_DENIED"
-                                                                                            : "the read-only handle no longer serves GET_TAS_STATE"));
-    }
-}
-
 /* ---- IOCTL_AVB_TAS_QUERY_HW read-back (#365 12.1-12.5). The same rules as tests/hardware/test_tas_query_clean.c (PRESTATE and
  *      --restore, #368/#377), written again here for this test's pre-state and restoration rather than shared ---- */
 typedef struct { LONG status; DWORD got; AVB_TAS_QUERY_HW_REQUEST q; } QUERY_READ;
@@ -771,6 +759,48 @@ static unsigned restoration_set_differing(const AVB_TAS_REGS *a, const AVB_TAS_R
         n += reg_differs("TXQCTL", i, a->txqctl[i], b->txqctl[i]);
     }
     return n;
+}
+
+/** The restoration set register by register (PR #484 r4626979931): every register whose read_failed bit is clear in both valid
+ *  replies is compared and each difference printed and counted; every other register is counted and printed as unread. A
+ *  register unread in one reply never suppresses the comparison of the others. Without two valid replies all 17 are unread */
+static void restoration_set_compare(const QUERY_READ *a, const QUERY_READ *b, unsigned *differing, unsigned *unread)
+{
+    static const char *const names[17] = { "TQAVCTRL", "BASET_L", "BASET_H", "QBVCYCLET", "QBVCYCLET_S", "STQT0", "STQT1", "STQT2",
+                                           "STQT3", "ENDQT0", "ENDQT1", "ENDQT2", "ENDQT3", "TXQCTL0", "TXQCTL1", "TXQCTL2", "TXQCTL3" };
+    avb_u32 va[17], vb[17], failed;
+    unsigned bit;
+    int i;
+
+    *differing = 0;
+    *unread = 0;
+    if (!query_valid(a) || !query_valid(b)) {
+        *unread = 17;
+        printf("    [EVIDENCE] restoration set: no valid query reply %s, none of the 17 registers measured\n",
+               query_valid(a) ? "after" : "before");
+        return;
+    }
+    va[0] = a->q.regs.tqavctrl; va[1] = a->q.regs.baset_l; va[2] = a->q.regs.baset_h; va[3] = a->q.regs.qbvcyclet;
+    va[4] = a->q.regs.qbvcyclet_s;
+    vb[0] = b->q.regs.tqavctrl; vb[1] = b->q.regs.baset_l; vb[2] = b->q.regs.baset_h; vb[3] = b->q.regs.qbvcyclet;
+    vb[4] = b->q.regs.qbvcyclet_s;
+    for (i = 0; i < 4; i++) {
+        va[5 + i] = a->q.regs.stqt[i];   vb[5 + i] = b->q.regs.stqt[i];
+        va[9 + i] = a->q.regs.endqt[i];  vb[9 + i] = b->q.regs.endqt[i];
+        va[13 + i] = a->q.regs.txqctl[i]; vb[13 + i] = b->q.regs.txqctl[i];
+    }
+    failed = (a->q.regs.read_failed | b->q.regs.read_failed) & TAS_RESTORATION_SET_BITS;
+    for (bit = 0; bit < 17; bit++) {
+        if (failed & (1u << bit)) {
+            (*unread)++;
+            printf("    [EVIDENCE] restoration set: %s unread (%s%s%s), not compared\n", names[bit],
+                   (a->q.regs.read_failed & (1u << bit)) ? "before" : "", ((a->q.regs.read_failed & b->q.regs.read_failed) & (1u << bit)) ? " and " : "",
+                   (b->q.regs.read_failed & (1u << bit)) ? "after" : "");
+        } else if (va[bit] != vb[bit]) {
+            (*differing)++;
+            printf("    [EVIDENCE] restoration set: %s before=0x%08X after=0x%08X\n", names[bit], va[bit], vb[bit]);
+        }
+    }
 }
 
 /**
@@ -1265,16 +1295,14 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     mbps = has_link ? (avb_u32)(row.TransmitLinkSpeed / 1000000ULL) : 0u;
     frame = (avb_u32)row.Mtu + FRAME_OVERHEAD_BYTES;
     printf("    link=%s %u Mbit/s ipv4=%s mtu=%lu frameOnWire=%u\n", has_link ? "up" : "down", mbps, has_ip ? "yes" : "no", row.Mtu, frame);
-    if (g_mode != MODE_HOLD && mbps == 0) {   /* the legacy request carries a caller link speed */
+    if (g_mode == MODE_FAULT && mbps == 0) {   /* the legacy function-71 request of --fault carries a caller link speed */
         verdict("BLOCKED", "COMMIT", index, id->device_id, "no connected link: the legacy function-71 request of this mode carries a caller "
                 "link speed");
         CloseHandle(h);
         return;
     }
-    if (g_mode == MODE_HOLD) {
+    if (g_mode == MODE_HOLD || g_mode == MODE_PASS) {   /* #370 amendment: --pass no longer calls function 71 */
         check_access_80c(index, id);
-    } else if (g_mode != MODE_FAULT) {
-        check_access(index, id);
     }
     sock = has_ip ? open_tx_socket(ipv4) : INVALID_SOCKET;
     nonce = 0;
@@ -1324,7 +1352,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
     build_request(&req, g_mode == MODE_PASS ? AVB_TAS_PRE_PASS : AVB_TAS_PRE_HOLD, base, mbps, frame);
     ZeroMemory(&req_op, sizeof(req_op));
-    if (g_mode != MODE_HOLD) {
+    if (g_mode == MODE_FAULT) {
         printf("    request: pre=%u base=%lld (PHC %lld, lead %lld ms) cycle=%u window=%lld..%lld ms link=%u frame=%u\n", req.pre_activation, base,
                phc, (base - phc) / NS_PER_MS, req.cycle_ns, WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS, mbps, frame);
     }
@@ -1383,25 +1411,96 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
 
     if (g_mode == MODE_PASS) {
-        /* #363 interim Option C: a valid PASS request completes with STATUS_NOT_IMPLEMENTED and no output, before any register
-         * access, and leaves the reported TAS state CLEAN. The cleanup below still runs, as after every TAS_ACTIVATE issued */
+        /* #370 amendment 2026-11-19: PASS on the versioned request. Under #365's R7 order a header-valid PASS completes
+         * STATUS_NOT_IMPLEMENTED with no output before the metadata, schedule, link and tier checks and before any register or
+         * PHC access, until ADR-TSN-003 (#363). The state is measured against the proved-clean pre-state; each measurement keeps
+         * its own validity rule, a missing one is named and never read as unchanged, and an observed violation stays FAIL even
+         * when another measurement is missing. The cleanup below still runs */
+        AVB_TAS_OP_REQUEST op;
+        QUERY_READ qa;
         DWORD information = 0;
         LONG st;
-        BOOL state_ok, refused;
+        BOOL state_ok, gen_reported, gen_measured;
+        unsigned differing = 0, unread = 0;
+        char viol[700], miss[300], reason[1100];
 
         if (wire) { wire_stop(); }
         if (sock != INVALID_SOCKET) { closesocket(sock); }
         CloseHandle(h2);
-        printf("\n  --- TAS_ACTIVATE with PASS (not implemented until ADR-TSN-003 is accepted) ---\n");
-        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &information);
+        build_op(&op, id->net_luid, &qbefore.q, base, frame);
+        op.pre_activation = AVB_TAS_PRE_PASS;
+        printf("\n  --- IOCTL_AVB_TAS_ACTIVATE_80C with PASS (not implemented until ADR-TSN-003 is accepted, #363) ---\n");
+        printf("    request: op=0x%016llX pre=PASS base=%lld (PHC %lld, lead %lld ms) cycle=%lld window=%lld..%lld ms frame=%u "
+               "flags=0x%X fault=0x%X gen=%llu%s epoch=%llu%s\n", op.client_op_id, base, phc, (base - phc) / NS_PER_MS, CYCLE_NS,
+               WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS, frame, op.flags, op.debug_fault, op.expected_generation,
+               op.expected_generation == 0 ? " (not reported)" : "", op.context_epoch, op.context_epoch == 0 ? " (not reported)" : "");
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &op, sizeof(op), &op, sizeof(op), &information);
         printf("    PASS request: ntstatus=0x%08lX information=%lu\n", (unsigned long)st, information);
         state_ok = read_state(h, &s);
         if (state_ok) { print_state("after the PASS request", &s); }
-        refused = st == STATUS_NOT_IMPLEMENTED && information == 0 && state_ok && s.armed == AVB_TAS_STATE_CLEAN;
-        verdict(refused ? "SKIP_NOT_IMPLEMENTED" : "FAIL", "COMMIT", index, id->device_id,
-                refused ? "PASS is not implemented until ADR-TSN-003 is accepted (#357 AC2, #363 interim Option C): "
-                          "STATUS_NOT_IMPLEMENTED, no output, TAS state CLEAN; #370 is not verified by this"
-                        : "expected STATUS_NOT_IMPLEMENTED, no output and a CLEAN TAS state; see the lines above");
+        query(h, &qa);
+        print_query("after the PASS request", &qa);
+        restoration_set_compare(&qbefore, &qa, &differing, &unread);
+        printf("    [EVIDENCE] restoration set (DES 12.5, BASET_L/H included): %u of %u compared registers differ from the pre-state "
+               "query, %u of 17 unread\n", differing, 17u - unread, unread);
+        gen_reported = query_valid(&qbefore) && qbefore.q.generation != 0;
+        gen_measured = gen_reported && query_valid(&qa) && qa.q.generation != 0;
+        if (!gen_reported) {
+            printf("    [EVIDENCE] generation: not reported before the request (0): neither a value nor evidence that it did not "
+                   "change; not applicable\n");
+        } else {
+            printf("    [EVIDENCE] generation: before %llu, after %s%llu\n", qbefore.q.generation, gen_measured ? "" : "not reported ",
+                   query_valid(&qa) ? qa.q.generation : 0ull);
+        }
+
+        viol[0] = '\0';
+        miss[0] = '\0';
+        if (st == AVB_NTSTATUS_UNAVAILABLE) {
+            strcat_s(miss, sizeof(miss), "; the raw NTSTATUS was not captured");
+        } else if (st == (LONG)STATUS_INVALID_DEVICE_REQUEST) {
+            strcat_s(viol, sizeof(viol), "; IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST): the code is allocated "
+                     "to the adapter's TAS function (#362, #357), so this is FAIL, never SKIP");
+        } else if (st != (LONG)STATUS_NOT_IMPLEMENTED || information != 0) {
+            sprintf_s(reason, sizeof(reason), "; completion ntstatus=0x%08lX information=%lu, expected STATUS_NOT_IMPLEMENTED with no "
+                      "output (a header-valid PASS is recognized before the metadata check under R7, so zero metadata explains "
+                      "no other status)", (unsigned long)st, information);
+            strcat_s(viol, sizeof(viol), reason);
+        }
+        if (!state_ok) {
+            strcat_s(miss, sizeof(miss), "; the TAS record (GET_TAS_STATE) was not read");
+        } else if (s.armed != AVB_TAS_STATE_CLEAN) {
+            sprintf_s(reason, sizeof(reason), "; the TAS record is not CLEAN (armed=%u)", s.armed);
+            strcat_s(viol, sizeof(viol), reason);
+        }
+        /* Each register on its own (PR #484 r4626979931): a measured difference is a violation whatever else is unread, and
+         * unread registers are a missing measurement whatever was found in the others */
+        if (differing != 0) {
+            sprintf_s(reason, sizeof(reason), "; %u measured restoration-set register(s) differ from the pre-state query (listed above)",
+                      differing);
+            strcat_s(viol, sizeof(viol), reason);
+        }
+        if (unread != 0) {
+            sprintf_s(reason, sizeof(reason), "; %u of 17 restoration-set register(s) unread before or after (listed above)", unread);
+            strcat_s(miss, sizeof(miss), reason);
+        }
+        if (gen_reported && !gen_measured) {
+            strcat_s(miss, sizeof(miss), "; the generation was reported before the request but not after it");
+        } else if (gen_measured && qa.q.generation != qbefore.q.generation) {
+            sprintf_s(reason, sizeof(reason), "; the generation changed from %llu to %llu", qbefore.q.generation, qa.q.generation);
+            strcat_s(viol, sizeof(viol), reason);
+        }
+        if (viol[0] != '\0') {
+            sprintf_s(reason, sizeof(reason), "%s%s%s", viol + 2, miss[0] != '\0' ? "; also not measured" : "", miss);
+            verdict("FAIL", "COMMIT", index, id->device_id, reason);
+        } else if (miss[0] != '\0') {
+            sprintf_s(reason, sizeof(reason), "no observed violation, but not established: %s", miss + 2);
+            verdict("INCONCLUSIVE", "COMMIT", index, id->device_id, reason);
+        } else {
+            verdict("SKIP_NOT_IMPLEMENTED", "COMMIT", index, id->device_id,
+                    "PASS is not implemented until ADR-TSN-003 is accepted (#363, #370 amendment): STATUS_NOT_IMPLEMENTED, no output, "
+                    "TAS record CLEAN, restoration set as captured, generation unchanged or not reported; #370's traffic objective "
+                    "is not verified by this");
+        }
         (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         return;
     }
