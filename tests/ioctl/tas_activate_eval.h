@@ -330,6 +330,10 @@ typedef struct {
     BOOL speed_after_read;         /* the query after the case was read */
     avb_u32 speed_after;
     avb_u32 tier_hold;             /* query limits.tier_hold, AVB_TAS_TIER_*, 0 = not reported */
+    BOOL before_read;              /* the case's own query before the request was valid (pair, speed, tier measured) */
+    BOOL pair_after_read;          /* the query after the case was valid for generation and epoch */
+    BOOL pair_after_differs;       /* that query's pair differs from the one before the request */
+    BOOL field_speed_dependent;    /* the case's own invalidity depends on the speed (WINDOW_MIN) */
 } TAS_INV_SEM_EVIDENCE;
 
 typedef enum {
@@ -349,7 +353,7 @@ typedef enum {
  * prerequisite. */
 static __inline TAS_INV_SEM_CLASS tas_inv_semantic(const TAS_INV_SEM_EVIDENCE *e, LONG *expected, TAS_INV_STEP *at)
 {
-    BOOL earlier = FALSE;
+    BOOL earlier = FALSE, speed_matters, speed_stable, meta_matters;
 
     /* What R7 requires for the ACTUAL request, resolved first so that every class, a violation included, is reported against it
      * (finding on the 2026-11-19 20:20 hardware run) */
@@ -359,16 +363,28 @@ static __inline TAS_INV_SEM_CLASS tas_inv_semantic(const TAS_INV_SEM_EVIDENCE *e
         *expected = (LONG)STATUS_INVALID_DEVICE_STATE;
         *at = TAS_INV_STEP_META;
         earlier = TRUE;
-    } else if (e->step > TAS_INV_STEP_SPEED && e->speed_before == 0) {
+    } else if (e->step > TAS_INV_STEP_SPEED && e->before_read && e->speed_before == 0) {
         *expected = (LONG)STATUS_DEVICE_NOT_READY;
         *at = TAS_INV_STEP_SPEED;
         earlier = TRUE;
     }
+    /* PR #491 review: isolation rests on measurements around the case. The speed matters past step 5 unless the metadata refuses
+     * first, and is stable only when measured before and after with the same value (r4634405078, r4634404917). The pair matters
+     * from step 4 unless the request carries a 0, which is refused whatever the current pair; it must be measured before and
+     * after, unchanged (r4634404991) */
+    speed_matters = e->step > TAS_INV_STEP_SPEED && *at != TAS_INV_STEP_META;
+    speed_stable = e->before_read && e->speed_after_read && e->speed_after == e->speed_before;
+    meta_matters = e->step >= TAS_INV_STEP_META && !e->request_pair_zero;
     if (!e->captured) {
         return TAS_INV_SEM_NOT_CAPTURED;
     }
-    /* violations whatever the prerequisites: no invalid request succeeds, the code is allocated (#362), errors carry no output */
+    /* violations whatever the prerequisites: no invalid request succeeds, the code is allocated (#362), errors carry no output.
+     * Only a field whose invalidity depends on the speed (WINDOW_MIN) is not shown invalid by a success while the speed is not
+     * stably measured (r4634404917) */
     if (e->status >= 0 || e->status == (LONG)STATUS_INVALID_DEVICE_REQUEST || e->information != 0) {
+        if (e->field_speed_dependent && e->status >= 0 && speed_matters && !speed_stable) {
+            return TAS_INV_SEM_UNDETERMINED;
+        }
         return TAS_INV_SEM_FAIL;
     }
     /* a query reporting HOLD unsupported or not implemented leaves no valid control; that outcome's position is unpublished */
@@ -383,10 +399,11 @@ static __inline TAS_INV_SEM_CLASS tas_inv_semantic(const TAS_INV_SEM_EVIDENCE *e
     if (e->step > TAS_INV_STEP_CLAIM && e->status == (LONG)STATUS_DEVICE_BUSY) {
         return TAS_INV_SEM_UNDETERMINED;
     }
-    /* past the metadata step without an earlier metadata refusal: the speed the driver sampled under its claim is not determined
-     * when the query's speed changed around the case */
-    if (e->step > TAS_INV_STEP_SPEED && *at != TAS_INV_STEP_META && e->speed_after_read && e->speed_after != e->speed_before) {
-        return TAS_INV_SEM_UNDETERMINED;
+    if (meta_matters && (!e->before_read || !e->pair_after_read || e->pair_after_differs)) {
+        return TAS_INV_SEM_UNDETERMINED;   /* the pair the driver compared under its claim is not determined */
+    }
+    if (speed_matters && !speed_stable) {
+        return TAS_INV_SEM_UNDETERMINED;   /* the speed the driver sampled under its claim is not determined */
     }
     if (earlier) {
         return e->status == *expected ? TAS_INV_SEM_EARLIER_STEP : TAS_INV_SEM_FAIL;

@@ -1434,6 +1434,8 @@ static void fill_inv_sem(TAS_INV_SEM_EVIDENCE *e, TAS_INV_STEP step, LONG requir
     e->speed_before = 1000u;
     e->speed_after_read = TRUE;
     e->speed_after = 1000u;
+    e->before_read = TRUE;           /* the case's own query before the request was valid */
+    e->pair_after_read = TRUE;       /* and the one after, with the same pair */
 }
 
 static void test_60_invalid_semantic_order(void) {
@@ -1566,6 +1568,61 @@ static void test_60_invalid_semantic_order(void) {
     e.pair_established = FALSE; e.request_pair_zero = TRUE;
     EXPECT_EQ("not served, META_ZERO: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
     EXPECT_TRUE("... judged against its own STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+
+    /* PR #491 review: isolation needs the measurements it rests on, taken around the case; missing or changed ones are not
+     * established (INCONCLUSIVE), never PASS, and never turn a correct completion into FAIL */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after the case not measured, schedule case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after not measured, NO_ACCEPTANCE: UNDETERMINED", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: pair changed around the case, STATE_CONFLICT: UNDETERMINED, not FAIL", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.pair_after_read = FALSE;
+    EXPECT_EQ("r4634404991: pair after the case not measured: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.request_pair_mismatch = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: STALE_* with the pair changed around the case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.before_read = FALSE; e.pair_established = FALSE;
+    EXPECT_EQ("case's own query before the request not valid, non-zero pair sent: UNDETERMINED, not PASS",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("r4634404917: WINDOW_MIN committed while the speed changed: its invalidity is not established (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("WINDOW_MIN committed at a stable measured speed: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+
+    /* kept: unconditional failures, metadata first, independent steps */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("CYCLE_ZERO committed while the speed changed: still FAIL (its invalidity does not depend on the speed)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE;
+    EXPECT_EQ("not served with nothing measured after: still FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("META_ZERO with the pair changed around it: still PASS (0 is refused whatever the current pair)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, INVP);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE; e.before_read = FALSE;
+    EXPECT_EQ("PRE_ACTIVATION with nothing measured around it: still PASS (step 2 needs neither)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.speed_after_read = FALSE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("0/0 sent, nothing stable after: STATE_CONFLICT is still the earlier step (metadata first)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
 }
 
 /* TC-MOCK-061: WINDOW_MIN (#368, TAS-DR-05 as #351 R2 publishes it): a window not greater than 1.1 x the transmit time of

@@ -59,7 +59,12 @@
  *                      speed 0: NOT_READY at step 5), that earlier refusal is INCONCLUSIVE with the missing prerequisite named, and
  *                      any other completion is FAIL. Success, output or 0x80C not served are FAIL whatever the prerequisites. BUSY
  *                      after the claim step, a speed changed around the case, or a query reporting HOLD unsupported/not
- *                      implemented: INCONCLUSIVE (not determined). UNBOUND: STATUS_INVALID_DEVICE_STATE is INCONCLUSIVE, because
+ *                      implemented: INCONCLUSIVE (not determined). Every case queries immediately before its request and sends
+ *                      that pair (PR #491 review); isolation needs that query and the one after (UNCHANGED's) valid: past step 4 an
+ *                      unchanged pair (unless the request carries a 0, refused whatever the current pair), past step 5 the same
+ *                      speed in both. A missing or changed measurement is INCONCLUSIVE, never PASS, and never turns a correct
+ *                      completion into FAIL; only WINDOW_MIN, whose invalidity depends on the speed, is not FAIL on a success
+ *                      without a stable speed. UNBOUND: STATUS_INVALID_DEVICE_STATE is INCONCLUSIVE, because
  *                      NOT_BOUND and ADAPTER_MISMATCH share it and a dispatcher fallback could produce the latter. Passing
  *                      COMPLETION does not establish K2.
  *   <case>-OTHERS      after UNBOUND and NET_LUID_MISMATCH, which name or may reach another adapter: every other TAS adapter's
@@ -71,10 +76,10 @@
  *                      stays in the test's unbounded OUTSTANDING list, reported after the adapter run and on an abort. If the
  *                      observation cannot be allocated (OTHERS-SETUP BLOCKED), UNBOUND and NET_LUID_MISMATCH are not submitted.
  * Metadata cases (step 4): META_ZERO sends generation and epoch 0, refused STATE_CONFLICT on its own (R1). STALE_GENERATION and
- * STALE_EPOCH re-query the current pair and send it with one value deliberately changed (+1, or -1 at the maximum); PASS needs an
+ * STALE_EPOCH send the case's freshly queried pair with one value deliberately changed (+1, or -1 at the maximum); PASS needs an
  * established non-zero current pair, otherwise the observed refusal is reported INCONCLUSIVE (a stale value is not constructible).
  * WINDOW_MIN: every queue's window is the largest one not greater than 1.1 x the transmit time of max(512 bytes, max_frame_bytes) at
- * the query's driver-owned speed (TAS-DR-05, #351 R2; the unpublished overhead term only raises the bound, TC-MOCK-061); with
+ * the driver-owned speed of the case's own query (TAS-DR-05, #351 R2; the unpublished overhead term only raises the bound, TC-MOCK-061); with
  * speed 0 it carries a 1 ns window and NOT_READY must come first. NO_ACCEPTANCE (step 8): the control without
  * AVB_TAS_F_ACCEPT_UNVERIFIED must complete STATUS_REQUEST_NOT_ACCEPTED, nothing written (#351, #365 R4); not submitted when the
  * query reports HOLD IMPLEMENTED_VERIFIED, where that request is valid (evidence line, no verdict).
@@ -1481,9 +1486,9 @@ static BOOL stats_unchanged(const AVB_DRIVER_STATISTICS *a, const AVB_DRIVER_STA
 
 /** The positive HOLD control of #365 13.2 for the bound adapter (#368 oracle amendment 2026-11-19): AVB_TAS_F_ACCEPT_UNVERIFIED
  *  for unqualified execution (#362 amendment, #365 R4), the verified schedule set of #381 and test_tas_activate.c, BaseT the first
- *  cycle boundary at least the lead past phc, expected_generation and context_epoch as the test's own query reports them (never
- *  invented: a reported 0 stays 0, and METADATA reports it as missing) */
-static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc)
+ *  cycle boundary at least the lead past phc, expected_generation and context_epoch as the case's own query reports them (gen,
+ *  epoch: never invented, a reported 0 stays 0 and METADATA reports it as missing; PR #491 review r4634404991) */
+static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc, avb_u64 gen, avb_u64 epoch)
 {
     unsigned q;
 
@@ -1492,8 +1497,8 @@ static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc)
     r->size = (avb_u32)sizeof(*r);
     r->net_luid = c->id->net_luid;
     r->client_op_id = inv_next_op_id();
-    r->expected_generation = c->q0->q.generation;
-    r->context_epoch = c->q0->q.context_epoch;
+    r->expected_generation = gen;
+    r->context_epoch = epoch;
     r->flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
     r->pre_activation = AVB_TAS_PRE_HOLD;
     r->schedule.base_time_ns = (avb_u64)((((long long)phc + c->lead_ns + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
@@ -1675,27 +1680,31 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     BOOL wrote = FALSE, refused = FALSE, not_served = FALSE, measured, unchanged;
     unsigned differing = 0, q;
     char check[48], reason[600];
-    /* the current metadata pair the case is judged against: the pre-test query, or for STALE_* a fresh query (#368: from actual
-     * observed values); established only when that query is valid and both values are non-zero (#352 R1) */
-    avb_u64 cur_gen = c->q0->q.generation, cur_epoch = c->q0->q.context_epoch, wmin = 0, sent_gen = 0, sent_epoch = 0;
-    BOOL pair_est = query_valid(c->q0) && cur_gen != 0 && cur_epoch != 0;
-    const avb_u32 mbps = c->q0->q.link_speed_mbps, tier_hold = c->q0->q.limits.tier_hold;
+    /* The case's own query immediately before the request (#368: actual observed values; PR #491 review r4634404917,
+     * r4634404991): the request carries its pair, WINDOW_MIN is built from its speed, and the case is judged against it. When it
+     * is not valid, the request carries the pre-test query's values (the last observed, never invented) and the case's metadata,
+     * speed and tier are reported as not measured. The pair is established only when valid and both values are non-zero (#352 R1) */
+    QUERY_READ qc;
+    BOOL before_ok, pair_est;
+    avb_u64 cur_gen, cur_epoch, wmin = 0, sent_gen = 0, sent_epoch = 0;
+    avb_u32 mbps, tier_hold;
 
     printf("\n  --- %s: %s ---\n", t->name, t->rule);
+    query(c->h, &qc);
+    before_ok = query_valid(&qc);
+    cur_gen = before_ok ? qc.q.generation : c->q0->q.generation;
+    cur_epoch = before_ok ? qc.q.context_epoch : c->q0->q.context_epoch;
+    mbps = before_ok ? qc.q.link_speed_mbps : c->q0->q.link_speed_mbps;
+    tier_hold = before_ok ? qc.q.limits.tier_hold : c->q0->q.limits.tier_hold;
+    pair_est = before_ok && cur_gen != 0 && cur_epoch != 0;
+    printf("    [EVIDENCE] %s query before the request: ntstatus=0x%08lX valid=%d generation=%llu context_epoch=%llu (%s) "
+           "link_speed_mbps=%u tier_hold=%u%s\n", t->name, (unsigned long)qc.status, before_ok, cur_gen, cur_epoch,
+           pair_est ? "established" : "NOT established, 0 is never a value (#352 R1)", mbps, tier_hold,
+           before_ok ? "" : "; NOT measured: the pre-test query's values are sent and reported, the case's isolation is not established");
     if (k == INV_NO_ACCEPTANCE && tier_hold == AVB_TAS_TIER_IMPLEMENTED_VERIFIED) {
         printf("    [EVIDENCE] %s: not applicable, the query reports HOLD IMPLEMENTED_VERIFIED, where a request without acceptance is "
                "valid and would commit; not submitted, no verdict\n", t->name);
         return TRUE;
-    }
-    if (k == INV_STALE_GENERATION || k == INV_STALE_EPOCH) {
-        QUERY_READ qm;
-        query(c->h, &qm);
-        cur_gen = query_valid(&qm) ? qm.q.generation : 0;
-        cur_epoch = query_valid(&qm) ? qm.q.context_epoch : 0;
-        pair_est = query_valid(&qm) && cur_gen != 0 && cur_epoch != 0;
-        printf("    [EVIDENCE] %s current pair: query ntstatus=0x%08lX valid=%d generation=%llu context_epoch=%llu: %s\n", t->name,
-               (unsigned long)qm.status, query_valid(&qm), cur_gen, cur_epoch, pair_est ? "established" :
-               "NOT established (0 is never a value, #352 R1): the changed value is not shown to be stale");
     }
     if (k == INV_WINDOW_MIN) {
         wmin = tas_inv_window_min_ns(c->frame_bytes, mbps);
@@ -1733,7 +1742,7 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         inv_blocked3(t->name, c->index, did, "PHC unavailable: no valid BaseT can be placed, so the case cannot isolate its field");
         return FALSE;
     }
-    inv_op_request(&req, c, p.phc);
+    inv_op_request(&req, c, p.phc, cur_gen, cur_epoch);
     switch (k) {
     case INV_UNBOUND:
         unbound = open_device(GENERIC_READ | GENERIC_WRITE);
@@ -1890,11 +1899,16 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         e.speed_after_read = query_valid(&qa);
         e.speed_after = query_valid(&qa) ? qa.q.link_speed_mbps : 0;
         e.tier_hold = tier_hold;
+        e.before_read = before_ok;
+        e.pair_after_read = query_valid(&qa);
+        e.pair_after_differs = before_ok && query_valid(&qa) && (qa.q.generation != cur_gen || qa.q.context_epoch != cur_epoch);
+        e.field_speed_dependent = k == INV_WINDOW_MIN;
         cls = tas_inv_semantic(&e, &expected, &at);
-        printf("    [EVIDENCE] %s order facts: sent gen=%llu epoch=%llu, current pair %s (gen=%llu epoch=%llu), link_speed_mbps %u "
-               "before, %u after (query after %s), tier_hold %u, flags 0x%X\n", t->name, sent_gen, sent_epoch,
-               pair_est ? "established" : "NOT established", cur_gen, cur_epoch, mbps, e.speed_after,
-               e.speed_after_read ? "valid" : "invalid", tier_hold, req.flags);
+        printf("    [EVIDENCE] %s order facts: sent gen=%llu epoch=%llu; before: query %s, pair %s (gen=%llu epoch=%llu), link_speed_mbps "
+               "%u, tier_hold %u; after: query %s, gen=%llu epoch=%llu%s, link_speed_mbps %u; flags 0x%X\n", t->name, sent_gen,
+               sent_epoch, before_ok ? "valid" : "NOT valid", pair_est ? "established" : "NOT established", cur_gen, cur_epoch, mbps,
+               tier_hold, e.pair_after_read ? "valid" : "NOT valid", e.pair_after_read ? qa.q.generation : 0ULL,
+               e.pair_after_read ? qa.q.context_epoch : 0ULL, e.pair_after_differs ? " (CHANGED)" : "", e.speed_after, req.flags);
         switch (cls) {
         case TAS_INV_SEM_PASS:
             sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires; %s reached for this request (#365 R7)",
@@ -1917,8 +1931,10 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
             break;
         case TAS_INV_SEM_UNDETERMINED:
             sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX information=%lu: the published order does not determine this request's "
-                      "outcome for the measured facts (tier_hold %u, link speed %u then %u, BUSY = another operation's claim); "
-                      "reported, not judged", (unsigned long)st, got, tier_hold, mbps, e.speed_after);
+                      "outcome for the measured facts (queries before/after %s/%s, pair %s, link speed %u then %u, tier_hold %u, "
+                      "BUSY = another operation's claim; see the order facts); reported, not judged", (unsigned long)st, got,
+                      before_ok ? "valid" : "NOT valid", e.pair_after_read ? "valid" : "NOT valid",
+                      e.pair_after_differs ? "CHANGED" : "unchanged", mbps, e.speed_after, tier_hold);
             verdict("INCONCLUSIVE", check, c->index, did, reason);
             break;
         case TAS_INV_SEM_NOT_CAPTURED:
