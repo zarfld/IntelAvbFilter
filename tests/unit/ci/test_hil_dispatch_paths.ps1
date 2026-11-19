@@ -567,22 +567,21 @@ if ($feText -match 'Read-Host') { $feBad += 'interactive prompt still present' }
 tc_check 'TEST-HILPATH-019-run-tests-frontend-resolves-registered-entries-fails-closed-and-runs-every-suite' ($feBad.Count -eq 0) ($feBad -join '; ')
 
 # --- #458 (comment 7008463710, Q 2026-11-19): earlier failures never stop later independent tests at any layer ---------
-# 021 STATIC (workflow text, not a GitHub Actions run): an independent hosted test job runs after a failed earlier job.
-#     integration-tests, acceptance-tests and traceability-coverage keep their needs (order, artifacts) but run unless
-#     the workflow is cancelled; test matrices never cancel their sibling legs; in hil.yml every hardware suite step and the
-#     Release job run after an earlier failure (deployment of the staged package stays the essential input).
+# Maintainer decision #458 comment 7010425296 (2026-11-19) narrows 7008463710 into two rules, both covered here:
+#   (1) admission/promotion unchanged: a failed required Unit or Integration job prevents deploy-staging, and automated HIL
+#       starts only after 'CI - Standards Compliance & Quality Gates' concludes success (TEST-HILPATH-023);
+#   (2) inside an admitted run every independent test and suite executes after earlier failures (TEST-HILPATH-021; the
+#       runner and LocalSuites/FullSuite behaviour: TEST-HILGATE-040/104/109/110, TEST-LOCALSUITES-033/034).
+# The hosted test jobs keep their needs without a status override (Q 92c95ee): that is pipeline structure, not asserted.
 function Get-YamlJobBlock([string]$Text, [string]$Job) {
     $m = [regex]::Match($Text, "(?ms)^  $([regex]::Escape($Job)):\s*\r?\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*\r?\n|\z)")
     if ($m.Success) { return $m.Groups[1].Value } else { return $null }
 }
+# 021 STATIC (workflow text, not a GitHub Actions run), rule (2): within an admitted HIL run every hardware suite step and
+#     the Release job run after an earlier failure (deployment of the staged package stays the essential input); the
+#     hosted test matrices never cancel their sibling legs.
 $ciBad = @()
 $ciText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml'))
-foreach ($j in 'integration-tests', 'acceptance-tests', 'traceability-coverage') {
-    $b = Get-YamlJobBlock $ciText $j
-    if ($null -eq $b) { $ciBad += "${j}: job not found"; continue }
-    $if = [regex]::Match($b, '(?m)^    if:\s*(.+)$')
-    if (-not $if.Success -or $if.Groups[1].Value -notmatch '!cancelled\(\)|always\(\)') { $ciBad += "${j}: no job-level if with !cancelled()/always() - skipped after a failed dependency ($(if ($if.Success) { $if.Groups[1].Value } else { 'no if' }))" }
-}
 foreach ($j in 'unit-tests', 'integration-tests') {
     $b = Get-YamlJobBlock $ciText $j
     if ($null -eq $b -or $b -notmatch '(?m)^      fail-fast:\s*false\s*$') { $ciBad += "${j}: matrix fail-fast is not false" }
@@ -594,7 +593,31 @@ if ($suiteSteps.Count -ne 4) { $ciBad += "hil.yml: expected 4 hardware suite ste
 foreach ($s in $suiteSteps) { if ($s -notmatch "(?m)^        if:\s*\$\{\{\s*!cancelled\(\)") { $ciBad += "hil.yml: a hardware suite step does not run after an earlier failure: $((($s -split "`n")[0]).Trim())" } }
 $rel = Get-YamlJobBlock $hilText 'hil-release'
 if ($null -eq $rel -or $rel -notmatch '(?m)^    if:\s*\$\{\{\s*!cancelled\(\)') { $ciBad += 'hil.yml: hil-release does not run after a failed hil-debug' }
-tc_check 'TEST-HILPATH-021-STATIC-ci-test-jobs-and-hil-suites-run-after-earlier-failures' ($ciBad.Count -eq 0) ($ciBad -join '; ')
+tc_check 'TEST-HILPATH-021-STATIC-admitted-hil-run-and-test-matrices-continue-after-earlier-failures' ($ciBad.Count -eq 0) ($ciBad -join '; ')
+
+# 023 STATIC, rule (1): admission and promotion stay conditional on success.  deploy-staging needs the required test and
+#     gate jobs and has no status function in its condition (GitHub adds the implicit success(): a failed or skipped need
+#     skips staging); hil.yml is triggered by the completed CI workflow and every job that deploys or runs hardware tests
+#     requires workflow_run.conclusion == 'success' (hil-gate only reports).  The trust-boundary assertions in
+#     tests/unit/ci/test_hil_trust_boundary.ps1 (REAL-008, FX-023) are retained unchanged.
+$admBad = @()
+$dep = Get-YamlJobBlock $ciText 'deploy-staging'
+if ($null -eq $dep) { $admBad += 'deploy-staging missing' }
+else {
+    $needs = [regex]::Match($dep, '(?ms)^    needs:\s*(\[.*?\]|\r?\n(?:\s+-[^\r\n]*\r?\n)+)')
+    $needList = if ($needs.Success) { @([regex]::Matches($needs.Groups[1].Value, '[A-Za-z0-9_-]+') | ForEach-Object { $_.Value }) } else { @() }
+    foreach ($n in 'code-quality', 'unit-tests', 'integration-tests', 'acceptance-tests', 'security-scan') { if ($needList -notcontains $n) { $admBad += "deploy-staging does not need $n" } }
+    $depIf = [regex]::Match($dep, '(?ms)^    if:\s*\|?\s*\r?\n?(.*?)(?=^    [A-Za-z_-]+:)')
+    if (-not $depIf.Success) { $admBad += 'deploy-staging has no job condition' }
+    elseif ($depIf.Groups[1].Value -match 'always\(\)|cancelled\(\)|failure\(\)|success\(\)') { $admBad += "deploy-staging condition overrides the status check: $($depIf.Groups[1].Value.Trim() -replace '\s+', ' ')" }
+}
+if ($hilText -notmatch "(?ms)workflow_run:\s*\r?\n\s+workflows:\s*\[\s*`"CI - Standards Compliance & Quality Gates`"\s*\]\s*\r?\n\s+types:\s*\[\s*completed\s*\]") { $admBad += "hil.yml is not triggered by the completed 'CI - Standards Compliance & Quality Gates' workflow" }
+foreach ($j in 'authorize', 'hil-debug', 'hil-release', 'hil-acceptance') {
+    $b = Get-YamlJobBlock $hilText $j
+    $if = if ($b) { [regex]::Match($b, '(?m)^    if:\s*(.+)$') } else { $null }
+    if (-not $if -or -not $if.Success -or $if.Groups[1].Value -notmatch "github\.event\.workflow_run\.conclusion == 'success'") { $admBad += "hil.yml ${j}: does not require workflow_run.conclusion == 'success'" }
+}
+tc_check 'TEST-HILPATH-023-STATIC-failed-unit-or-integration-cannot-stage-or-start-automated-hil' ($admBad.Count -eq 0) ($admBad -join '; ')
 
 # 022 STATIC: Run-Tests.ps1 (needs elevation, so it is not executed offline) records a failed precondition check or a
 #     missing/empty test directory and still dispatches every suite; the only exit before dispatch is the elevation check.
