@@ -60,6 +60,10 @@
  *                      query against its own capture before the cases. A change is FAIL and is recovered by that adapter's owned
  *                      NIC cycle (<case>-OTHERS-RECOVERY). Adapters without INTEL_CAP_TSN_TAS have no TAS state the query can
  *                      observe: reported as not measured. NET_LUID_MISMATCH prefers another TAS adapter's NET_LUID for that reason.
+ *                      Bounds (budget): at most INV_OTHERS_MAX (8) other TAS adapters observed (any beyond: OTHERS BLOCKED, never PASS)
+ *                      and INV_OTHER_RECOVERIES_MAX (1) recovery cycle per adapter under test; a changed adapter not recovered stays in
+ *                      the test's OUTSTANDING list, reported at the end of the adapter run and on an abort. An allocation failure is
+ *                      OTHERS-SETUP BLOCKED.
  * Not submitted, three BLOCKED lines each, never PASS: STALE_GENERATION, STALE_EPOCH (D.1) and WINDOW_MIN (D.2 consumption).
  * DEBUG_FAULT_RELEASE runs on a Release driver only (Debug: not applicable, the fault path is #357's --fault case).
  * NET_LUID_MISMATCH names another enumerated adapter's NET_LUID when one exists, otherwise an identity no adapter has (the
@@ -295,6 +299,38 @@ static unsigned g_next_seq;
 static volatile LONG g_pending_adapter = -1;
 static volatile LONG g_pending_did;
 
+/* Other adapters whose owned recovery (--invalid, <case>-OTHERS) did not complete: the test keeps them listed until the process
+ * ends, so neither a later step of the adapter run nor an abort can lose them. Bounded; the count beyond the bound is kept */
+#define OUTSTANDING_MAX 16
+static volatile LONG g_outstanding_n;
+static LONG g_outstanding_idx[OUTSTANDING_MAX];
+static LONG g_outstanding_did[OUTSTANDING_MAX];
+
+static void outstanding_add(UINT32 index, avb_u16 did)
+{
+    LONG n = InterlockedIncrement(&g_outstanding_n) - 1;
+    if (n < OUTSTANDING_MAX) {
+        g_outstanding_idx[n] = (LONG)index;
+        g_outstanding_did[n] = (LONG)did;
+    }
+}
+
+/** Every outstanding recovery, as one line each: the operator's instruction (at the end of a run and on an abort) */
+static void report_outstanding(const char *when)
+{
+    LONG n = g_outstanding_n, i;
+    for (i = 0; i < n && i < OUTSTANDING_MAX; i++) {
+        printf("[CLEANUP_FAILED] %s-OUTSTANDING/adapter:%ld did=0x%04lX: %s: an owned recovery cycle of this adapter did not complete "
+               "and may still be pending in Windows. Operator: NIC cycle it, then check it with the TAS query\n", CASE_ID,
+               g_outstanding_idx[i], g_outstanding_did[i], when);
+    }
+    if (n > OUTSTANDING_MAX) {
+        printf("[CLEANUP_FAILED] %s-OUTSTANDING: %ld further outstanding recoveries beyond the list bound; see the OTHERS lines\n",
+               CASE_ID, n - OUTSTANDING_MAX);
+    }
+    fflush(stdout);
+}
+
 static void report_abort(void)
 {
     LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
@@ -304,6 +340,7 @@ static void report_abort(void)
                CASE_ID, adapter, g_pending_did);
         fflush(stdout);
     }
+    report_outstanding("test aborted");
 }
 
 static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; report_abort(); return FALSE; }
@@ -1274,6 +1311,8 @@ static void run_tiers(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 #define BASET_H_SECONDS_LIMIT     0x100000000ULL   /* BaseT seconds must fit the 32-bit BASET_H register (TAS-DR-07) */
 #define INV_BIT31                 (1u << 31)       /* an unknown flag bit: no flag is published above bit 1 (#365 13.2) */
 #define INV_OBSERVER_TRIES        8u               /* other adapters tried as the wire observer per adapter under test (time bound) */
+#define INV_OTHERS_MAX            8u               /* other TAS adapters observed per adapter under test (budget bound) */
+#define INV_OTHER_RECOVERIES_MAX  1u               /* owned recovery cycles of changed other adapters per adapter under test */
 #define INV_LEAD_HEADROOM_NS      (500LL * NS_PER_MS)   /* processing between the PHC read and the driver's check, above min_margin_ns */
 #define INV_LEAD_MAX_NS           (60LL * NS_PER_SEC)   /* a reported margin needing more lead than this is not used (reported) */
 
@@ -1369,6 +1408,8 @@ typedef struct {
     avb_u64 other_luid;
     char other_desc[160];
     UINT32 nothers;                  /* other TAS adapters, observed around UNBOUND and NET_LUID_MISMATCH (PR #479 r4621508767) */
+    UINT32 others_unobserved;        /* other TAS adapters beyond INV_OTHERS_MAX: not observed, so OTHERS is never PASS */
+    BOOL others_alloc_failed;        /* the observation arrays could not be allocated: nothing observed, reported */
     const AVB_ADAPTER_IDENTITY_REQUEST **others;
     QUERY_READ *others_q0;
 } INV_CTX;
@@ -1525,7 +1566,11 @@ static BOOL inv_check_others(const INV_CTX *c, const char *name)
     char check[64], reason[480], part[96];
 
     sprintf_s(check, sizeof(check), "%s-OTHERS", name);
-    if (c->nothers == 0) {
+    if (c->others_alloc_failed) {
+        verdict("BLOCKED", check, c->index, did, "not observed: the other-adapter observation could not be allocated (see OTHERS-SETUP)");
+        return TRUE;
+    }
+    if (c->nothers == 0 && c->others_unobserved == 0) {
         printf("    [EVIDENCE] %s: no other TAS adapter is enumerated; adapters without INTEL_CAP_TSN_TAS have no TAS state the query "
                "can observe (NOT_SUPPORTED), so a misrouted write there is not measured\n", check);
         return TRUE;
@@ -1549,13 +1594,20 @@ static BOOL inv_check_others(const INV_CTX *c, const char *name)
                    query_clean(&c->others_q0[i]) != query_clean(&qa)) {
             changed++;
             print_query("other adapter after the probe", &qa);
-            sprintf_s(part, sizeof(part), "adapter:%u did=0x%04X changed; ", o->index, o->device_id);
-            if (!inv_recover_other(o)) {
-                recovered_failed++;   /* the abort handler keeps naming that adapter */
+            if (changed > INV_OTHER_RECOVERIES_MAX) {
+                /* beyond the per-adapter recovery bound (budget): owned and reported, not cycled now */
+                outstanding_add(o->index, o->device_id);
+                recovered_failed++;
+                sprintf_s(part, sizeof(part), "adapter:%u did=0x%04X changed, not recovered (bound); ", o->index, o->device_id);
+            } else if (!inv_recover_other(o)) {
+                outstanding_add(o->index, o->device_id);   /* owned until the process ends; reported on abort and at the end */
+                recovered_failed++;
+                sprintf_s(part, sizeof(part), "adapter:%u did=0x%04X changed, recovery incomplete; ", o->index, o->device_id);
             } else {
-                g_pending_did = did;   /* recovered: the adapter under test is the pending one again */
-                InterlockedExchange(&g_pending_adapter, (LONG)c->index);
+                sprintf_s(part, sizeof(part), "adapter:%u did=0x%04X changed, recovered; ", o->index, o->device_id);
             }
+            g_pending_did = did;   /* the adapter under test is the pending one again; the others are in the outstanding list */
+            InterlockedExchange(&g_pending_adapter, (LONG)c->index);
         } else {
             part[0] = '\0';
         }
@@ -1568,10 +1620,17 @@ static BOOL inv_check_others(const INV_CTX *c, const char *name)
         sprintf_s(check, sizeof(check), "%s-OTHERS-RECOVERY", name);
         verdict(recovered_failed == 0 ? "PASS" : "CLEANUP_FAILED", check, c->index, did, recovered_failed == 0
                 ? "every changed adapter was cycled by the test and its query reports it clean"
-                : "a changed adapter did not return clean from its owned NIC cycle. Operator: NIC cycle it, then check it with the TAS query");
+                : "a changed adapter was not recovered (incomplete cycle, or beyond the per-adapter recovery bound): it stays in the "
+                  "OUTSTANDING list. Operator: NIC cycle it, then check it with the TAS query");
         return FALSE;
     }
-    if (unmeasured != 0) {
+    if (unmeasured != 0 || c->others_unobserved != 0) {
+        char more[96];
+        sprintf_s(more, sizeof(more), "%u other TAS adapter(s) beyond the observation bound of %u not observed; ", c->others_unobserved,
+                  INV_OTHERS_MAX);
+        if (c->others_unobserved != 0 && strlen(reason) + strlen(more) + 1 < sizeof(reason)) {
+            strcat_s(reason, sizeof(reason), more);
+        }
         verdict("BLOCKED", check, c->index, did, reason);
         return TRUE;
     }
@@ -1742,16 +1801,16 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     inv_deps_text(t->deps, deps, sizeof(deps));
     if (st == AVB_NTSTATUS_UNAVAILABLE) {
         verdict("INCONCLUSIVE", check, c->index, did, "raw NTSTATUS not captured");
-    } else if (st == t->required && got == 0 && t->deps == 0) {
-        sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires", (unsigned long)st, t->required_src);
-        verdict("PASS", check, c->index, did, reason);
-    } else if (k == INV_UNBOUND && st == t->required && got == 0) {
+    } else if (k == INV_UNBOUND && st == t->required && got == 0) {   /* before the header PASS below (#479 round 2) */
         /* PR #479 r4621508729: NOT_BOUND and ADAPTER_MISMATCH complete with the same status and no output; on a dispatcher that
          * falls back to an adapter for an unbound handle, the later net_luid check can produce it too. The status alone does not
          * show that the unbound gate ran; the result value (#352 record, #379) or a deterministic fallback would */
         verdict("INCONCLUSIVE", check, c->index, did, "STATUS_INVALID_DEVICE_STATE with no output, as #365 13.3 requires, but NOT_BOUND "
                 "and ADAPTER_MISMATCH share it and an error completion carries no result: that the unbound gate refused it is not "
                 "established (other TAS adapters are checked in UNBOUND-OTHERS)");
+    } else if (st == t->required && got == 0 && t->deps == 0) {
+        sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires", (unsigned long)st, t->required_src);
+        verdict("PASS", check, c->index, did, reason);
     } else if (t->deps != 0 && got == 0 && (st == t->required || st == (LONG)STATUS_INVALID_DEVICE_STATE ||
                                             ((t->deps & INV_DEP_TIER) && st == (LONG)STATUS_REQUEST_NOT_ACCEPTED))) {
         sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output (%s requires 0x%08lX); the field's isolation is not "
@@ -2037,11 +2096,21 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
         c.q0 = &q0;
         c.s0 = &s0;
         /* Every other TAS adapter, observed before the cases (PR #479 r4621508767) */
-        c.others = (const AVB_ADAPTER_IDENTITY_REQUEST **)calloc(g_nall ? g_nall : 1, sizeof(*c.others));
-        c.others_q0 = (QUERY_READ *)calloc(g_nall ? g_nall : 1, sizeof(*c.others_q0));
-        for (o = 0; c.others != NULL && c.others_q0 != NULL && o < g_nall; o++) {
+        c.others = (const AVB_ADAPTER_IDENTITY_REQUEST **)calloc(INV_OTHERS_MAX, sizeof(*c.others));
+        c.others_q0 = (QUERY_READ *)calloc(INV_OTHERS_MAX, sizeof(*c.others_q0));
+        if (c.others == NULL || c.others_q0 == NULL) {   /* #479 round 2: reported, never silent */
+            c.others_alloc_failed = TRUE;
+            verdict("BLOCKED", "OTHERS-SETUP", index, id->device_id, "allocation of the other-adapter observation failed: other TAS "
+                    "adapters are not observed around UNBOUND and NET_LUID_MISMATCH (their OTHERS lines are BLOCKED)");
+        }
+        for (o = 0; !c.others_alloc_failed && o < g_nall; o++) {
             if (g_all[o].net_luid != id->net_luid && (g_all[o].capabilities & INTEL_CAP_TSN_TAS)) {
-                HANDLE ho = open_bound_read(g_all[o].net_luid);
+                HANDLE ho;
+                if (c.nothers == INV_OTHERS_MAX) {
+                    c.others_unobserved++;
+                    continue;
+                }
+                ho = open_bound_read(g_all[o].net_luid);
                 c.others[c.nothers] = &g_all[o];
                 if (ho != INVALID_HANDLE_VALUE) {
                     query(ho, &c.others_q0[c.nothers]);
@@ -2050,7 +2119,8 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
                 c.nothers++;
             }
         }
-        printf("    [EVIDENCE] other TAS adapters observed around UNBOUND and NET_LUID_MISMATCH: %u\n", c.nothers);
+        printf("    [EVIDENCE] other TAS adapters observed around UNBOUND and NET_LUID_MISMATCH: %u (beyond the bound of %u: %u)\n",
+               c.nothers, INV_OTHERS_MAX, c.others_unobserved);
         /* NET_LUID_MISMATCH: another TAS adapter's NET_LUID first (its state is observable), then any other enumerated adapter's,
          * otherwise an identity no adapter has */
         c.other_luid = 0;
@@ -2136,6 +2206,9 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     }
     cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
     g_cleanup_link_was_up = TRUE;   /* the other modes keep their link-up precondition */
+    if (g_outstanding_n != 0) {
+        report_outstanding("after this adapter run");
+    }
 }
 
 /* --restore, TC-TASAPI-012 (#377). The restoration set of DES-C-TAS-010 12.5: the v1 register set without DTXMXPKTSZ, BASET_L

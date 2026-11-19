@@ -921,9 +921,11 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --invalid (#368 amendment): per TAS adapter a 60 s socket bind; at most 8 observer candidates (INV_OBSERVER_TRIES) with a
     # 3.5 s baseline window each = 28 s; 26 cases of a few IOCTLs each, no waits (bounded at 30 s); 2 TX windows of 3.5 s = 7 s;
     # the legacy phase with at most one recovery cycle (120 + 3 + 60 + 60 + 5 s = 248 s); then the owned cleanup (120 + 3 + 60
-    # + 60 + 60 + 5 + 3.5 s and a 60 s socket bind = 371.5 s) = 744.5 s; 970 s = 744.5 s + 30 % (967.9 s, rounded up). No
-    # inventory limit: the executable runs every TAS adapter, so the budget scales with the enumerated count, uncapped.
-    'test_tas_query_clean --invalid' = @{ Seconds = 970 }
+    # + 60 + 60 + 5 + 3.5 s and a 60 s socket bind = 371.5 s) = 744.5 s; plus (PR #479 review) the other-adapter observation,
+    # at most 8 other TAS adapters (INV_OTHERS_MAX) x 3 queries x 1 s (an estimate, not an enforced bound: open, bind and the query never wait) = 24 s, and at most one owned recovery cycle of a changed
+    # other adapter (INV_OTHER_RECOVERIES_MAX; 120 + 3 + 60 + 60 + 5 s = 248 s) = 1016.5 s; 1330 s = 1016.5 s + 30 % (1321.5 s,
+    # rounded up). No inventory limit: the executable runs every TAS adapter, so the budget scales with the enumerated count, uncapped.
+    'test_tas_query_clean --invalid' = @{ Seconds = 1330 }
     # --restore (#377): per TAS adapter a 60 s socket bind and a 3.5 s baseline window, one activation and query, then the same
     # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) and one query = about 440 s; the same budget.
     'test_tas_query_clean --restore' = @{ Seconds = 560; MaxAdapters = 8 }
