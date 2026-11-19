@@ -495,7 +495,7 @@ Hardware-dependent development MUST use evidence-driven TDD.
 
 8. Reproduce genuine hardware failures rather than replacing them with simulated success.
 
-9. HIL unavailable or unsafe to execute means BLOCKED/UNVERIFIED. Do not close hardware-dependent requirements as verified.
+9. HIL unavailable to execute means UNVERIFIED. Do not close hardware-dependent requirements as verified.
 
 10. Maintain the automatic CI → staging → HIL Unit → Integration → Acceptance workflow, plus a controlled targeted-HIL path for RED-phase investigations.
 
