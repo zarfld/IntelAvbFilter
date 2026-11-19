@@ -898,19 +898,20 @@ $HilTestTimeoutSeconds = [ordered]@{
 # at least 1 and at most MaxAdapters, the entry's own adapter limit; MaxAdapters when no enumeration was observed.  No
 # device id or adapter count is assumed.  Like $HilTestTimeoutSeconds it never lowers the suite timeout.
 $HilTestTimeoutPerAdapter = [ordered]@{
-    # test_tas_activate, from its own bounds: 3.5 s baseline + 21.5 s send bound and drain + 120 s disable + 3 s + 60 s enable
-    # + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 398 s for one TAS
+    # test_tas_activate, from its own bounds: 3.5 s baseline + 67.5 s send bound and drain (SEND_BOUND_MS 66 s covers the
+    # largest admitted BaseT lead, LEAD_MAX_NS 60 s, plus 4.5 cycles, PR #481; DRAIN_MS 1.5 s) + 120 s disable + 3 s + 60 s
+    # enable + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 444 s for one TAS
     # adapter, plus its test-owned setup recovery when the pre-state is not proved clean (#369): 120 s disable + 3 s + 60 s
-    # enable + 60 s return + 60 s link + 5 s settle = 308 s, so 706 s. 920 s = 706 s + 30 % (918 s, rounded up), the margin
+    # enable + 60 s return + 60 s link + 5 s settle = 308 s, so 752 s. 980 s = 752 s + 30 % (977.6 s, rounded up), the margin
     # used for test_tas_isolated_arm (the 3.5 s baseline is the first observer trial).  It runs every enumerated adapter that
     # advertises INTEL_CAP_TSN_TAS (the others are SKIP_UNSUPPORTED without a wait), with no fixed inventory (#369 amendment:
     # the identities are allocated from the driver's count), so the budget scales with the enumerated count, uncapped.  Inside
     # each adapter run every other enumerated adapter may be tried as the wire observer (no fixed observer model, #463): one
     # trial is a 3.5 s baseline window (an estimate: wire_start and the 2 s window) = 3.5 s + 30 % = 4.55 s, rounded up to 5 s
-    # per other adapter: n x 920 + n x (n - 1) x 5 s.
-    'test_tas_activate --hold'  = @{ Seconds = 920; PerOtherAdapterSeconds = 5 }
-    'test_tas_activate --pass'  = @{ Seconds = 920; PerOtherAdapterSeconds = 5 }
-    'test_tas_activate --fault' = @{ Seconds = 920; PerOtherAdapterSeconds = 5 }
+    # per other adapter: n x 980 + n x (n - 1) x 5 s.
+    'test_tas_activate --hold'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    'test_tas_activate --pass'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    'test_tas_activate --fault' = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
     # test_tas_query_clean, from its own bounds per TAS adapter: 7 s TX windows + 2 x 60 s socket bind + 120 s disable + 3 s +
     # 60 s enable + 60 s return + 60 s link + 5 s settle + 3.5 s TX after the cycle = 438.5 s; 560 s = + 27 %.
     # MaxAdapters = TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also caps the TAS adapters it runs.

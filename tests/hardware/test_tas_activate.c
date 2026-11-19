@@ -20,11 +20,15 @@
  *                          recognized here; any other completion is FAIL.
  *              STATE       GET_TAS_STATE ARMED with the requested gate list. REFUSE: a further activation on the armed adapter is
  *                          STATUS_INVALID_DEVICE_STATE with Information 0 and no reported state change. Both need a committed
- *                          schedule; without one they are BLOCKED.
+ *                          schedule; without one they are BLOCKED. The further request carries the generation and epoch of the
+ *                          query after the commit (BLOCKED, not sent, when that query fails). NOT_CLEAN and STATE_CONFLICT share
+ *                          that status (#365 13.3, 13.4), so a refusal is PASS only when that query reports a non-zero generation and
+ *                          epoch; with 0 (not reported, D.1) it is INCONCLUSIVE. Acceptance, output or a changed schedule is FAIL.
  *              GENERATION  the query after the commit one generation step on: production before the #352 store is undecided
  *                          (#365 13.6 D.1), so BLOCKED with that reason.
- *              LOOKUP      evidence only: a query carrying the committed client_op_id prints lookup_result (the producer stage
- *                          expects NOT_IMPLEMENTED; success-record retrieval is #460, never asserted here).
+ *              LOOKUP      evidence only: a query carrying the committed client_op_id, on the committing open instance (#365
+ *                          13.1), prints lookup_result (the producer stage expects NOT_IMPLEMENTED; success-record retrieval is
+ *                          #460, never asserted here).
  *              WIRE, STATUS, CLEANUP, RESTORE  as below; WIRE needs a committed schedule and an established observer.
  *            The competing request carries the same schedule, so after a commit its own hardware effect cannot be separated from
  *            the winner's: the query after the race is printed as evidence of one schedule, not as proof that the refusal wrote
@@ -131,7 +135,8 @@
 #define BASE_LEAD_NS         (1500LL * NS_PER_MS)    /* BaseT is the first cycle boundary at least this far ahead */
 #define SEND_CYCLES_AFTER    3                       /* frames keep going until BaseT plus this many cycles and a half */
 #define SEND_PERIOD_MS       50
-#define SEND_BOUND_MS        20000                   /* the send phase ends here even if the PHC cannot be read */
+#define SEND_BOUND_MS        66000                   /* the send phase ends here even if the PHC cannot be read; covers the
+                                                        largest admitted lead (LEAD_MAX_NS, C_ASSERT below the lead bounds) */
 #define DRAIN_MS             1500                    /* longer than a closed interval, so held frames leave before the end */
 #define PAYLOAD_BYTES        256
 #define FRAME_OVERHEAD_BYTES 38u                     /* MTU plus header, FCS, preamble and gap: the frame on the wire */
@@ -162,6 +167,11 @@ static avb_u64 g_op_id;                              /* client_op_id of the next
 
 #define LEAD_HEADROOM_NS     (500LL * NS_PER_MS)    /* test scheduling headroom above an established limits.min_margin_ns */
 #define LEAD_MAX_NS          (60LL * NS_PER_SEC)    /* a reported margin needing more lead than this is not used (BLOCKED) */
+/* PR #481: BaseT is at most LEAD_MAX_NS plus one cycle (rounding to a boundary) after the PHC read, so the send phase reaches
+ * BaseT + SEND_CYCLES_AFTER cycles and a half within SEND_BOUND_MS for every admitted lead, and its frames, the observer
+ * baseline and the cleanup's TX probe fit the capture's tag slots */
+C_ASSERT((long long)SEND_BOUND_MS * NS_PER_MS >= LEAD_MAX_NS + CYCLE_NS + SEND_CYCLES_AFTER * CYCLE_NS + CYCLE_NS / 2);
+C_ASSERT(SEND_BOUND_MS / SEND_PERIOD_MS + 1 + 2 * (BASELINE_MS / SEND_PERIOD_MS + 1) <= WIRE_MAX_FRAMES);
 
 /* Non-negative while the test owns an unreported state change of an adapter: from its setup recovery NIC cycle until that
  * recovery is verified or its failure reported (g_pending_setup 1), and from TAS_ACTIVATE until the cleanup has reported */
@@ -958,6 +968,9 @@ static BOOL find_observer(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, 
             continue;
         }
         tries++;
+        /* No capture is active here (none before the first candidate, wire_stop after each one), so every tag slot is free: each
+         * candidate's baseline starts at slot 0 and the number of candidates never exhausts WIRE_MAX_FRAMES (PR #481) */
+        g_next_seq = 0;
         *nonce = GetTickCount() ^ GetCurrentProcessId() ^ (o << 24);
         observers = wire_start(id->net_luid, g_all[o].net_luid, id->mac, *nonce, ipv4);
         if (observers != 0) {
@@ -1215,6 +1228,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     printf("\n=== adapter:%u did=0x%04X luid=0x%016llX ifIndex=%u ===\n", index, id->device_id, id->net_luid, id->if_index);
     g_ran++;
     g_next_seq = 0;   /* per adapter run: no capture is active here, so every tag slot is free */
+    g_capture_luid = 0;   /* no observer carried over from the previous adapter run; find_observer sets it only when one is found (PR #481) */
     ZeroMemory(&ipv4, sizeof(ipv4));
     if (!find_devinst(id->net_luid, &inst)) {
         verdict("BLOCKED", "COMMIT", index, id->device_id,
@@ -1430,7 +1444,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             if (calls[k].got == 0 && calls[k].status == (LONG)STATUS_INVALID_DEVICE_STATE) { state_conflict++; }
         }
         if (go != NULL) { CloseHandle(go); }
-        CloseHandle(h2);
+        /* h2 stays open through LOOKUP: the record is retrieved on the originating open instance (#365 13.1, PR #481) */
         first_after = g_next_seq;
         if (not_served != 0) {
             sprintf_s(reason, sizeof(reason), "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST on %u of 2 calls): the code "
@@ -1461,23 +1475,43 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             if (armed_ok) { print_state("after the activation", &s); }
             verdict(armed_ok && state_matches(&s, base) ? "PASS" : "FAIL", "STATE", index, id->device_id,
                     armed_ok && state_matches(&s, base) ? NULL : "GET_TAS_STATE does not report ARMED with the requested gate list");
-            {
+            if (!query_valid(&qa)) {
+                /* The further request carries the generation and epoch of the test's own query (#369 amendment); after the commit
+                 * that is this query, so without it the request has no current metadata and is not sent (PR #481) */
+                verdict("BLOCKED", "REFUSE", index, id->device_id, "the query after the commit failed: no current generation and "
+                        "epoch for the further request, which is not sent");
+            } else {
+                /* NOT_CLEAN and STATE_CONFLICT both complete STATUS_INVALID_DEVICE_STATE (#365 13.3, 13.4), so a refusal is attributed
+                 * to the armed state only when the request carried reported post-commit metadata (0 = not reported, #365 12.2
+                 * offset 88; unknown values are not wildcards, #369). Acceptance, output or a changed schedule fails whatever the
+                 * metadata: an armed adapter must refuse and keep its schedule (#369 REFUSE) */
                 OP_CALL again;
+                BOOL meta_ok = qa.q.generation != 0 && qa.q.context_epoch != 0, refused;
                 ZeroMemory(&again, sizeof(again));
-                build_op(&again.sent, id->net_luid, &qbefore.q, base + CYCLE_NS, frame);
+                build_op(&again.sent, id->net_luid, &qa.q, base + CYCLE_NS, frame);
                 again.r = again.sent;
                 again.status = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &again.r, sizeof(again.r), &again.r, sizeof(again.r), &again.got);
+                printf("    further request: base=%lld gen=%llu epoch=%llu (from the query after the commit)\n", base + CYCLE_NS,
+                       qa.q.generation, qa.q.context_epoch);
                 print_op("activation on the armed adapter", &again);
                 armed_ok = read_state(h, &s);
-                verdict(again.status == (LONG)STATUS_INVALID_DEVICE_STATE && again.got == 0 && armed_ok && state_matches(&s, base) ? "PASS" : "FAIL",
-                        "REFUSE", index, id->device_id,
-                        again.status == (LONG)STATUS_INVALID_DEVICE_STATE && again.got == 0 && armed_ok && state_matches(&s, base) ? NULL
-                        : "an armed adapter must refuse activation with STATUS_INVALID_DEVICE_STATE, no output, and keep the reported schedule");
+                refused = again.status == (LONG)STATUS_INVALID_DEVICE_STATE && again.got == 0 && armed_ok && state_matches(&s, base);
+                if (refused && meta_ok) {
+                    verdict("PASS", "REFUSE", index, id->device_id, NULL);
+                } else if (refused) {
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, "reported, not judged: STATUS_INVALID_DEVICE_STATE with no "
+                            "output and the schedule kept, but the query after the commit reports generation or epoch 0 (not reported, "
+                            "#365 13.6 D.1), so NOT_CLEAN cannot be told from STATE_CONFLICT");
+                } else {
+                    verdict("FAIL", "REFUSE", index, id->device_id, "an armed adapter must refuse activation with "
+                            "STATUS_INVALID_DEVICE_STATE, no output, and keep the reported schedule");
+                }
             }
-            query_lookup(h, req_op.client_op_id, &qa);
-            printf("    [EVIDENCE] LOOKUP: query with client_op_id 0x%016llX: ntstatus=0x%08lX information=%lu lookup_result=%u (the producer "
-                   "stage expects NOT_IMPLEMENTED 4; success-record retrieval is #460, not asserted here)\n", req_op.client_op_id,
-                   (unsigned long)qa.status, qa.got, query_valid(&qa) ? qa.q.lookup_result : 0u);
+            query_lookup(calls[winner].h, req_op.client_op_id, &qa);
+            printf("    [EVIDENCE] LOOKUP: query on the committing open instance (%s) with client_op_id 0x%016llX: ntstatus=0x%08lX "
+                   "information=%lu lookup_result=%u (the producer stage expects NOT_IMPLEMENTED 4; success-record retrieval is #460, "
+                   "not asserted here)\n", winner == 0 ? "instance 1" : "instance 2", req_op.client_op_id, (unsigned long)qa.status, qa.got,
+                   query_valid(&qa) ? qa.q.lookup_result : 0u);
         } else {
             const char *no = success_any != 0 ? "no single complete commit was established (see COMMIT); the adapter may hold a schedule, "
                                                 "the owned cleanup follows" : "no committed schedule (see COMMIT)";
@@ -1485,6 +1519,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             verdict("BLOCKED", "REFUSE", index, id->device_id, no);
             printf("    [EVIDENCE] LOOKUP: not queried, %s\n", no);
         }
+        CloseHandle(h2);
         verdict("BLOCKED", "GENERATION", index, id->device_id, "generation production before the #352 store is undecided (#365 13.6 D.1): "
                 "a step after the pre-activation value cannot be asserted; never PASS");
     }

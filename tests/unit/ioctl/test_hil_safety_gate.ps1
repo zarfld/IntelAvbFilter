@@ -404,8 +404,9 @@ $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfS
 if (-not $toDef -or $toDef.Extent.Text -notmatch '"Unit"\s*\{\s*60\s*\}') { $toBad += 'global Unit default is no longer 60 s' }
 tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count -eq 0) ($toBad -join '; ')
 # 098: PR #397 R14.  test_tas_activate runs every adapter it enumerates in one process (per TAS adapter: 706 s of its own
-#      bounds with the #369 setup recovery, budget 920 s).  Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
-#      plus (#369 amendment) 5 s per other enumerated adapter inside each adapter run for the observer trial: n x 920 + n x (n - 1) x 5 s,
+#      bounds with the #369 setup recovery, budget 920 s; PR #481: 752 s, budget 980 s, the send bound now covers the largest admitted lead).
+#      Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
+#      plus (#369 amendment) 5 s per other enumerated adapter inside each adapter run for the observer trial: n x 980 + n x (n - 1) x 5 s,
 #      uncapped (no fixed inventory any more; the text below about the test's own limit is superseded for this entry),
 #      at most the test's own adapter limit (ARRAYSIZE(ids) in its source), that limit when nothing was observed; never a
 #      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
@@ -514,15 +515,15 @@ $o
     if ([int]$pa['ls@suite600'] -ne 600) { $paBad += "test_tas_query_clean --link-speed lowers the 600 s suite timeout to $($pa['ls@suite600']) s" }
     if ($pa.Plain -ne 0) { $paBad += 'test_tas_activate still has a fixed one-adapter timeout' }
     foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
-        # #369 amendment: uncapped, n x 920 + n x (n - 1) x 5 s (an observer trial per other enumerated adapter)
+        # #369 amendment: uncapped, n x 980 + n x (n - 1) x 5 s (an observer trial per other enumerated adapter)
         if ($pa["$e@hasLimit"]) { $paBad += "$e declares MaxAdapters; it has no inventory limit" }
         if ($pa["$e@perOther"] -ne 5) { $paBad += "$e PerOtherAdapterSeconds $($pa["$e@perOther"]), expected 5" }
-        $want = [ordered]@{ '1' = 920; '2' = 1850; '3' = 2790; '8' = 7640; '20' = 20300; '0' = 920; '-1' = 920 }
+        $want = [ordered]@{ '1' = 980; '2' = 1970; '3' = 2970; '8' = 8120; '20' = 21500; '0' = 980; '-1' = 980 }
         foreach ($n in $want.Keys) { if ([int]$pa["$e@$n"] -ne [int]$want[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($want[$n]) s" } }
-        # One adapter: the larger of the suite timeout and the 920 s budget, exactly. Below the budget the budget wins
-        # (Max(600, 920) = 920); above it the suite timeout wins (Max(1000, 920) = 1000) and is never lowered
-        if ([int]$pa["$e@suite600"] -ne 920) { $paBad += "$e with one adapter under a 600 s suite: $($pa["$e@suite600"]) s, expected Max(600, 920) = 920 s" }
-        if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 920) = 1000 s (the suite timeout is never lowered)" }
+        # One adapter: the larger of the suite timeout and the 980 s budget, exactly. Below the budget the budget wins
+        # (Max(600, 980) = 980); above it the suite timeout wins (Max(1000, 980) = 1000) and is never lowered
+        if ([int]$pa["$e@suite600"] -ne 980) { $paBad += "$e with one adapter under a 600 s suite: $($pa["$e@suite600"]) s, expected Max(600, 980) = 980 s" }
+        if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 980) = 1000 s (the suite timeout is never lowered)" }
     }
     if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
     if ([int]$pa['gate@9'] -ne 450) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
