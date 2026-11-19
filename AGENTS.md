@@ -19,6 +19,34 @@ This file contains the **small cross-agent contract** that should remain effecti
 
 When adding a backward `Verified by:` link to an existing issue, **only add that requested line**. Read the current body first and preserve every unrelated character/section/relationship. Do not rewrite, normalize, reorganize, delete, or repair other content without explicit user direction. If corruption is suspected, follow `github-issue-integrity` and restore from known-good GitHub history rather than inventing a repair.
 
+## Mandatory HIL execution and blocking-defect rule
+
+Required and applicable hardware tests MUST execute in the
+authorized HIL environment, including tests that perform
+register writes, device initialization, fault injection,
+or other expected hardware mutations.
+
+An Unsafe or Mutating classification alone MUST NOT
+prevent test execution or introduce additional approval gates.
+
+Every unjustified refusal to execute a required testcase
+MUST be recorded as a testing defect. Search for an existing
+root-cause issue first; attach occurrence evidence to it,
+or create a new defect for a distinct root cause.
+
+Do not resolve blocking by excluding tests, weakening
+assertions, changing classifications dishonestly, or
+replacing physical HIL evidence with mocks.
+
+Concrete authorization boundaries, hardware identity,
+bounded execution, testcase-owned cleanup and truthful
+restoration evidence remain mandatory.
+
+Follow `.github/skills/intelavbfilter-testing/SKILL.md`
+for authoritative testing semantics and
+`.github/skills/hardware-operation-risk/SKILL.md`
+for operation-risk assessment.
+
 ## Routing
 
 Use the most specific repository guidance instead of expanding this file:

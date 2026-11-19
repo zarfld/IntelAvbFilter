@@ -164,6 +164,25 @@ Never claim GREEN without evidence identifying: source commit and worktree state
 - GitHub Issues are the lifecycle SSOT. TEST → requirement is `Verifies: #N`; parent lineage is `Traces to: #N`; backward links are `Verified by: #N` and are added append-only (`github-issue-integrity`).
 - Confirmed defects in tests or test infrastructure (including setup, cleanup, restoration, multi-adapter discovery, capability handling and verdict correctness) require a separate GitHub issue and repair in a separate branch/PR. Preserve the original issue, test scope and acceptance criteria. Do not silently repair unrelated test defects within a driver-fix branch.
 
+### Unjustified test blocking is a defect
+
+Every required, applicable testcase that is not executed
+MUST have its non-execution reason recorded and evaluated.
+
+An unjustified pre-execution refusal, including refusal
+based solely on an Unsafe classification, MUST be tracked
+as a test-infrastructure defect.
+
+Search for an existing root-cause issue before creating
+a new defect. Attach each new occurrence as evidence to
+the existing issue when the cause is the same.
+
+A distinct root cause requires a separate GitHub defect
+and an independently traceable repair.
+
+Do not replace an execution failure with a coverage
+exemption, unsupported-hardware verdict or passing mock.
+
 ## I. Elevated execution and hardware authorization
 
 - Read the actual script and its `param()` block before proposing a command; use only parameters that exist (see `run-tests`).
