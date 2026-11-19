@@ -1131,8 +1131,11 @@ static BOOL op_success_ok(const OP_CALL *c)
 
 static void print_op(const char *label, const OP_CALL *c)
 {
-    printf("    %s: op=0x%016llX ntstatus=0x%08lX information=%lu%s out_flags=0x%X reserved1=0x%X\n", label, c->sent.client_op_id,
-           (unsigned long)c->status, c->got, c->status == 0 && c->got == sizeof(c->r) &&
+    char status_text[96];
+
+    tas_fv_status_text(c->status != AVB_NTSTATUS_UNAVAILABLE, c->status, status_text, sizeof(status_text));
+    printf("    %s: op=0x%016llX %s information=%lu%s out_flags=0x%X reserved1=0x%X\n", label, c->sent.client_op_id,
+           status_text, c->got, c->status == 0 && c->got == sizeof(c->r) &&
            memcmp(&c->r, &c->sent, offsetof(AVB_TAS_OP_REQUEST, out_flags)) != 0 ? " (inputs NOT echoed)" : "", c->r.out_flags,
            c->r.reserved1);
 }
@@ -1469,7 +1472,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         BOOL build_known, debug_driver = FALSE, state_ok, fault_ran, gen_reported, gen_measured;
         avb_u32 armed_after = 0;
         unsigned differing = 0, unread = 0;
-        char viol[700], miss[400], reason[1200];
+        char viol[700], miss[400], reason[1200], status_text[96];
 
         if (wire) { wire_stop(); }
         if (sock != INVALID_SOCKET) { closesocket(sock); }
@@ -1498,8 +1501,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                frame, op.flags, op.debug_fault, op.expected_generation, op.expected_generation == 0 ? " (not reported)" : "",
                op.context_epoch, op.context_epoch == 0 ? " (not reported)" : "");
         st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &op, sizeof(op), &op, sizeof(op), &information);
-        printf("    fault request: ntstatus=0x%08lX information=%lu (expected 0x%08lX, no output)\n", (unsigned long)st, information,
-               (unsigned long)expected);
+        tas_fv_status_text(st != AVB_NTSTATUS_UNAVAILABLE, st, status_text, sizeof(status_text));
+        printf("    fault request: %s information=%lu (expected 0x%08lX, no output)\n", status_text, information, (unsigned long)expected);
         fault_ran = st == expected && information == 0;
         state_ok = read_state(h, &s);
         if (state_ok) {
@@ -1702,11 +1705,16 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                     verdict("FAIL", "REFUSE", index, id->device_id, "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST)");
                     break;
                 case TAS_FV_REFUSE_STATUS_UNAVAILABLE:
-                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, "the raw NTSTATUS of the further request was not captured");
+                    sprintf_s(reason, sizeof(reason), "the raw NTSTATUS of the further request was not captured, and no independent "
+                              "violation was measured (information=%lu, record %s, %u restoration-set register(s) differ, %u of 17 unread); "
+                              "neither a refusal nor an unchanged state is established", again.got, s2_ok && state_ok ? "unchanged" :
+                              "not read", d2, u2);
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, reason);
                     break;
                 case TAS_FV_REFUSE_CHANGED:
-                    sprintf_s(reason, sizeof(reason), "the further request must be refused with no output and change nothing: ntstatus=0x%08lX "
-                              "information=%lu, record %u -> %s%u, %u restoration-set register(s) changed", (unsigned long)again.status,
+                    tas_fv_status_text(!ev.status_unavailable, again.status, status_text, sizeof(status_text));
+                    sprintf_s(reason, sizeof(reason), "the further request must be refused with no output and change nothing: %s "
+                              "information=%lu, record %u -> %s%u, %u restoration-set register(s) changed", status_text,
                               again.got, armed_after, s2_ok ? "" : "unread ", s2_ok ? s2.armed : 0u, d2);
                     verdict("FAIL", "REFUSE", index, id->device_id, reason);
                     break;

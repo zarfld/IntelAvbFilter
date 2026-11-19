@@ -18,6 +18,7 @@
 #pragma once
 
 #include <windows.h>
+#include <stdio.h>
 #include "../../include/avb_ioctl.h"
 
 #define TAS_ACT_EDGE_MARGIN_NS     20000000LL
@@ -257,6 +258,18 @@ typedef enum {
     TAS_FV_REFUSE_METADATA_ZERO             /* INCONCLUSIVE: generation or epoch 0, NOT_CLEAN cannot be told from STATE_CONFLICT */
 } TAS_FV_REFUSE_CLASS;
 
+/* The completion of one request as evidence text (TC-MOCK-059). captured: avb_ioctl_ntstatus returned a driver completion, not
+ * its capture sentinel AVB_NTSTATUS_UNAVAILABLE (tests/common/avb_verdict.h), which is never shown as a driver completion code
+ * (PR #489 review r4632275740) */
+static __inline void tas_fv_status_text(BOOL captured, LONG status, char *buf, size_t n)
+{
+    if (!captured) {
+        sprintf_s(buf, n, "raw NTSTATUS not captured (no driver completion observed)");
+    } else {
+        sprintf_s(buf, n, "ntstatus=0x%08lX", (unsigned long)status);
+    }
+}
+
 static __inline TAS_FV_REFUSE_CLASS tas_fv_f2_refuse(const TAS_FV_REFUSE_EVIDENCE *e)
 {
     BOOL records = e->record_before && e->record_after;
@@ -266,11 +279,13 @@ static __inline TAS_FV_REFUSE_CLASS tas_fv_f2_refuse(const TAS_FV_REFUSE_EVIDENC
     if (e->not_served) {
         return TAS_FV_REFUSE_NOT_SERVED;
     }
-    if (e->status_unavailable) {
-        return TAS_FV_REFUSE_STATUS_UNAVAILABLE;
-    }
+    /* Independently established violations first: a missing raw status never erases one (PR #489 review r4632275740); the caller
+     * reports the missing status with the violation */
     if (e->accepted || e->output || (records && e->armed_after != e->armed_before) || e->differing != 0) {
         return TAS_FV_REFUSE_CHANGED;
+    }
+    if (e->status_unavailable) {
+        return TAS_FV_REFUSE_STATUS_UNAVAILABLE;
     }
     if (!e->state_refusal) {
         return TAS_FV_REFUSE_OTHER_STATUS;

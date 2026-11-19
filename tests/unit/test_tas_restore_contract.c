@@ -1379,6 +1379,44 @@ static void test_59_fault_f2_refuse(void) {
     EXPECT_EQ("record CLEAN before the probe: NOT_DIRTY (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_DIRTY);
     fv_refuse_pass(&e); e.metadata_reported = FALSE;
     EXPECT_EQ("generation or epoch 0: METADATA_ZERO (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_METADATA_ZERO);
+
+    /* r4632275740: a missing raw status never erases an independently measured violation, and never permits PASS */
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1;
+    EXPECT_EQ("raw status not captured + 1 register changed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.armed_after = AVB_TAS_STATE_ARMED;
+    EXPECT_EQ("raw status not captured + record changed DIRTY -> ARMED: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.output = TRUE;
+    EXPECT_EQ("raw status not captured + output observed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1; e.unread = 16; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured + 1 changed, 16 unread, record unread: CHANGED (FAIL)", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE;
+    EXPECT_EQ("raw status not captured, everything measured unchanged: STATUS_UNAVAILABLE (INCONCLUSIVE), not PASS",
+              tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.unread = 17; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured, nothing measured (17 unread, record unread): STATUS_UNAVAILABLE (INCONCLUSIVE), no FAIL "
+              "fabricated", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    /* earlier corrections kept: a measured change survives unread registers; PASS needs all 17 read */
+    fv_refuse_pass(&e); e.differing = 1; e.unread = 4;
+    EXPECT_EQ("status captured, 1 changed, 4 unread: still CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.unread = 1;
+    EXPECT_EQ("status captured, 1 unread: still UNCHANGED_UNESTABLISHED, not PASS", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+
+    /* Reporting: the capture sentinel is never shown as a driver completion code; a captured status is shown exactly */
+    {
+        char text[96];
+        tas_fv_status_text(FALSE, (LONG)0x7FFFFFFF, text, sizeof(text));
+        printf("    status text, not captured: \"%s\"\n", text);
+        EXPECT_TRUE("not captured: the text says so", strstr(text, "not captured") != NULL);
+        EXPECT_TRUE("not captured: the sentinel 0x7FFFFFFF is not printed as a completion code", strstr(text, "7FFFFFFF") == NULL);
+        tas_fv_status_text(TRUE, (LONG)0xC0000010, text, sizeof(text));
+        printf("    status text, captured: \"%s\"\n", text);
+        EXPECT_TRUE("captured: ntstatus=0xC0000010 shown exactly", strcmp(text, "ntstatus=0xC0000010") == 0);
+    }
 }
 
 int main(void) {
