@@ -498,6 +498,11 @@ foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas
     $o["$e@hasLimit"] = $HilTestTimeoutPerAdapter[$e].Contains('MaxAdapters')
     $o["$e@perOther"] = [int]$HilTestTimeoutPerAdapter[$e].PerOtherAdapterSeconds
 }
+$fv = 'test_tas_activate --fault-versioned'   # #482 (TEST-HILGATE-119); guarded: an unregistered entry must not abort this block
+foreach ($n in -1, 0, 1, 2, 3, 8) { $o["fv@$n"] = Get-AvbTestTimeoutSeconds -Entry $fv -SuiteSeconds 60 -AdapterCount $n }
+$o['fv@registered'] = $HilTestTimeoutPerAdapter.Contains($fv)
+$o['fv@hasLimit'] = $(if ($HilTestTimeoutPerAdapter.Contains($fv)) { $HilTestTimeoutPerAdapter[$fv].Contains('MaxAdapters') } else { $false })
+$o['fv@perOther'] = $(if ($HilTestTimeoutPerAdapter.Contains($fv)) { [int]$HilTestTimeoutPerAdapter[$fv].PerOtherAdapterSeconds } else { -1 })
 $o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
 $o['PlainRetry'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_dev_lifecycle').Count
 foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["irf@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 60 -AdapterCount $n }
@@ -526,7 +531,7 @@ $o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -Suite
 $o
 '@))
     $pa = & $paCheck
-    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_tas_query_clean --link-speed|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the six test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_activate --fault-versioned|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_tas_query_clean --link-speed|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the four test_tas_activate entries (--fault-versioned: TEST-HILGATE-119), the six test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
     if ($pa['icc@hasLimit']) { $paBad += 'test_dev_lifecycle --init-concurrent declares MaxAdapters; it has no inventory limit' }
     $cwant = [ordered]@{ '1' = 1130; '2' = 2260; '3' = 3390; '8' = 9040; '20' = 22600; '0' = 1130; '-1' = 1130 }   # uncapped; unknown (-1) = one adapter
     foreach ($n in $cwant.Keys) { if ([int]$pa["icc@$n"] -ne [int]$cwant[$n]) { $paBad += "test_dev_lifecycle --init-concurrent with $n enumerated adapter(s): $($pa["icc@$n"]) s, expected $($cwant[$n]) s" } }
@@ -583,6 +588,27 @@ $o
     }
 }
 tc_check 'TEST-HILGATE-098-tas-activate-timeout-scales-with-enumerated-adapters' ($paBad.Count -eq 0) ($paBad -join '; ')
+# 119 (#482): test_tas_activate --fault-versioned runs F1 then F2 on every TAS adapter, each a complete run with the --fault
+#      bounds (980 s) and its own observer trial per other enumerated adapter (5 s): n x 1960 + n x (n - 1) x 10 s, uncapped.
+#      Unsafe; listed in an automatic hardware suite - no identified interaction or long-duration requirement (#458, testcase-
+#      level exceptions); the legacy function-71 --fault stays registered and executable until the producer's atomic cutover.
+$fvBad = @()
+$fvE = 'test_tas_activate --fault-versioned'
+if ($registry[$fvE] -ne 'Unsafe') { $fvBad += "$fvE classified '$($registry[$fvE])', expected Unsafe (TAS_ACTIVATE plus the owned NIC cycle)" }
+if ($registry['test_tas_activate --fault'] -ne 'Unsafe') { $fvBad += 'the legacy test_tas_activate --fault is no longer registered Unsafe (kept until the cutover)' }
+$fvListed = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) } | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+if ($fvListed -notcontains $fvE) { $fvBad += "$fvE is not listed in an automatic hardware suite" }
+if (@($gapTables.Values | Where-Object { $null -ne $_ -and $_.Contains($fvE) }).Count -gt 0) { $fvBad += "$fvE is a program-level coverage gap" }
+$fvPa = Get-Variable -Name pa -ValueOnly -ErrorAction SilentlyContinue
+if ($null -eq $fvPa) { $fvBad += 'per-adapter budgets not computed (see TEST-HILGATE-098)' }
+else {
+    if (-not $fvPa['fv@registered']) { $fvBad += "$fvE has no per-adapter budget" }
+    if ($fvPa['fv@hasLimit']) { $fvBad += "$fvE declares MaxAdapters; it has no inventory limit" }
+    if ($fvPa['fv@perOther'] -ne 10) { $fvBad += "$fvE PerOtherAdapterSeconds $($fvPa['fv@perOther']), expected 10 (two observer trials)" }
+    $fvWant = [ordered]@{ '1' = 1960; '2' = 3940; '3' = 5940; '8' = 16240; '0' = 1960; '-1' = 1960 }
+    foreach ($n in $fvWant.Keys) { if ([int]$fvPa["fv@$n"] -ne [int]$fvWant[$n]) { $fvBad += "$fvE with $n enumerated adapter(s): $($fvPa["fv@$n"]) s, expected $($fvWant[$n]) s" } }
+}
+tc_check 'TEST-HILGATE-119-fault-versioned-registered-unsafe-automatic-budgeted-per-adapter-legacy-fault-kept' ($fvBad.Count -eq 0) ($fvBad -join '; ')
 tc_check 'TEST-HILGATE-009-nic-admin-only-in-unsafe-entries' ($registry.Count -gt 0 -and $bad009.Count -eq 0) ("NIC/driver administration outside Unsafe: {0}" -f ($bad009 -join ', '))
 
 $commonC = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\common\avb_test_common.c'))

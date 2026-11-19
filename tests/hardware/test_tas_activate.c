@@ -56,6 +56,47 @@
  *            No link is required by the request (it carries no link speed); the cleanup's TX probe still needs one.
  *   --fault  the failed-rollback path of #357 (PR #397 review), case TC-TASACT-FAULT-001. Debug drivers fail schedule write
  *            13 and the first restore write on request (devices/i226_tas_activate.h); Release drivers must refuse that request.
+ *            LEGACY function-71 regression, kept executable until the producer's atomic cutover (#482, #357).
+ *   --fault-versioned  TEST-TASACT-FAULT-001 (#482, Verifies #357 and #352), cases TC-TASACT-FAULT-001-F1 and -F2 on the 144-byte
+ *            version-1 AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): HOLD, the bound NET_LUID, a distinct non-zero
+ *            client_op_id, generation and epoch from the test's own query (0 printed "(not reported)", never fabricated),
+ *            AVB_TAS_F_ACCEPT_UNVERIFIED (#362/#351/#365: it authorizes execution of an unqualified HOLD control, not
+ *            HARDWARE_VERIFIED). The common numbered-write contract (#482): N = 1 is the first schedule write for every backend;
+ *            no commit-write index is assumed. Per TAS adapter F1 then F2, each with its own handles, proved pre-state (recovered
+ *            once by the owned NIC cycle when not proved), observer trial and owned NIC-cycle cleanup with its CLEANUP/RESTORE lines.
+ *            A complete GET_VERSION reply classifies the driver: only a Debug driver gets a non-zero debug_fault (the Release
+ *            refusal is #368's negative control, not claimed here); an unknown build sends nothing.
+ *              METADATA    (both cases) the control needs a valid, current, non-zero generation/epoch pair from the test's own
+ *                          pre-state query; without it the case is nonpassing (FAIL) and stays visible, whatever the request
+ *                          completes with. The request is still sent with the query's values, never fabricated ones.
+ *              F1  debug_fault = N 1, restore not failed (bit 8 clear):
+ *                  COMPLETION  STATUS_IO_DEVICE_ERROR, Information 0 (FAILED_RESTORED 3 is the record's outcome; error completions
+ *                              carry no output, record retrieval is #352/#379/#460 and not inferred from the status).
+ *                  ROLLBACK    every measured restoration-set register equal to the test's own pre-state query; the record CLEAN
+ *                              when restoration is established (#365 R8: a failure before the transmit-mode write preserves the
+ *                              previous state if restoration is established). A measured difference is FAIL whatever else is
+ *                              unread; a non-CLEAN record is FAIL once the registers establish restoration, or when no write was
+ *                              attempted. (After a mode write reached hardware a later failure stays DIRTY even with matching
+ *                              read-back, #362 decision 4 - not reachable with N = 1.)
+ *                  GENERATION  advanced exactly once when reported before and after; 0 is not a value (INCONCLUSIVE).
+ *              F2  debug_fault = N 1 | AVB_TAS_DEBUG_FAULT_RESTORE:
+ *                  COMPLETION  STATUS_UNSUCCESSFUL, Information 0 (FAILED_NOT_RESTORED 4 is the record's outcome).
+ *                  STATE       the record DIRTY (GET_TAS_STATE): the deliberately failed restore leaves restoration unestablished
+ *                              (#365 R8, #362 decisions 4 and 5).
+ *                  REFUSE      a further otherwise-valid HOLD (debug_fault 0, a new client_op_id) with the post-failure query's
+ *                              metadata: STATUS_INVALID_DEVICE_STATE, Information 0, record and restoration set unchanged. #369's
+ *                              rule: with reported metadata PASS; with generation or epoch 0 INCONCLUSIVE (NOT_CLEAN cannot be told
+ *                              from STATE_CONFLICT); acceptance, output or a measured change FAIL.
+ *            A STATUS_INVALID_DEVICE_STATE refusal (no output) of a request carrying the query's unreported metadata (generation or
+ *            epoch 0) leaves only COMPLETION's fault-path attribution INCONCLUSIVE: 0 is never a valid value and is refused
+ *            STATE_CONFLICT before any write (#352 L2, #365 13.6 D.1), so it does not show that the injected fault ran. The missing
+ *            metadata stays the separate METADATA failure; with reported metadata that refusal is FAIL. A refusal never proves
+ *            injection or rollback, and no generation advance is expected for a refusal before any write. #369's ambiguity rule
+ *            applies to F2's subsequent REFUSE probe only.
+ *            0x80C absent (STATUS_INVALID_DEVICE_REQUEST) is FAIL, never SKIP, and the experiment is not suppressed: every
+ *            independently measurable result is still taken and reported, and a check whose fault path was not reached is
+ *            INCONCLUSIVE (not exercised), never PASS, unless a measured change makes it FAIL. Coverage limits (#482): N = 1 only;
+ *            no late-write, partial-schedule, PHC-recheck or read-back-failure control.
  *
  * Pre-state and setup (#369 "pre-state proved by the test itself through the TAS query"; #365 13.7, tests own setup): before
  * TAS_ACTIVATE the driver record is CLEAN (GET_TAS_STATE) and IOCTL_AVB_TAS_QUERY_HW returns a readable, clean reply (hw_read
@@ -167,11 +208,16 @@
 #define FILETIME_TO_UNIX_US  11644473600000000LL
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
-typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT } RUN_MODE;
+typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV } RUN_MODE;
+
+/* #482: the common numbered-write contract - N = 1 is the first schedule write for every backend (published, not a commit index) */
+#define FAULTV_FIRST_SCHEDULE_WRITE 1u
 
 static RUN_MODE g_mode;
+static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
-static int g_failed, g_blocked, g_ran;
+static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
+static int g_tas_adapters;                /* physical TAS-capable adapters run, counted once each (PR #489) */
 static avb_u64 g_capture_luid;
 static unsigned g_next_seq;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
@@ -1085,8 +1131,11 @@ static BOOL op_success_ok(const OP_CALL *c)
 
 static void print_op(const char *label, const OP_CALL *c)
 {
-    printf("    %s: op=0x%016llX ntstatus=0x%08lX information=%lu%s out_flags=0x%X reserved1=0x%X\n", label, c->sent.client_op_id,
-           (unsigned long)c->status, c->got, c->status == 0 && c->got == sizeof(c->r) &&
+    char status_text[96];
+
+    tas_fv_status_text(c->status != AVB_NTSTATUS_UNAVAILABLE, c->status, status_text, sizeof(status_text));
+    printf("    %s: op=0x%016llX %s information=%lu%s out_flags=0x%X reserved1=0x%X\n", label, c->sent.client_op_id,
+           status_text, c->got, c->status == 0 && c->got == sizeof(c->r) &&
            memcmp(&c->r, &c->sent, offsetof(AVB_TAS_OP_REQUEST, out_flags)) != 0 ? " (inputs NOT echoed)" : "", c->r.out_flags,
            c->r.reserved1);
 }
@@ -1410,6 +1459,294 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         return;
     }
 
+    if (g_mode == MODE_FAULTV) {
+        /* #482 F1/F2 on the versioned request. Every measurement keeps its own validity rule; a missing one is named, never read
+         * as unchanged, and a measured violation stays FAIL whatever else is missing. The owned cleanup below always runs */
+        const BOOL f2 = g_fault_case == 2;
+        const LONG expected = f2 ? (LONG)STATUS_UNSUCCESSFUL : (LONG)STATUS_IO_DEVICE_ERROR;
+        AVB_TAS_OP_REQUEST op;
+        IOCTL_VERSION version = {0};
+        QUERY_READ qa;
+        DWORD br = 0, information = 0;
+        LONG st;
+        BOOL build_known, debug_driver = FALSE, state_ok, fault_ran, gen_reported, gen_measured;
+        avb_u32 armed_after = 0;
+        unsigned differing = 0, unread = 0;
+        char viol[700], miss[400], reason[1200], status_text[96];
+
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        CloseHandle(h2);
+        build_known = DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) &&
+                      br >= sizeof(version);   /* only a complete reply carries Flags */
+        if (build_known) {
+            debug_driver = (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) != 0;
+        }
+        if (!build_known || !debug_driver) {
+            verdict("BLOCKED", "COMPLETION", index, id->device_id, !build_known
+                    ? "GET_VERSION gave no complete reply: Debug or Release is unknown, so the fault request is not sent"
+                    : "Release driver: debug_fault injection is Debug-only (#365 13.3); the Release refusal of a non-zero debug_fault is "
+                      "#368's negative control, not claimed here; the fault request is not sent");
+            (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+            return;
+        }
+        build_op(&op, id->net_luid, &qbefore.q, base, frame);
+        op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+        op.debug_fault = (FAULTV_FIRST_SCHEDULE_WRITE & AVB_TAS_DEBUG_FAULT_WRITE_MASK) | (f2 ? AVB_TAS_DEBUG_FAULT_RESTORE : 0u);
+        printf("\n  --- %s: IOCTL_AVB_TAS_ACTIVATE_80C, HOLD, the first schedule write fails%s (Debug driver) ---\n", f2 ? "F2" : "F1",
+               f2 ? " and the first restore write fails" : ", restore writes not failed");
+        printf("    request: op=0x%016llX pre=HOLD base=%lld (PHC %lld, lead %lld ms) cycle=%lld window=%lld..%lld ms frame=%u flags=0x%X "
+               "(ACCEPT_UNVERIFIED: authorizes execution, not HARDWARE_VERIFIED) debug_fault=0x%X gen=%llu%s epoch=%llu%s\n",
+               op.client_op_id, base, phc, (base - phc) / NS_PER_MS, CYCLE_NS, WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS,
+               frame, op.flags, op.debug_fault, op.expected_generation, op.expected_generation == 0 ? " (not reported)" : "",
+               op.context_epoch, op.context_epoch == 0 ? " (not reported)" : "");
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &op, sizeof(op), &op, sizeof(op), &information);
+        tas_fv_status_text(st != AVB_NTSTATUS_UNAVAILABLE, st, status_text, sizeof(status_text));
+        printf("    fault request: %s information=%lu (expected 0x%08lX, no output)\n", status_text, information, (unsigned long)expected);
+        fault_ran = st == expected && information == 0;
+        state_ok = read_state(h, &s);
+        if (state_ok) {
+            armed_after = s.armed;
+            print_state("after the fault request", &s);
+        }
+        query(h, &qa);
+        print_query("after the fault request", &qa);
+        restoration_set_compare(&qbefore, &qa, &differing, &unread);
+        printf("    [EVIDENCE] restoration set (DES 12.5, BASET_L/H included): %u of %u compared registers differ from the pre-state "
+               "query, %u of 17 unread\n", differing, 17u - unread, unread);
+        gen_reported = query_valid(&qbefore) && qbefore.q.generation != 0;
+        gen_measured = gen_reported && query_valid(&qa) && qa.q.generation != 0;
+        if (!gen_reported) {
+            printf("    [EVIDENCE] generation: not reported before the request (0): neither a value nor evidence of a transition\n");
+        } else {
+            printf("    [EVIDENCE] generation: before %llu, after %s%llu\n", qbefore.q.generation, gen_measured ? "" : "not reported ",
+                   query_valid(&qa) ? qa.q.generation : 0ull);
+        }
+
+        /* METADATA (#482; Q 2026-11-19): whether setup obtained a valid, current, non-zero generation/epoch pair. Independent of the
+         * completion: missing metadata stays nonpassing and visible; the request above carried the query's values as reported */
+        if (!query_valid(&qbefore)) {
+            verdict("FAIL", "METADATA", index, id->device_id, "the pre-state query is not valid: no current generation and epoch were "
+                    "obtained; the control is not established (nothing fabricated)");
+        } else if (qbefore.q.generation == 0 || qbefore.q.context_epoch == 0) {
+            sprintf_s(reason, sizeof(reason), "the pre-state query reports generation %llu and epoch %llu: 0 is never a valid value, it "
+                      "means not reported (#352 L2, #365 13.6 D.1); a valid current non-zero pair is required for the F1/F2 control, "
+                      "which is therefore not established; the request carried the reported values, none fabricated",
+                      qbefore.q.generation, qbefore.q.context_epoch);
+            verdict("FAIL", "METADATA", index, id->device_id, reason);
+        } else {
+            sprintf_s(reason, sizeof(reason), "generation %llu and epoch %llu from the test's own pre-state query", qbefore.q.generation,
+                      qbefore.q.context_epoch);
+            verdict("PASS", "METADATA", index, id->device_id, reason);
+        }
+
+        /* COMPLETION */
+        if (st == AVB_NTSTATUS_UNAVAILABLE) {
+            verdict("INCONCLUSIVE", "COMPLETION", index, id->device_id, "the raw NTSTATUS was not captured");
+        } else if (st == (LONG)STATUS_INVALID_DEVICE_REQUEST) {
+            verdict("FAIL", "COMPLETION", index, id->device_id, "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST): the "
+                    "code is allocated to the adapter's TAS function (#362, #357), so this is FAIL, never SKIP; the fault path was not "
+                    "reached");
+        } else if (st == (LONG)STATUS_INVALID_DEVICE_STATE && information == 0 && (op.expected_generation == 0 || op.context_epoch == 0)) {
+            /* #352 L2 / #365 13.6 D.1: 0 is never a valid generation or epoch; a request carrying the query's unreported (0) metadata
+             * is refused STATE_CONFLICT before any write. #369's rule: such a refusal is reported, not judged - the fault path was
+             * not reached and nothing is attributed to it */
+            verdict("INCONCLUSIVE", "COMPLETION", index, id->device_id, "fault-path attribution not established: STATUS_INVALID_DEVICE_STATE "
+                    "with no output for a request carrying the query's generation or epoch 0 - refused before any write (STATE_CONFLICT, "
+                    "#352 L2), so the injected fault is not shown to have run; the missing metadata is the separate METADATA failure");
+        } else if (fault_ran) {
+            verdict("PASS", "COMPLETION", index, id->device_id, f2 ? "STATUS_UNSUCCESSFUL with no output (the record's FAILED_NOT_RESTORED "
+                    "is not retrievable yet, #352)" : "STATUS_IO_DEVICE_ERROR with no output (the record's FAILED_RESTORED is not "
+                    "retrievable yet, #352)");
+        } else {
+            sprintf_s(reason, sizeof(reason), "completion ntstatus=0x%08lX information=%lu, expected 0x%08lX (%s) with no output",
+                      (unsigned long)st, information, (unsigned long)expected, f2 ? "STATUS_UNSUCCESSFUL" : "STATUS_IO_DEVICE_ERROR");
+            verdict("FAIL", "COMPLETION", index, id->device_id, reason);
+        }
+
+        if (!f2) {
+            /* F1 ROLLBACK: registers at the test's own baseline and the record CLEAN */
+            viol[0] = '\0';
+            miss[0] = '\0';
+            if (differing != 0) {
+                sprintf_s(reason, sizeof(reason), "; %u measured restoration-set register(s) differ from the pre-state query (listed above)",
+                          differing);
+                strcat_s(viol, sizeof(viol), reason);
+            }
+            /* The record must be CLEAN when restoration is established (#365 R8): here, every restoration-set register measured
+             * equal; and always when no write was attempted (fault path not reached). Otherwise a non-CLEAN record is not judged */
+            if (!state_ok) {
+                strcat_s(miss, sizeof(miss), "; the TAS record (GET_TAS_STATE) was not read");
+            } else if (armed_after != AVB_TAS_STATE_CLEAN) {
+                if (!fault_ran || (differing == 0 && unread == 0)) {
+                    sprintf_s(reason, sizeof(reason), "; the TAS record is not CLEAN (armed=%u) although %s", armed_after,
+                              fault_ran ? "every restoration-set register measured equal establishes restoration"
+                                        : "the fault path was not reached (no write attempted)");
+                    strcat_s(viol, sizeof(viol), reason);
+                } else {
+                    sprintf_s(reason, sizeof(reason), "; the TAS record is armed=%u while restoration is not established by the "
+                              "measurement (registers unread)", armed_after);
+                    strcat_s(miss, sizeof(miss), reason);
+                }
+            }
+            if (unread != 0) {
+                sprintf_s(reason, sizeof(reason), "; %u of 17 restoration-set register(s) unread before or after (listed above)", unread);
+                strcat_s(miss, sizeof(miss), reason);
+            }
+            if (viol[0] != '\0') {
+                sprintf_s(reason, sizeof(reason), "%s%s%s", viol + 2, miss[0] != '\0' ? "; also not measured" : "", miss);
+                verdict("FAIL", "ROLLBACK", index, id->device_id, reason);
+            } else if (!fault_ran) {
+                sprintf_s(reason, sizeof(reason), "not exercised: the fault path was not reached (see COMPLETION), so restoration after a "
+                          "failed schedule write is not established; measured: no restoration-set difference, record %s%s%s",
+                          state_ok ? "CLEAN" : "unread", miss[0] != '\0' ? "; not measured" : "", miss);
+                verdict("INCONCLUSIVE", "ROLLBACK", index, id->device_id, reason);
+            } else if (miss[0] != '\0') {
+                sprintf_s(reason, sizeof(reason), "no observed violation, but not established: %s", miss + 2);
+                verdict("INCONCLUSIVE", "ROLLBACK", index, id->device_id, reason);
+            } else {
+                verdict("PASS", "ROLLBACK", index, id->device_id, "every restoration-set register equal to the pre-state query, record CLEAN");
+            }
+            /* F1 GENERATION: exactly one advance for the attempted mutation and its rollback, when reported */
+            if (!gen_reported || !gen_measured) {
+                verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, !gen_reported
+                        ? "the generation was not reported before the request (0): the transition cannot be measured and is not fabricated"
+                        : "the generation was reported before the request but not after it");
+            } else if (!fault_ran) {
+                if (qa.q.generation != qbefore.q.generation) {
+                    sprintf_s(reason, sizeof(reason), "the fault path was not reached, yet the generation changed from %llu to %llu",
+                              qbefore.q.generation, qa.q.generation);
+                    verdict("FAIL", "GENERATION", index, id->device_id, reason);
+                } else {
+                    verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, "not exercised: the fault path was not reached (see "
+                            "COMPLETION); the generation is unchanged");
+                }
+            } else if (qa.q.generation == qbefore.q.generation + 1) {
+                verdict("PASS", "GENERATION", index, id->device_id, "advanced exactly once");
+            } else {
+                sprintf_s(reason, sizeof(reason), "generation %llu -> %llu, expected exactly one advance for the attempted mutation",
+                          qbefore.q.generation, qa.q.generation);
+                verdict("FAIL", "GENERATION", index, id->device_id, reason);
+            }
+        } else {
+            /* F2 STATE: the record DIRTY after a failed restore (classification: tas_fv_f2_state, TC-MOCK-058) */
+            switch (tas_fv_f2_state(fault_ran, state_ok, armed_after, differing)) {
+            case TAS_FV_STATE_DIRTY:
+                verdict("PASS", "STATE", index, id->device_id, NULL);
+                break;
+            case TAS_FV_STATE_NOT_DIRTY:
+                sprintf_s(reason, sizeof(reason), "GET_TAS_STATE reports armed=%u, expected DIRTY (2)", armed_after);
+                verdict("FAIL", "STATE", index, id->device_id, reason);
+                break;
+            case TAS_FV_STATE_UNREAD:
+                verdict("INCONCLUSIVE", "STATE", index, id->device_id, "the TAS record (GET_TAS_STATE) was not read after the fault request");
+                break;
+            case TAS_FV_STATE_CHANGED_UNREACHED:
+                if (state_ok) {
+                    sprintf_s(reason, sizeof(reason), "the fault path was not reached (see COMPLETION), yet the record is armed=%u and %u "
+                              "restoration-set register(s) differ from the pre-state query", armed_after, differing);
+                } else {
+                    sprintf_s(reason, sizeof(reason), "the fault path was not reached (see COMPLETION), yet %u restoration-set register(s) "
+                              "differ from the pre-state query (the record was not read; a measured change is not hidden by it)", differing);
+                }
+                verdict("FAIL", "STATE", index, id->device_id, reason);
+                break;
+            default:
+                verdict("INCONCLUSIVE", "STATE", index, id->device_id, "not exercised: the fault path was not reached (see COMPLETION), so "
+                        "DIRTY is not established; measured: record CLEAN, no restoration-set difference");
+                break;
+            }
+            /* F2 REFUSE: a further valid activation with the post-failure metadata (#369's rule) */
+            if (!query_valid(&qa)) {
+                verdict("BLOCKED", "REFUSE", index, id->device_id, "the query after the fault request failed: no current generation and "
+                        "epoch for the further request, which is not sent");
+            } else {
+                OP_CALL again;
+                AVB_TAS_STATE s2;
+                QUERY_READ qb;
+                unsigned d2 = 0, u2 = 0;
+                TAS_FV_REFUSE_EVIDENCE ev;
+                BOOL s2_ok;
+
+                ZeroMemory(&again, sizeof(again));
+                build_op(&again.sent, id->net_luid, &qa.q, base + CYCLE_NS, frame);
+                again.sent.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;   /* debug_fault 0: an otherwise-valid HOLD */
+                again.r = again.sent;
+                again.status = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &again.r, sizeof(again.r), &again.r, sizeof(again.r),
+                                                  &again.got);
+                printf("    further request: op=0x%016llX base=%lld debug_fault=0 gen=%llu%s epoch=%llu%s (from the query after the failure)\n",
+                       again.sent.client_op_id, base + CYCLE_NS, qa.q.generation, qa.q.generation == 0 ? " (not reported)" : "",
+                       qa.q.context_epoch, qa.q.context_epoch == 0 ? " (not reported)" : "");
+                print_op("activation after the failure", &again);
+                s2_ok = read_state(h, &s2);
+                if (s2_ok) { print_state("after the further request", &s2); }
+                query(h, &qb);
+                print_query("after the further request", &qb);
+                restoration_set_compare(&qa, &qb, &d2, &u2);
+                printf("    [EVIDENCE] further request: %u of %u compared restoration-set registers differ from the post-failure query, "
+                       "%u of 17 unread\n", d2, 17u - u2, u2);
+                /* Classification: tas_fv_f2_refuse (TC-MOCK-059) */
+                ZeroMemory(&ev, sizeof(ev));
+                ev.not_served = again.status == (LONG)STATUS_INVALID_DEVICE_REQUEST;
+                ev.status_unavailable = again.status == AVB_NTSTATUS_UNAVAILABLE;
+                ev.accepted = again.status == 0;
+                ev.output = again.got != 0;
+                ev.state_refusal = again.status == (LONG)STATUS_INVALID_DEVICE_STATE;
+                ev.record_before = state_ok;
+                ev.armed_before = armed_after;
+                ev.record_after = s2_ok;
+                ev.armed_after = s2_ok ? s2.armed : 0u;
+                ev.differing = d2;
+                ev.unread = u2;
+                ev.fault_ran = fault_ran;
+                ev.metadata_reported = qa.q.generation != 0 && qa.q.context_epoch != 0;
+                switch (tas_fv_f2_refuse(&ev)) {
+                case TAS_FV_REFUSE_NOT_SERVED:
+                    verdict("FAIL", "REFUSE", index, id->device_id, "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST)");
+                    break;
+                case TAS_FV_REFUSE_STATUS_UNAVAILABLE:
+                    sprintf_s(reason, sizeof(reason), "the raw NTSTATUS of the further request was not captured, and no independent "
+                              "violation was measured (information=%lu, record %s, %u restoration-set register(s) differ, %u of 17 unread); "
+                              "neither a refusal nor an unchanged state is established", again.got, s2_ok && state_ok ? "unchanged" :
+                              "not read", d2, u2);
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, reason);
+                    break;
+                case TAS_FV_REFUSE_CHANGED:
+                    tas_fv_status_text(!ev.status_unavailable, again.status, status_text, sizeof(status_text));
+                    sprintf_s(reason, sizeof(reason), "the further request must be refused with no output and change nothing: %s "
+                              "information=%lu, record %u -> %s%u, %u restoration-set register(s) changed", status_text,
+                              again.got, armed_after, s2_ok ? "" : "unread ", s2_ok ? s2.armed : 0u, d2);
+                    verdict("FAIL", "REFUSE", index, id->device_id, reason);
+                    break;
+                case TAS_FV_REFUSE_OTHER_STATUS:
+                    sprintf_s(reason, sizeof(reason), "refused with ntstatus=0x%08lX, expected STATUS_INVALID_DEVICE_STATE", (unsigned long)again.status);
+                    verdict("FAIL", "REFUSE", index, id->device_id, reason);
+                    break;
+                case TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED:
+                    sprintf_s(reason, sizeof(reason), "STATUS_INVALID_DEVICE_STATE with no output, but the unchanged state is not established "
+                              "(record %s, %u of 17 restoration-set registers unread)", s2_ok && state_ok ? "read" : "unread", u2);
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, reason);
+                    break;
+                case TAS_FV_REFUSE_NOT_DIRTY:
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, "refused with STATUS_INVALID_DEVICE_STATE and nothing changed, but "
+                            "the DIRTY precondition was not established (see COMPLETION and STATE)");
+                    break;
+                case TAS_FV_REFUSE_METADATA_ZERO:
+                    verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, "reported, not judged: STATUS_INVALID_DEVICE_STATE with no output "
+                            "and the state kept, but the post-failure query reports generation or epoch 0 (not reported, #365 13.6 D.1), so "
+                            "NOT_CLEAN cannot be told from STATE_CONFLICT");
+                    break;
+                default:
+                    verdict("PASS", "REFUSE", index, id->device_id, "STATUS_INVALID_DEVICE_STATE, no output, record DIRTY and restoration set "
+                            "unchanged");
+                    break;
+                }
+            }
+        }
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+        return;
+    }
+
     if (g_mode == MODE_PASS) {
         /* #370 amendment 2026-11-19: PASS on the versioned request. Under #365's R7 order a header-valid PASS completes
          * STATUS_NOT_IMPLEMENTED with no output before the metadata, schedule, link and tier checks and before any register or
@@ -1709,9 +2046,10 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--hold") == 0) { g_mode = MODE_HOLD; g_case = "TC-TASAPI-004"; }
     if (argc == 2 && strcmp(argv[1], "--pass") == 0) { g_mode = MODE_PASS; g_case = "TC-TASAPI-005"; }
     if (argc == 2 && strcmp(argv[1], "--fault") == 0) { g_mode = MODE_FAULT; g_case = "TC-TASACT-FAULT-001"; }
+    if (argc == 2 && strcmp(argv[1], "--fault-versioned") == 0) { g_mode = MODE_FAULTV; g_case = "TC-TASACT-FAULT-001"; }
     printf("=== IntelAvbFilter - IOCTL_AVB_TAS_ACTIVATE on real hardware (#357) ===\n");
     if (g_mode == MODE_NONE) {
-        printf("[BLOCKED] TC-TASAPI-004: usage: test_tas_activate --hold | --pass | --fault\n");
+        printf("[BLOCKED] TC-TASAPI-004: usage: test_tas_activate --hold | --pass | --fault | --fault-versioned\n");
         return 3;
     }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -1759,13 +2097,25 @@ int main(int argc, char **argv)
     g_all = all;
     g_nall = nall;
     for (i = 0; i < stored; i++) {   /* every TAS adapter, no fixed limit */
-        run_adapter(ids[i].index, &ids[i]);
+        g_tas_adapters++;
+        if (g_mode == MODE_FAULTV) {
+            /* #482: F1 then F2, each a complete run with its own handles, pre-state, observer and owned cleanup */
+            g_fault_case = 1;
+            g_case = "TC-TASACT-FAULT-001-F1";
+            run_adapter(ids[i].index, &ids[i]);
+            g_fault_case = 2;
+            g_case = "TC-TASACT-FAULT-001-F2";
+            run_adapter(ids[i].index, &ids[i]);
+            g_case = "TC-TASACT-FAULT-001";
+        } else {
+            run_adapter(ids[i].index, &ids[i]);
+        }
     }
     free(ids);
     free(all);
     WSACleanup();
 
-    printf("\nadapters run=%d nonpassing verdicts=%d blocked=%d\n", g_ran, g_failed, g_blocked);
+    printf("\nTAS adapters run=%d case executions=%d nonpassing verdicts=%d blocked=%d\n", g_tas_adapters, g_ran, g_failed, g_blocked);
     if (g_ran == 0) { return 2; }
     if (g_failed != 0) { return 1; }
     return g_blocked != 0 ? 3 : 0;

@@ -12,6 +12,8 @@
  *
  * Verifies: #9 (REQ-F-TAS-001), #206 (TAS test issue)
  * TC-MOCK-057 checks the send-window accounting of TC-TASAPI-001 (#366): test logic only, no hardware TX claim.
+ * TC-MOCK-058 / TC-MOCK-059 check the F2 STATE and F2 REFUSE classification of TEST-TASACT-FAULT-001 (#482, PR #489 review):
+ * test logic only, no fault-path or hardware claim.
  * Verdict contract: docs/testing/test-verdict-contract.md
  *
  * Build:
@@ -1300,6 +1302,123 @@ static void test_57_query_tx_accounting(void) {
     EXPECT_EQ("one changed query: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
 }
 
+/* TC-MOCK-058: TEST-TASACT-FAULT-001 F2 STATE classification (#482; PR #489 review r4631805746).
+ * tas_fv_f2_state of tests/ioctl/tas_activate_eval.h, called by tests/hardware/test_tas_activate.c --fault-versioned.
+ * A measured restoration-set change while the fault path was not reached is a violation whether or not the record was read:
+ * an unread record must not hide it. TEST-LOGIC EVIDENCE ONLY. */
+static void test_58_fault_f2_state(void) {
+    printf("\n[TC-MOCK-058] #482 F2 STATE: DIRTY after the failed restore; a measured change is never hidden by an unread record (test logic only)\n");
+
+    EXPECT_EQ("fault ran, record DIRTY: DIRTY (PASS)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_DIRTY, 0), TAS_FV_STATE_DIRTY);
+    EXPECT_EQ("fault ran, record CLEAN: NOT_DIRTY (FAIL)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_CLEAN, 0), TAS_FV_STATE_NOT_DIRTY);
+    EXPECT_EQ("fault ran, record ARMED: NOT_DIRTY (FAIL)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_ARMED, 3), TAS_FV_STATE_NOT_DIRTY);
+    EXPECT_EQ("fault ran, record unread: UNREAD (INCONCLUSIVE)", tas_fv_f2_state(TRUE, FALSE, 0, 0), TAS_FV_STATE_UNREAD);
+    EXPECT_EQ("not reached, record CLEAN, 0 differ: NOT_EXERCISED (INCONCLUSIVE)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_CLEAN, 0),
+              TAS_FV_STATE_NOT_EXERCISED);
+    EXPECT_EQ("not reached, record DIRTY: CHANGED_UNREACHED (FAIL)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_DIRTY, 0),
+              TAS_FV_STATE_CHANGED_UNREACHED);
+    EXPECT_EQ("not reached, record CLEAN, 2 differ: CHANGED_UNREACHED (FAIL)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_CLEAN, 2),
+              TAS_FV_STATE_CHANGED_UNREACHED);
+    /* r4631805746: the measured difference is a violation even when GET_TAS_STATE failed */
+    EXPECT_EQ("not reached, record unread, 1 differ: CHANGED_UNREACHED (FAIL), not UNREAD",
+              tas_fv_f2_state(FALSE, FALSE, 0, 1), TAS_FV_STATE_CHANGED_UNREACHED);
+    EXPECT_EQ("not reached, record unread, 0 differ: UNREAD (INCONCLUSIVE)", tas_fv_f2_state(FALSE, FALSE, 0, 0), TAS_FV_STATE_UNREAD);
+}
+
+/* Evidence of a passing F2 REFUSE probe: refused STATUS_INVALID_DEVICE_STATE, no output, record DIRTY kept, all 17 registers
+ * read and unchanged, the fault ran, metadata reported */
+static void fv_refuse_pass(TAS_FV_REFUSE_EVIDENCE *e) {
+    ZeroMemory(e, sizeof(*e));
+    e->state_refusal = TRUE;
+    e->record_before = TRUE;
+    e->armed_before = AVB_TAS_STATE_DIRTY;
+    e->record_after = TRUE;
+    e->armed_after = AVB_TAS_STATE_DIRTY;
+    e->fault_ran = TRUE;
+    e->metadata_reported = TRUE;
+}
+
+/* TC-MOCK-059: TEST-TASACT-FAULT-001 F2 REFUSE classification (#482, #369's rule for this probe; PR #489 review r4631805812).
+ * tas_fv_f2_refuse of tests/ioctl/tas_activate_eval.h. "Unchanged" needs every restoration-set register read in both queries:
+ * an unread register is not a measured "unchanged". TEST-LOGIC EVIDENCE ONLY. */
+static void test_59_fault_f2_refuse(void) {
+    TAS_FV_REFUSE_EVIDENCE e;
+
+    printf("\n[TC-MOCK-059] #482 F2 REFUSE: STATUS_INVALID_DEVICE_STATE, no output, state measured unchanged (test logic only)\n");
+
+    fv_refuse_pass(&e);
+    EXPECT_EQ("all established: PASS", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_PASS);
+
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.not_served = TRUE;
+    EXPECT_EQ("0x80C not served: NOT_SERVED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_SERVED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE;
+    EXPECT_EQ("raw status not captured: STATUS_UNAVAILABLE (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.accepted = TRUE;
+    EXPECT_EQ("accepted: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.output = TRUE;
+    EXPECT_EQ("refused with output: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.armed_after = AVB_TAS_STATE_ARMED;
+    EXPECT_EQ("record changed: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.differing = 1; e.unread = 4;
+    EXPECT_EQ("1 register changed, 4 unread: CHANGED (FAIL), the measured change is not hidden", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE;
+    EXPECT_EQ("another refusal status: OTHER_STATUS (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_OTHER_STATUS);
+    fv_refuse_pass(&e); e.record_after = FALSE;
+    EXPECT_EQ("record after unread: UNCHANGED_UNESTABLISHED (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    /* r4631805812: unread registers do not establish an unchanged restoration set */
+    fv_refuse_pass(&e); e.unread = 1;
+    EXPECT_EQ("1 of 17 registers unread, nothing measured changed: UNCHANGED_UNESTABLISHED (INCONCLUSIVE), not PASS",
+              tas_fv_f2_refuse(&e), TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    fv_refuse_pass(&e); e.unread = 17;
+    EXPECT_EQ("a query failed (17 unread): UNCHANGED_UNESTABLISHED (INCONCLUSIVE), not PASS", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    fv_refuse_pass(&e); e.fault_ran = FALSE;
+    EXPECT_EQ("fault not observed: NOT_DIRTY (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_DIRTY);
+    fv_refuse_pass(&e); e.armed_before = AVB_TAS_STATE_CLEAN; e.armed_after = AVB_TAS_STATE_CLEAN;
+    EXPECT_EQ("record CLEAN before the probe: NOT_DIRTY (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_DIRTY);
+    fv_refuse_pass(&e); e.metadata_reported = FALSE;
+    EXPECT_EQ("generation or epoch 0: METADATA_ZERO (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_METADATA_ZERO);
+
+    /* r4632275740: a missing raw status never erases an independently measured violation, and never permits PASS */
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1;
+    EXPECT_EQ("raw status not captured + 1 register changed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.armed_after = AVB_TAS_STATE_ARMED;
+    EXPECT_EQ("raw status not captured + record changed DIRTY -> ARMED: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.output = TRUE;
+    EXPECT_EQ("raw status not captured + output observed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1; e.unread = 16; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured + 1 changed, 16 unread, record unread: CHANGED (FAIL)", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE;
+    EXPECT_EQ("raw status not captured, everything measured unchanged: STATUS_UNAVAILABLE (INCONCLUSIVE), not PASS",
+              tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.unread = 17; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured, nothing measured (17 unread, record unread): STATUS_UNAVAILABLE (INCONCLUSIVE), no FAIL "
+              "fabricated", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    /* earlier corrections kept: a measured change survives unread registers; PASS needs all 17 read */
+    fv_refuse_pass(&e); e.differing = 1; e.unread = 4;
+    EXPECT_EQ("status captured, 1 changed, 4 unread: still CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.unread = 1;
+    EXPECT_EQ("status captured, 1 unread: still UNCHANGED_UNESTABLISHED, not PASS", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+
+    /* Reporting: the capture sentinel is never shown as a driver completion code; a captured status is shown exactly */
+    {
+        char text[96];
+        tas_fv_status_text(FALSE, (LONG)0x7FFFFFFF, text, sizeof(text));
+        printf("    status text, not captured: \"%s\"\n", text);
+        EXPECT_TRUE("not captured: the text says so", strstr(text, "not captured") != NULL);
+        EXPECT_TRUE("not captured: the sentinel 0x7FFFFFFF is not printed as a completion code", strstr(text, "7FFFFFFF") == NULL);
+        tas_fv_status_text(TRUE, (LONG)0xC0000010, text, sizeof(text));
+        printf("    status text, captured: \"%s\"\n", text);
+        EXPECT_TRUE("captured: ntstatus=0xC0000010 shown exactly", strcmp(text, "ntstatus=0xC0000010") == 0);
+    }
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1341,6 +1460,8 @@ int main(void) {
     test_55_activate_pass_not_implemented();
     test_56_activate_restore_state();
     test_57_query_tx_accounting();
+    test_58_fault_f2_state();
+    test_59_fault_f2_refuse();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

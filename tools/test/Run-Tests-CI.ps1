@@ -420,7 +420,7 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_hot_plug               -- disables/enables the NIC through devcon (#262).  Unsafe in $HilTestSafety (#343).
 #   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  Unsafe (#343).
 #   test_tas_isolated_arm       -- SETUP_TAS, restored by CM_Disable_DevNode / CM_Enable_DevNode.  Unsafe (#328).
-#   test_tas_activate           -- TAS_ACTIVATE (--hold #369, --pass #370, --fault), then its own NIC cycle.  Unsafe (#357).
+#   test_tas_activate           -- TAS_ACTIVATE (--hold #369, --pass #370, --fault, --fault-versioned #482), then its own NIC cycle.  Unsafe (#357).
 #   test_tas_query_clean        -- TAS_QUERY_HW checks (#366), then its own NIC cycle as cleanup.  Unsafe (#366).
 #   test_tas_query_clean --hw-verified -- TAS_ACTIVATE, queries past BaseT (#381), then its own NIC cycle.  Unsafe (#381).
 #   test_tas_query_clean --tiers-unbound -- unbound / non-TAS / tiers queries (#367), then its own NIC cycle.  Unsafe (#367).
@@ -583,7 +583,9 @@ $HardwareIntegrationTests = @(
     # long-duration lane, so they run automatically like every other entry (were program-level coverage gaps).  Each owns
     # its setup, restoration and final-state report; a failure is recorded, never a reason to withhold it.
     "test_ptp_phc_lifecycle",                 # UT-CORR-009: driver reinstall by process creation, restoration verified by the test
-    "test_control_device_lifecycle"           # TC-LCY-328: service stop/restart cycles, recovery verified by the test
+    "test_control_device_lifecycle",          # TC-LCY-328: service stop/restart cycles, recovery verified by the test
+    "test_tas_activate --fault-versioned"     # #482 TEST-TASACT-FAULT-001 F1/F2 on 0x80C (Debug fault injection; Release: not sent),
+                                              # each case with its own pre-state, observer and owned NIC-cycle cleanup. Unsafe
 )
 
 # ===========================
@@ -791,6 +793,7 @@ $HilTestSafety = @{
     'test_tas_activate --hold'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #369)
     'test_tas_activate --pass'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #370)
     'test_tas_activate --fault'        = 'Unsafe'     # TAS_ACTIVATE fault path plus CM_Disable_DevNode / CM_Enable_DevNode (#357)
+    'test_tas_activate --fault-versioned' = 'Unsafe'  # #482 F1/F2: versioned TAS_ACTIVATE fault path, owned CM_Disable_DevNode / CM_Enable_DevNode per case
     'test_tas_query_clean'             = 'Unsafe'     # read-only TAS_QUERY_HW checks plus the owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#366)
     'test_tas_query_clean --hw-verified' = 'Unsafe'   # TAS_ACTIVATE HOLD, TAS_QUERY_HW past BaseT, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#381)
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
@@ -922,6 +925,8 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     'test_tas_activate --hold'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
     'test_tas_activate --pass'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
     'test_tas_activate --fault' = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    # #482: F1 then F2 per adapter, each a complete run with the --fault bounds and its own observer trial per other adapter
+    'test_tas_activate --fault-versioned' = @{ Seconds = 1960; PerOtherAdapterSeconds = 10 }
     # test_tas_query_clean, from its own bounds per TAS adapter: 7 s TX windows + 2 x 60 s socket bind + 120 s disable + 3 s +
     # 60 s enable + 60 s return + 60 s link + 5 s settle + 3.5 s TX after the cycle = 438.5 s; 560 s = + 27 %.
     # MaxAdapters = TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also caps the TAS adapters it runs.
