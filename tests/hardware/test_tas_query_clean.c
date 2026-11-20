@@ -117,8 +117,15 @@
  *   OBSERVER   the I226 under test, which runs TAS, sends tagged broadcast frames in a baseline window and the I210, the
  *              receiving wire observer (passive Npcap capture on this host, flooded broadcast only, tas_wire_observer.h),
  *              must receive them before anything is activated.
- *   RESIDUE    after IOCTL_AVB_TAS_ACTIVATE HOLD committed the verified set: a readable query observing TSN on must not report
- *              restoration COMPLETE (#361 AC2). Only this TSN-on non-restored state is exercised.
+ *   ACTIVATE   the sent activation: the versioned HOLD request (AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C, migrated from
+ *              the 80-byte function-71 request per #357's cutover client inventory; generation and epoch of the pre-test query,
+ *              sent as reported). COMMITTED only as #365 13.4 publishes it (raw STATUS_SUCCESS with all 144 bytes); otherwise the
+ *              canonical verdict of the raw NTSTATUS (avb_verdict.h); BLOCKED when not sent.
+ *   RESIDUE    after the activation committed the verified set: a readable query observing TSN on must not report restoration
+ *              COMPLETE (#361 AC2). Only this TSN-on non-restored state is exercised. After an activation sent but not
+ *              committed the query still runs: COMPLETE with TSN on observed is FAIL, anything else is BLOCKED "COVERAGE
+ *              MISSING" (the non-restored state was not established); REPORTED keeps its rules (1) and (3) as FAIL and is
+ *              otherwise BLOCKED "COVERAGE MISSING"; PHC stays INCONCLUSIVE with its measurements; a COVERAGE line names it.
  *   CLEANUP, RESTORE   the owned NIC cycle and the test's own restoration verdict, as below.
  *   REPORTED   a query after the cycle, judged only by generic relations of the contract, never by model or family (testing
  *              contract A). DES 12.5 makes the advisory a function of the restoration set (v1 set without DTXMXPKTSZ, BASET_L/H
@@ -218,7 +225,7 @@
  * WRITE_REGISTER, no TAS write. Mutations: bounded broadcast UDP and ICMP on the adapter under test, and the owned NIC cycle of
  * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE_80C (a TAS schedule) on a clean adapter,
  * always followed by that NIC cycle. --invalid sends invalid IOCTL_AVB_TAS_ACTIVATE_80C requests and, in its legacy phase, the
- * valid 80-byte request on function 71 (which today's driver can commit), always followed by that NIC cycle. --restore commits the verified HOLD schedule, always followed by
+ * valid 80-byte request on function 71 (which today's driver can commit), always followed by that NIC cycle. --restore sends IOCTL_AVB_TAS_ACTIVATE_80C (the verified HOLD schedule), always followed by
  * that NIC cycle. --link-speed runs that NIC cycle as its setup and then sends only queries and reads. Safety class Unsafe.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
@@ -2448,14 +2455,15 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     STATS_READ s0;
     STATE_READ t0;
     PHC_READ p0, pc, pb, pa;
-    AVB_TAS_ACTIVATE_REQUEST req;
+    AVB_TAS_OP_REQUEST req, sent_req;
     AVB_VERDICT v;
     TAS_TX_WINDOW base;
     SOCKET sock = INVALID_SOCKET;
     HANDLE hw = INVALID_HANDLE_VALUE, hn = INVALID_HANDLE_VALUE;
-    DWORD br = 0, err = ERROR_SUCCESS;
+    DWORD got = 0;
+    LONG st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
     unsigned nonce = 0;
-    BOOL ok = FALSE, wire = FALSE, wire_started = FALSE, committed = FALSE, observed = FALSE;
+    BOOL sent = FALSE, wire = FALSE, wire_started = FALSE, committed = FALSE, observed = FALSE;
     const char *stop = NULL;
     const avb_u16 did = id->device_id;
     char reason[400];
@@ -2464,6 +2472,7 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     ZeroMemory(&qa, sizeof(qa));
     ZeroMemory(&base, sizeof(base));
     ZeroMemory(&req, sizeof(req));
+    ZeroMemory(&sent_req, sizeof(sent_req));
     ZeroMemory(&pc, sizeof(pc));
     ZeroMemory(&pb, sizeof(pb));
     ZeroMemory(&pa, sizeof(pa));
@@ -2520,30 +2529,37 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     if (wire_started) { wire_stop(); }   /* the cleanup starts its own capture */
     if (sock != INVALID_SOCKET) { closesocket(sock); }
 
-    /* The non-restored state: IOCTL_AVB_TAS_ACTIVATE HOLD with the verified set, BaseT from a fresh PHC read */
+    /* The non-restored state: the versioned HOLD request (AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C, migrated from the
+     * 80-byte function-71 request per #357's cutover client inventory) with the verified set, BaseT from a fresh PHC read.
+     * expected_generation and context_epoch are those of the pre-test query q0, sent as reported (never invented, #352 R1); no
+     * link speed (the driver owns it, #351 R2) */
     if (stop == NULL) {
         read_phc(h, &pc);
         if (!pc.ok) {
             stop = "PHC unavailable: no BaseT can be placed";
         } else {
-            inv_request(&req, row, pc.phc);
-            hw = open_device(GENERIC_READ | GENERIC_WRITE);   /* TAS_ACTIVATE is FILE_WRITE_ACCESS (#362) */
+            op_hold_request(&req, id->net_luid, (avb_u32)row->Mtu + FRAME_OVERHEAD_BYTES, BASE_LEAD_NS, pc.phc, q0.q.generation,
+                            q0.q.context_epoch);
+            hw = open_device(GENERIC_READ | GENERIC_WRITE);   /* the activation is FILE_WRITE_ACCESS (#362, #365 13.1) */
             if (hw == INVALID_HANDLE_VALUE || !bind_luid(hw, id->net_luid)) {
                 if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
                 stop = "cannot bind a handle with write access for the activation";
             } else {
-                req.result = 0xFFFFFFFFu;   /* values the driver never writes: an unwritten reply cannot read as COMMITTED (0) */
-                req.status = 0xFFFFFFFFu;
+                sent_req = req;
                 g_pending_did = did;
                 InterlockedExchange(&g_pending_adapter, (LONG)index);   /* from here the cleanup owes a NIC cycle */
-                ok = DeviceIoControl(hw, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &br, NULL);
-                if (!ok) { err = GetLastError(); }
+                st = avb_ioctl_ntstatus(hw, IOCTL_AVB_TAS_ACTIVATE_80C, &req, (DWORD)sizeof(req), &req, (DWORD)sizeof(req), &got);
                 CloseHandle(hw);
-                printf("    [EVIDENCE] activation: base=%llu (PHC %llu) cycle=%u window=[%u, %u) ok=%d win32=%lu bytes=%lu result=0x%X "
-                       "status=0x%08X phcAtCommit=%llu\n", req.base_time_ns, pc.phc, req.cycle_ns, req.window_start_ns[0],
-                       req.window_end_ns[0], ok, err, br, req.result, req.status, req.phc_at_commit_ns);
-                committed = ok && br == sizeof(req) && req.status == 0u && req.result == AVB_TAS_ACT_COMMITTED &&
-                            req.phc_at_commit_ns != 0 && req.phc_at_commit_ns < req.base_time_ns;
+                sent = TRUE;
+                printf("    [EVIDENCE] activation: IOCTL_AVB_TAS_ACTIVATE_80C version=%u size=%u op=0x%016llX gen=%llu epoch=%llu (pre-test "
+                       "query, sent as reported) flags=0x%X pre=%u base=%llu (PHC %llu) cycle=%u window=[%u, %u) max_frame_bytes=%u\n",
+                       sent_req.version, sent_req.size, sent_req.client_op_id, sent_req.expected_generation, sent_req.context_epoch,
+                       sent_req.flags, sent_req.pre_activation, sent_req.schedule.base_time_ns, pc.phc, sent_req.schedule.cycle_ns,
+                       sent_req.schedule.queue[0].start_ns, sent_req.schedule.queue[0].end_ns, sent_req.schedule.queue[0].max_frame_bytes);
+                printf("    [EVIDENCE] activation reply: ntstatus=%s0x%08lX information=%lu out_flags=0x%X reserved1=0x%X\n",
+                       st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)st, got, req.out_flags, req.reserved1);
+                /* #365 13.4: only COMMITTED completes STATUS_SUCCESS with the whole 144-byte structure */
+                committed = st == 0 && got == (DWORD)sizeof(req);
                 if (!committed) {
                     stop = "the activation was not established as COMMITTED; no non-restored state was created";
                 }
@@ -2551,19 +2567,44 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
         }
     }
 
-    /* RESIDUE: an observed non-restored state (TSN on) never reports COMPLETE (#361 AC2) */
-    if (stop != NULL) {
-        sprintf_s(reason, sizeof(reason), "not observed: %s", stop);
+    /* ACTIVATE: the sent activation itself, the canonical verdict of its raw NTSTATUS (avb_verdict.h, capability advertised):
+     * PASS only on COMMITTED; BLOCKED when it was not sent */
+    if (!sent) {
+        sprintf_s(reason, sizeof(reason), "not sent: %s", stop != NULL ? stop : "no activation");
+        verdict("BLOCKED", "ACTIVATE", index, did, reason);
+    } else {
+        AVB_VERDICT av = avb_verdict_from_status((NTSTATUS)st, AVB_CAP_PRESENT, committed, TRUE);
+        if (av == AVB_VERDICT_PASS) {
+            sprintf_s(reason, sizeof(reason), "COMMITTED (#365 13.4): ntstatus=0x%08lX information=%lu", (unsigned long)st, got);
+        } else {
+            sprintf_s(reason, sizeof(reason), "the sent activation was not COMMITTED (#365 13.4): ntstatus=%s0x%08lX information=%lu%s",
+                      st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)st, got,
+                      st == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (IOCTL_AVB_TAS_ACTIVATE_80C not served)" : "");
+        }
+        verdict(avb_verdict_tag(av), "ACTIVATE", index, did, reason);
+    }
+
+    /* RESIDUE: an observed non-restored state (TSN on) never reports COMPLETE (#361 AC2). After an activation that was sent but
+     * not committed the query still runs: COMPLETE with TSN on observed is FAIL whatever the activation did; otherwise the
+     * non-restored state was not established, which is missing coverage, never a pass */
+    if (!sent) {
+        sprintf_s(reason, sizeof(reason), "not observed: %s", stop != NULL ? stop : "no activation");
         verdict("BLOCKED", "RESIDUE", index, did, reason);
     } else {
         query(h, &q1);
-        print_query("committed", &q1);
+        print_query(committed ? "committed" : "after the uncommitted activation", &q1);
         observed = restoration_set_valid(&q1) && q1.q.hw_mode == AVB_TAS_HWMODE_TSN;
-        if (query_valid(&q1) && q1.q.restoration == AVB_TAS_RESTORE_COMPLETE) {
-            sprintf_s(reason, sizeof(reason), "COMPLETE reported with a committed schedule (restoration set valid %d, hw_mode %u, %u "
-                      "restoration-set registers differ from the pre-test capture)", restoration_set_valid(&q1), q1.q.hw_mode,
-                      restoration_set_differing(&q0.q.regs, &q1.q.regs));
+        if (query_valid(&q1) && q1.q.restoration == AVB_TAS_RESTORE_COMPLETE && (committed || observed)) {
+            sprintf_s(reason, sizeof(reason), "COMPLETE reported with %s (restoration set valid %d, hw_mode %u, %u restoration-set "
+                      "registers differ from the pre-test capture)", committed ? "a committed schedule" : "TSN on observed",
+                      restoration_set_valid(&q1), q1.q.hw_mode, restoration_set_differing(&q0.q.regs, &q1.q.regs));
             verdict("FAIL", "RESIDUE", index, did, reason);
+        } else if (!committed) {
+            sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed schedule, the non-restored state was not established; the "
+                      "query after the uncommitted activation: ntstatus=0x%08lX, reported restoration=%s (%u), hw_mode %u, restoration "
+                      "set valid %d (observation only)", (unsigned long)q1.status, restoration_name(q1.q.restoration),
+                      q1.q.restoration, q1.q.hw_mode, restoration_set_valid(&q1));
+            verdict("BLOCKED", "RESIDUE", index, did, reason);
         } else if (observed) {
             sprintf_s(reason, sizeof(reason), "TSN on observed (%u restoration-set registers differ from the pre-test capture); reported "
                       "restoration=%s (%u), not COMPLETE", restoration_set_differing(&q0.q.regs, &q1.q.regs),
@@ -2591,8 +2632,8 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
 
     /* REPORTED: the advisory value judged only by generic relations of the contract (DES 12.5: a function of the restoration
      * set), never by model or family (testing contract A). No baseline constant is applied here (PR #454 thread 4599329980) */
-    if (!committed) {
-        sprintf_s(reason, sizeof(reason), "the #377 scenario did not run: %s", stop != NULL ? stop : "no committed activation");
+    if (!sent) {
+        sprintf_s(reason, sizeof(reason), "the #377 scenario did not run: %s", stop != NULL ? stop : "no activation");
         verdict("BLOCKED", "REPORTED", index, did, reason);
     } else if (hn == INVALID_HANDLE_VALUE || !query_valid(&qa)) {
         sprintf_s(reason, sizeof(reason), "no valid query after the cycle (handle %s, ntstatus=0x%08lX information=%lu)",
@@ -2612,6 +2653,18 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
             sprintf_s(reason, sizeof(reason), "COMPLETE reported although the reply's restoration set is not valid (%d) or TSN is not off "
                       "(hw_mode %u); COMPLETE needs both (DES 12.5)", valid, qa.q.hw_mode);
             verdict("FAIL", "REPORTED", index, did, reason);
+        } else if (!committed && same && qa.q.restoration != q0.q.restoration) {
+            sprintf_s(reason, sizeof(reason), "after an uncommitted activation: the restoration set equals the test's own pre-test "
+                      "observation, yet reported %s (%u) where the pre-test reply reported %s (%u); the advisory is a function of that "
+                      "set (DES 12.5)", restoration_name(qa.q.restoration), qa.q.restoration, restoration_name(q0.q.restoration),
+                      q0.q.restoration);
+            verdict("FAIL", "REPORTED", index, did, reason);
+        } else if (!committed) {
+            sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed activation, so restoration after an activation was not "
+                      "exercised; after the cycle reported %s (%u), hw_mode %u, restoration set valid %d, %u registers differ from the "
+                      "pre-test observation (observation only)", restoration_name(qa.q.restoration), qa.q.restoration, qa.q.hw_mode,
+                      valid, diff);
+            verdict("BLOCKED", "REPORTED", index, did, reason);
         } else if (valid && qa.q.hw_mode == AVB_TAS_HWMODE_TSN) {
             sprintf_s(reason, sizeof(reason), "TSN on after the cycle and not reported COMPLETE (%s); see RESTORE",
                       restoration_name(qa.q.restoration));
@@ -2650,7 +2703,9 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
             wall_ns = (long long)((double)(pa.qpc.QuadPart - pb.qpc.QuadPart) * 1e9 / (double)freq.QuadPart);
         }
         if (!committed) {
-            sprintf_s(reason, sizeof(reason), "the #377 scenario did not run (before=%s after=%s); not a restoration verdict", b1, b2);
+            sprintf_s(reason, sizeof(reason), "the #377 scenario did not run: no committed activation before this cycle (before=%s "
+                      "after=%s wallNs=%lld, %s); not a restoration verdict", b1, b2, wall_ns,
+                      !pb.ok || !pa.ok ? "PHC not read on both sides" : pa.phc < pb.phc ? "stepped back" : "no backward step");
             verdict("INCONCLUSIVE", "PHC", index, did, reason);
         } else if (!pb.ok || !pa.ok) {
             sprintf_s(reason, sizeof(reason), "PHC not read before or after the cycle (before=%s after=%s); not a restoration verdict", b1, b2);
@@ -2668,6 +2723,11 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     printf("    [COVERAGE] not exercised by this run: TSN-off residue (PARTIAL_RESIDUE), PARTIAL_OPEN_ALL, unreadable registers "
            "(UNKNOWN), NO_SSOT_BASELINE, a NIC cycle that leaves residue, PHC continuity, and every other failure path. Not "
            "decidable through the generic query: a restoration set that differs from the pre-test observation (e.g. ENDQT at _ALT)\n");
+    if (!committed) {
+        printf("    [COVERAGE] MISSING in this run: no committed activation (%s), so the TSN-on residue (RESIDUE), restoration after "
+               "an activation (REPORTED) and the PHC across a cycle after an activation (PHC) were not exercised\n",
+               sent ? "sent, not COMMITTED" : "not sent");
+    }
 }
 
 /* ---- --link-speed (TC-TASAPI-021, #472): the driver's link speed against the OS observation of the same interface ---- */
