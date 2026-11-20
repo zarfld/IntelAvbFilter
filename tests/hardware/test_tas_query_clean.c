@@ -21,15 +21,18 @@
  *               C). Then the owned cleanup below.
  *
  * --hw-verified: TEST-TAS-API-016 (#381), case TC-TASAPI-016. HARDWARE_VERIFIED is never returned (#365 12.4, 12.7): checked on
- * the clean adapter (QUERY), after IOCTL_AVB_TAS_ACTIVATE HOLD committed a schedule while BaseT is still ahead (PENDING), and
+ * the clean adapter (QUERY), after the versioned HOLD request (AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C, migrated from
+ * the 80-byte function-71 request per #357's cutover client inventory; generation and epoch of the clean query, sent as
+ * reported) committed a schedule while BaseT is still ahead (PENDING), and
  * on a query whose own PHC bracket starts two cycles past BaseT (PAST_BASET). Each check needs a valid, executed query: an
  * invalid or unexecuted one takes its raw-NTSTATUS verdict and is never a pass. Nothing is activated unless the first query is
  * valid and reports a clean adapter. Schedule: the verified set of test_tas_activate.c (1 s cycle, window 200 to 400 ms on all
  * queues, BaseT the first cycle boundary at least 1.5 s ahead). The slot statuses are printed as evidence only; PENDING and
  * INFERRED_ACTIVE are #369's. Cleanup, CLEANUP and RESTORE as below (the restoration baseline is the clean query).
  * A forbidden status fails a phase line before any timing judgement; PENDING passes only on a valid, ordered PHC bracket that
- * ends before the retained target BaseT. The activation counts as committed only from its documented complete reply (all
- * bytes, status STATUS_SUCCESS, result COMMITTED, PHC at commit before BaseT). REPLIES covers every answered query of the
+ * ends before the retained target BaseT. The activation counts as committed only from the reply #365 13.4 gives COMMITTED
+ * alone (raw NTSTATUS STATUS_SUCCESS with all 144 bytes; COMMITTED means BaseT was still ahead after the commit); any other
+ * completion, an unserved 0x80C included, is printed with its raw NTSTATUS. REPLIES covers every answered query of the
  * adapter run, polling and the cleanup's query after the cycle included: FAIL on any HARDWARE_VERIFIED, INCONCLUSIVE if no
  * query was answered.
  *
@@ -210,7 +213,7 @@
  * IOCTLs sent: GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID (binds the handle only: no global context switch, no
  * PTP initialization, src/device.c), TAS_QUERY_HW, GET_CLOCK_CONFIG, GET_STATISTICS, GET_TAS_STATE. No READ_REGISTER, no
  * WRITE_REGISTER, no TAS write. Mutations: bounded broadcast UDP and ICMP on the adapter under test, and the owned NIC cycle of
- * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE (a TAS schedule) on a clean adapter,
+ * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE_80C (a TAS schedule) on a clean adapter,
  * always followed by that NIC cycle. --invalid sends invalid IOCTL_AVB_TAS_ACTIVATE_80C requests and, in its legacy phase, the
  * valid 80-byte request on function 71 (which today's driver can commit), always followed by that NIC cycle. --restore commits the verified HOLD schedule, always followed by
  * that NIC cycle. --link-speed runs that NIC cycle as its setup and then sends only queries and reads. Safety class Unsafe.
@@ -1023,6 +1026,9 @@ static void verdict_not_hw_verified(const char *check, UINT32 index, avb_u16 did
     }
 }
 
+static void op_hold_request(AVB_TAS_OP_REQUEST *r, avb_u64 net_luid, avb_u32 frame_bytes, long long lead_ns, avb_u64 phc,
+                            avb_u64 gen, avb_u64 epoch);
+
 /** --hw-verified, TC-TASAPI-016 (#381): HARDWARE_VERIFIED is never returned, on a clean adapter, with a committed schedule
  *  whose BaseT is still ahead, and with the PHC past BaseT. Only the verdicts on HARDWARE_VERIFIED belong to this case; the
  *  slot statuses themselves (PENDING, INFERRED_ACTIVE) are #369's and are printed as evidence only. */
@@ -1031,12 +1037,12 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
 {
     QUERY_READ q0, q1, q2;
     PHC_READ p0;
-    AVB_TAS_ACTIVATE_REQUEST req;
+    AVB_TAS_OP_REQUEST req, sent;
     HANDLE hw;
-    DWORD br = 0, err = ERROR_SUCCESS, start;
-    BOOL ok, past = FALSE, committed;
+    DWORD got = 0, start;
+    LONG st;
+    BOOL past = FALSE, committed;
     long long base = 0;
-    unsigned q;
     char reason[256];
 
     ZeroMemory(&q1, sizeof(q1));
@@ -1059,19 +1065,13 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
         goto done;
     }
 
-    /* The schedule: IOCTL_AVB_TAS_ACTIVATE, HOLD, the verified set; needs a handle with write access (#362) */
-    base = ((long long)p0.phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
-    ZeroMemory(&req, sizeof(req));
-    req.version = AVB_TAS_ACTIVATE_VERSION;
-    req.pre_activation = AVB_TAS_PRE_HOLD;
-    req.base_time_ns = (avb_u64)base;
-    req.cycle_ns = (avb_u32)CYCLE_NS;
-    req.link_mbps = (avb_u32)(row->TransmitLinkSpeed / 1000000ULL);
-    req.max_frame_bytes = (avb_u32)row->Mtu + FRAME_OVERHEAD_BYTES;
-    for (q = 0; q < AVB_TAS_QUEUES; q++) {
-        req.window_start_ns[q] = (avb_u32)WINDOW_START_NS;
-        req.window_end_ns[q] = (avb_u32)WINDOW_END_NS;
-    }
+    /* The schedule: the versioned HOLD request (AVB_TAS_OP_REQUEST) on IOCTL_AVB_TAS_ACTIVATE_80C, migrated from the 80-byte
+     * function-71 request (#357 cutover client inventory); the verified set, BaseT from p0 as before. expected_generation and
+     * context_epoch are those of the clean query q0, sent as reported (never invented, #352 R1). No link speed: the driver owns
+     * it (#351 R2). Needs a handle with write access (#362, #365 13.1) */
+    op_hold_request(&req, id->net_luid, (avb_u32)row->Mtu + FRAME_OVERHEAD_BYTES, BASE_LEAD_NS, p0.phc, q0.q.generation,
+                    q0.q.context_epoch);
+    base = (long long)req.schedule.base_time_ns;
     hw = open_device(GENERIC_READ | GENERIC_WRITE);
     if (hw == INVALID_HANDLE_VALUE || !bind_luid(hw, id->net_luid)) {
         if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
@@ -1079,24 +1079,23 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no committed schedule");
         goto done;
     }
-    /* COMMITTED is 0: the out fields start at values the driver never writes, so a reply it did not write cannot read as one */
-    req.result = 0xFFFFFFFFu;
-    req.status = 0xFFFFFFFFu;
+    sent = req;
     g_pending_did = id->device_id;
     InterlockedExchange(&g_pending_adapter, (LONG)index);   /* from here the cleanup owes a NIC cycle */
-    ok = DeviceIoControl(hw, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &br, NULL);
-    if (!ok) { err = GetLastError(); }
+    st = avb_ioctl_ntstatus(hw, IOCTL_AVB_TAS_ACTIVATE_80C, &req, (DWORD)sizeof(req), &req, (DWORD)sizeof(req), &got);
     CloseHandle(hw);
-    printf("    [EVIDENCE] activation: base=%lld cycle=%lld window=[%lld, %lld) ok=%d win32=%lu bytes=%lu result=0x%X status=0x%08X "
-           "phcAtCommit=%llu\n", base, CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, ok, err, br, req.result, req.status,
-           req.phc_at_commit_ns);
-    /* The documented reply of an activation that ran: the whole structure (IoStatus.Information = sizeof), status
-     * STATUS_SUCCESS, result COMMITTED, and COMMITTED means the PHC read after the commit was still before BaseT */
-    committed = ok && br == sizeof(req) && req.status == 0u && req.result == AVB_TAS_ACT_COMMITTED &&
-                req.phc_at_commit_ns != 0 && req.phc_at_commit_ns < (avb_u64)base;
+    printf("    [EVIDENCE] activation: IOCTL_AVB_TAS_ACTIVATE_80C version=%u size=%u op=0x%016llX gen=%llu epoch=%llu (q0, sent as "
+           "reported) flags=0x%X pre=%u base=%lld (PHC %llu) cycle=%lld window=[%lld, %lld) max_frame_bytes=%u\n", sent.version,
+           sent.size, sent.client_op_id, sent.expected_generation, sent.context_epoch, sent.flags, sent.pre_activation, base, p0.phc,
+           CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, sent.schedule.queue[0].max_frame_bytes);
+    printf("    [EVIDENCE] activation reply: ntstatus=%s0x%08lX information=%lu out_flags=0x%X reserved1=0x%X\n",
+           st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)st, got, req.out_flags, req.reserved1);
+    /* #365 13.4: only COMMITTED completes STATUS_SUCCESS with the whole 144-byte structure, and COMMITTED means BaseT was still
+     * ahead after the commit; every other result is an error with no output. Anything else leaves no schedule to query */
+    committed = st == 0 && got == (DWORD)sizeof(req);
     if (!committed) {
-        sprintf_s(reason, sizeof(reason), "activation not established as COMMITTED (ok=%d win32=%lu bytes=%lu result=0x%X status=0x%08X "
-                  "phcAtCommit=%llu); no schedule to query", ok, err, br, req.result, req.status, req.phc_at_commit_ns);
+        sprintf_s(reason, sizeof(reason), "activation not established as COMMITTED (ntstatus=0x%08lX information=%lu); no schedule "
+                  "to query", (unsigned long)st, got);
         verdict("BLOCKED", "PENDING", index, id->device_id, reason);
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, reason);
         goto done;
@@ -1487,27 +1486,35 @@ static BOOL stats_unchanged(const AVB_DRIVER_STATISTICS *a, const AVB_DRIVER_STA
 /** The positive HOLD control of #365 13.2 for the bound adapter (#368 oracle amendment 2026-11-19): AVB_TAS_F_ACCEPT_UNVERIFIED
  *  for unqualified execution (#362 amendment, #365 R4), the verified schedule set of #381 and test_tas_activate.c, BaseT the first
  *  cycle boundary at least the lead past phc, expected_generation and context_epoch as the case's own query reports them (gen,
- *  epoch: never invented, a reported 0 stays 0 and METADATA reports it as missing; PR #491 review r4634404991) */
-static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc, avb_u64 gen, avb_u64 epoch)
+ *  epoch: never invented, a reported 0 stays 0 and METADATA reports it as missing; PR #491 review r4634404991). Shared with
+ *  --hw-verified's activation (#381) */
+static void op_hold_request(AVB_TAS_OP_REQUEST *r, avb_u64 net_luid, avb_u32 frame_bytes, long long lead_ns, avb_u64 phc,
+                            avb_u64 gen, avb_u64 epoch)
 {
     unsigned q;
 
     ZeroMemory(r, sizeof(*r));
     r->version = AVB_TAS_OP_VERSION;
     r->size = (avb_u32)sizeof(*r);
-    r->net_luid = c->id->net_luid;
+    r->net_luid = net_luid;
     r->client_op_id = inv_next_op_id();
     r->expected_generation = gen;
     r->context_epoch = epoch;
     r->flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
     r->pre_activation = AVB_TAS_PRE_HOLD;
-    r->schedule.base_time_ns = (avb_u64)((((long long)phc + c->lead_ns + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
+    r->schedule.base_time_ns = (avb_u64)((((long long)phc + lead_ns + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
     r->schedule.cycle_ns = (avb_u32)CYCLE_NS;
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
         r->schedule.queue[q].start_ns = (avb_u32)WINDOW_START_NS;
         r->schedule.queue[q].end_ns = (avb_u32)WINDOW_END_NS;
-        r->schedule.queue[q].max_frame_bytes = c->frame_bytes;
+        r->schedule.queue[q].max_frame_bytes = frame_bytes;
     }
+}
+
+/* --invalid's control for the adapter of its context */
+static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc, avb_u64 gen, avb_u64 epoch)
+{
+    op_hold_request(r, c->id->net_luid, c->frame_bytes, c->lead_ns, phc, gen, epoch);
 }
 
 /** The legacy 80-byte request on function 71: the verified HOLD set with the caller link speed that protocol carries */
