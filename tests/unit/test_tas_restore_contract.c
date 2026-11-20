@@ -1654,6 +1654,215 @@ static void test_61_invalid_window_min(void) {
     }
 }
 
+/* TC-MOCK-062: TEST-TAS-API-004 (#369) COMMIT of the accepted HOLD race under the published 2026-11-19 rules (#369 oracle
+ * amendment; #365 R1/R2/R4/R5/R7; #362; #351; #352 R1). out_flags carries AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE exactly when
+ * unverified acceptance acted: tier IMPLEMENTED_UNVERIFIED (3) bit 0, IMPLEMENTED_VERIFIED (4) 0, otherwise not judged (never a
+ * permanent 0, never 1 merely because the flag was sent). A tier refusal of the accepted control, an R5 status, a zero pair and a
+ * refusal at a measured valid speed or pair are FAIL, no longer "undecided"; a changed or unmeasured prerequisite is
+ * INCONCLUSIVE. Test logic only. */
+static void fill_hold(TAS_HOLD_EVIDENCE *e, avb_u32 tier, LONG s0, LONG s1)
+{
+    unsigned k;
+    const LONG st[2] = { s0, s1 };
+
+    ZeroMemory(e, sizeof(*e));
+    for (k = 0; k < 2; k++) {
+        e->call[k].captured = TRUE;
+        e->call[k].status = st[k];
+        if (st[k] == 0) {   /* a complete success reply with the output tier 3 requires */
+            e->call[k].information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+            e->call[k].echoed = TRUE;
+            e->call[k].out_flags = tier == AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED ? AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE : 0u;
+        }
+    }
+    e->accept_sent = TRUE;
+    e->pre_valid = TRUE;
+    e->pre_generation = 5u;
+    e->pre_epoch = 0x1234ABCDull;
+    e->pre_mbps = 1000u;
+    e->tier_hold = tier;
+    e->post_valid = TRUE;
+    e->post_generation = (s0 == 0 || s1 == 0) ? 6u : 5u;   /* one transition per commit */
+    e->post_epoch = 0x1234ABCDull;
+    e->post_mbps = 1000u;
+}
+
+static void test_62_hold_commit(void) {
+    TAS_HOLD_EVIDENCE e;
+    const LONG OK = 0, BUSY = (LONG)STATUS_DEVICE_BUSY, STATE = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const LONG NOTACC = (LONG)STATUS_REQUEST_NOT_ACCEPTED, NOTREADY = (LONG)STATUS_DEVICE_NOT_READY;
+    const avb_u32 UNVER = AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED, VER = AVB_TAS_TIER_IMPLEMENTED_VERIFIED;
+
+    printf("\n[TC-MOCK-062] #369 COMMIT of the accepted HOLD race, published 2026-11-19 rules (test logic only)\n");
+
+    /* the out_flags expectation comes from the measured tier, not from the flag sent */
+    EXPECT_EQ("tier IMPLEMENTED_UNVERIFIED: acceptance acts, bit 0 expected", tas_hold_out_expect(TRUE, UNVER), TAS_HOLD_OUT_BIT0);
+    EXPECT_EQ("tier IMPLEMENTED_VERIFIED: acceptance does not act, 0 expected", tas_hold_out_expect(TRUE, VER), TAS_HOLD_OUT_ZERO);
+    EXPECT_EQ("tier not reported (0): not judged", tas_hold_out_expect(TRUE, 0u), TAS_HOLD_OUT_UNJUDGED);
+    EXPECT_EQ("tier NOT_IMPLEMENTED: not judged", tas_hold_out_expect(TRUE, AVB_TAS_TIER_NOT_IMPLEMENTED), TAS_HOLD_OUT_UNJUDGED);
+    EXPECT_EQ("query not valid: the tier is not measured, not judged", tas_hold_out_expect(FALSE, UNVER), TAS_HOLD_OUT_UNJUDGED);
+
+    /* one complete success and one BUSY/STATE refusal */
+    fill_hold(&e, UNVER, OK, BUSY);
+    EXPECT_EQ("tier 3: success with bit 0 and BUSY is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, UNVER, STATE, OK);
+    EXPECT_EQ("tier 3: STATE refusal and success with bit 0 is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags = 0u;
+    EXPECT_EQ("tier 3: success with out_flags 0 is FAIL (acceptance acted)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+    fill_hold(&e, VER, OK, STATE);
+    EXPECT_EQ("tier 4: success with out_flags 0 and STATE is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, VER, OK, BUSY);
+    e.call[0].out_flags = AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE;
+    EXPECT_EQ("tier 4: bit 0 set merely because the flag was sent is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+    fill_hold(&e, 0u, OK, BUSY);
+    EXPECT_EQ("tier not reported, out_flags 0: INCONCLUSIVE (not judged), never PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_UNJUDGED);
+    fill_hold(&e, 0u, OK, BUSY);
+    e.call[0].out_flags = AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE;
+    EXPECT_EQ("tier not reported, bit 0: INCONCLUSIVE (not judged)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_UNJUDGED);
+
+    /* a success reply's own violations, independent of the tier */
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags |= 0x2u;
+    EXPECT_EQ("another out_flags bit is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, 0u, OK, BUSY);
+    e.call[0].reserved1 = 1u;
+    EXPECT_EQ("reserved1 non-zero is FAIL even with the tier not reported", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].information = 0u;
+    EXPECT_EQ("success without the 144-byte reply is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].echoed = FALSE;
+    EXPECT_EQ("success with the inputs not echoed is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    e.call[0].reserved1 = 1u;
+    EXPECT_EQ("an observed violation is kept when the other call was not captured", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, OK);
+    EXPECT_EQ("two successes are FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_TWO_SUCCESSES);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_generation = 0u; e.pre_epoch = 0u;
+    EXPECT_EQ("success of a request carrying 0/0 is FAIL (R1: refused STATE_CONFLICT)", tas_hold_commit(&e), TAS_HOLD_COMMIT_ZERO_ACCEPTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].information = 8u;
+    EXPECT_EQ("a refusal with output is FAIL (errors carry no output)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, OK, NOTREADY);
+    EXPECT_EQ("success and a NOT_READY refusal is FAIL (not BUSY/STATE)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("success with the other completion not captured is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_CAPTURED);
+
+    /* the missing handler and the formerly undecided refusals */
+    fill_hold(&e, 0u, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pre_generation = 0u; e.pre_epoch = 0u;
+    EXPECT_EQ("0x80C not served is FAIL, never SKIP (the current driver)", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_SERVED);
+    fill_hold(&e, UNVER, NOTACC, NOTACC);
+    EXPECT_EQ("tier refusal of the accepted control is FAIL (R4: the flag acts)", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, 0u, NOTACC, BUSY);
+    EXPECT_EQ("tier refusal with the tier not reported is still FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, NOTACC, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("tier refusal is kept when the other call was not captured", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    EXPECT_EQ("STATUS_IO_TIMEOUT (R5 BASE_PASSED) is FAIL, named", tas_hold_commit(&e), TAS_HOLD_COMMIT_R5);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, STATE);
+    EXPECT_EQ("STATUS_IO_DEVICE_ERROR (R5 COMMITTED_UNTIMED, shared) is FAIL, named", tas_hold_commit(&e), TAS_HOLD_COMMIT_R5);
+    fill_hold(&e, 0u, STATE, STATE);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u;
+    EXPECT_EQ("both STATE with the query's 0/0 sent is FAIL, zero metadata the likely cause", tas_hold_commit(&e), TAS_HOLD_COMMIT_META_ZERO);
+    fill_hold(&e, UNVER, STATE, STATE);
+    EXPECT_EQ("both STATE with an established pair unchanged after is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_STATE_REFUSED);
+    fill_hold(&e, UNVER, STATE, BUSY);
+    EXPECT_EQ("STATE and BUSY with an established pair unchanged after is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_STATE_REFUSED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.post_generation = 9u;
+    EXPECT_EQ("both STATE with the pair changed after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.post_valid = FALSE;
+    EXPECT_EQ("both STATE with the pair not measured after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.pre_valid = FALSE;
+    EXPECT_EQ("both STATE with the pair not measured before is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    EXPECT_EQ("NOT_READY at a stably measured 1000 Mbit/s is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.pre_mbps = 0u;
+    EXPECT_EQ("NOT_READY with the speed unknown (0) is INCONCLUSIVE (R2's defined refusal)", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, NOTREADY, BUSY);
+    e.post_mbps = 100u;
+    EXPECT_EQ("NOT_READY with the speed changed after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.post_valid = FALSE;
+    EXPECT_EQ("NOT_READY with the speed not measured after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, BUSY, BUSY);
+    EXPECT_EQ("both BUSY is FAIL (no commit)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, BUSY, BUSY);
+    e.call[0].captured = FALSE;
+    EXPECT_EQ("no success and a completion not captured is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_CAPTURED);
+}
+
+/* TC-MOCK-063: TEST-TAS-API-004 (#369) GENERATION across the race (#352 R1 L2/L7/L9; #369 oracle amendment 2026-11-19). A logical
+ * mutation that attempts a write advances generation exactly once (a commit: one); a refusal before any write advances nothing.
+ * Judged only from a non-zero pair measured before and after in the same context; a completion whose write attempt is not
+ * established (an uncaptured status, a shared R5/R8 status) leaves the expectation unknown. A decrease is always FAIL. Test logic
+ * only. */
+static void test_63_hold_generation(void) {
+    TAS_HOLD_EVIDENCE e;
+    unsigned n = 99u;
+    const LONG OK = 0, BUSY = (LONG)STATUS_DEVICE_BUSY, STATE = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const avb_u32 UNVER = AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED;
+
+    printf("\n[TC-MOCK-063] #369 GENERATION across the race, #352 R1 (test logic only)\n");
+
+    fill_hold(&e, UNVER, OK, BUSY);
+    EXPECT_EQ("one commit, one BUSY: 5 -> 6 is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with one transition expected", n == 1u);
+    fill_hold(&e, UNVER, STATE, OK);
+    e.post_generation = 5u;
+    EXPECT_EQ("one commit, generation unchanged is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_generation = 7u;
+    EXPECT_EQ("one commit, two steps is FAIL (the refusal adds nothing)", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, STATE, STATE);
+    EXPECT_EQ("both refused before any write, unchanged: PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with no transition expected", n == 0u);
+    fill_hold(&e, UNVER, (LONG)STATUS_REQUEST_NOT_ACCEPTED, (LONG)STATUS_DEVICE_NOT_READY);
+    EXPECT_EQ("NOT_ACCEPTED and NOT_READY are pre-write refusals: unchanged is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    fill_hold(&e, UNVER, BUSY, (LONG)STATUS_INVALID_PARAMETER);
+    e.post_generation = 6u;
+    EXPECT_EQ("pre-write refusals with a transition is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    EXPECT_EQ("not served with an established pair unchanged: PASS (no operation ran)", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+
+    /* the current driver: 0/0 */
+    fill_hold(&e, 0u, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u;
+    EXPECT_EQ("0/0 before: INCONCLUSIVE (not reported), never PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PRE_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_valid = FALSE;
+    EXPECT_EQ("query before not valid: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PRE_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_generation = 0u;
+    EXPECT_EQ("generation 0 after: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_POST_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_valid = FALSE;
+    EXPECT_EQ("query after not valid: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_POST_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_epoch = 0x55u;
+    EXPECT_EQ("epoch changed (another context): INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_EPOCH_CHANGED);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, BUSY);
+    e.post_generation = 6u;
+    EXPECT_EQ("a shared R5/R8 status: the write attempt is not established, INCONCLUSIVE", tas_hold_generation(&e, &n),
+              TAS_HOLD_GEN_UNKNOWN_EXPECTATION);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("a completion not captured: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_UNKNOWN_EXPECTATION);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, BUSY);
+    e.post_generation = 4u;
+    EXPECT_EQ("a decrease is FAIL even with the expectation unknown", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1699,6 +1908,8 @@ int main(void) {
     test_59_fault_f2_refuse();
     test_60_invalid_semantic_order();
     test_61_invalid_window_min();
+    test_62_hold_commit();
+    test_63_hold_generation();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

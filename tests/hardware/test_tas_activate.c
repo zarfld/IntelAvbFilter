@@ -3,38 +3,58 @@
  * @brief IOCTL_AVB_TAS_ACTIVATE on a real adapter: first gate schedule, wire behaviour, state, refusal, cleanup (#357)
  *
  * One mode per run, each its own registered runner entry:
- *   --hold   TEST-TAS-API-004 (#369, Verifies #357 and #350), case TC-TASAPI-004, per #369's amendment of 2026-11-18 (P2 step 5)
- *            against #365 13.1-13.6 (provisional): the versioned AVB_TAS_OP_REQUEST (144 bytes, version 1) on
- *            IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030). Each request carries a distinct non-zero client_op_id, the bound net_luid, the
- *            expected_generation and context_epoch the test's own query reports (0 = not reported until D.1), pre_activation HOLD
- *            and debug_fault 0. The request is not claimed proven-valid while D.1 (metadata), D.2 (link speed) and D.4 (HOLD
- *            admission) are unsettled. Checks of this mode (the legacy lines below describe --pass and --fault):
+ *   --hold   TEST-TAS-API-004 (#369, Verifies #357 and #350), case TC-TASAPI-004, per #369's amendments of 2026-11-18 (P2 step 5)
+ *            and 2026-11-19 (oracle: executable accepted-unverified HOLD) against #365 13.1-13.4 and its published R1/R2/R4/R5/R7
+ *            (#352 R1, #351, #362): the versioned AVB_TAS_OP_REQUEST (144 bytes, version 1) on IOCTL_AVB_TAS_ACTIVATE_80C
+ *            (0x0017A030). Each request carries a distinct non-zero client_op_id, the bound net_luid, pre_activation HOLD,
+ *            debug_fault 0, AVB_TAS_F_ACCEPT_UNVERIFIED (#362: it authorizes execution of an unqualified HOLD control, never
+ *            HARDWARE_VERIFIED) and the generation and epoch of the test's own query taken immediately before the race. When that
+ *            query is not valid the proved pre-state's pair is sent as the last observed one and printed NOT measured; 0 = not
+ *            reported, never a wildcard and never fabricated. The request carries no link speed: that query's driver-owned
+ *            link_speed_mbps (#351 R2) and limits.tier_hold are measured facts, printed. Checks of this mode (the legacy lines
+ *            below describe --pass and --fault):
  *              ACCESS      a read-only bound handle: STATUS_ACCESS_DENIED (raw NTSTATUS) with no output on 0x80C, GET_TAS_STATE
  *                          still served.
- *              COMMIT      two bound open instances race the same schedule: exactly one STATUS_SUCCESS with Information 144, bytes
- *                          0-135 equal to what it sent, out_flags 0 and reserved1 0; the other STATUS_DEVICE_BUSY or
- *                          STATUS_INVALID_DEVICE_STATE with Information 0. STATUS_INVALID_DEVICE_REQUEST (0x80C not served) is FAIL,
- *                          never SKIP. A tier refusal (STATUS_REQUEST_NOT_ACCEPTED, D.4) or both refused with
- *                          STATUS_INVALID_DEVICE_STATE (the zero metadata, D.1) is INCONCLUSIVE with the raw statuses: reported,
- *                          not judged. A BASE_PASSED or COMMITTED_UNTIMED completion (D.5) has no published status, so it cannot be
- *                          recognized here; any other completion is FAIL.
- *              STATE       GET_TAS_STATE ARMED with the requested gate list. REFUSE: a further activation on the armed adapter is
- *                          STATUS_INVALID_DEVICE_STATE with Information 0 and no reported state change. Both need a committed
- *                          schedule; without one they are BLOCKED. The further request carries the generation and epoch of the
- *                          query after the commit (BLOCKED, not sent, when that query fails). NOT_CLEAN and STATE_CONFLICT share
- *                          that status (#365 13.3, 13.4), so a refusal is PASS only when that query reports a non-zero generation and
- *                          epoch; with 0 (not reported, D.1) it is INCONCLUSIVE. Acceptance, output or a changed schedule is FAIL.
- *              GENERATION  the query after the commit one generation step on: production before the #352 store is undecided
- *                          (#365 13.6 D.1), so BLOCKED with that reason.
+ *              METADATA    the query before the race reports a non-zero generation and epoch (#352 R1 L13): 0 is FAIL (an
+ *                          implementation RED, never a valid control), a query that is not valid INCONCLUSIVE (not measured). Its own
+ *                          line; the race still runs with what was measured.
+ *              COMMIT      two bound open instances race the same schedule (tas_hold_commit, TC-MOCK-062): exactly one
+ *                          STATUS_SUCCESS with Information 144, bytes 0-135 equal to what it sent, reserved1 0, no out_flags bit but
+ *                          bit 0, and AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE exactly when acceptance acted (#365 R4): tier
+ *                          IMPLEMENTED_UNVERIFIED bit 0, IMPLEMENTED_VERIFIED 0; the other STATUS_DEVICE_BUSY or
+ *                          STATUS_INVALID_DEVICE_STATE with Information 0. With the tier not reported, or the query not valid, the
+ *                          output is printed and COMMIT is INCONCLUSIVE, never PASS. FAIL: STATUS_INVALID_DEVICE_REQUEST (0x80C not
+ *                          served, never SKIP); an incomplete success or a wrong output; two successes; a success of a request
+ *                          carrying 0; a tier refusal STATUS_REQUEST_NOT_ACCEPTED of the accepted control (R4: the flag acts);
+ *                          STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR (R5 BASE_PASSED / COMMITTED_UNTIMED, named; a shared status
+ *                          is no outcome detail); both refused STATE with a 0 sent (the zero metadata named as the likely cause,
+ *                          never an excuse); a STATE refusal with an established pair unchanged across the race; NOT_READY at a
+ *                          speed measured unchanged and non-zero around it; any other completion or output. INCONCLUSIVE: a
+ *                          completion not captured; a STATE refusal with the pair changed or not measured around the race; NOT_READY
+ *                          with the speed unknown, changed or not measured; each measurement printed. Observed violations are kept
+ *                          when another measurement is missing.
+ *              STATE       GET_TAS_STATE ARMED with the requested gate list. REFUSE: a further accepted activation on the armed
+ *                          adapter is STATUS_INVALID_DEVICE_STATE with Information 0 and no reported state change. Both need a
+ *                          committed schedule (exactly one STATUS_SUCCESS with the 144-byte reply; its output is COMMIT's to judge);
+ *                          without one they are BLOCKED. The further request carries the generation and epoch of the query after
+ *                          the race (BLOCKED, not sent, when that query fails). NOT_CLEAN and STATE_CONFLICT share that status
+ *                          (#365 13.3, 13.4), so a refusal is PASS only when that query reports a non-zero generation and epoch;
+ *                          with 0 (not reported) it is INCONCLUSIVE. Acceptance, output or a changed schedule is FAIL.
+ *              GENERATION  (tas_hold_generation, TC-MOCK-063; #352 R1 L2/L7/L9) the query after the race reports the generation of
+ *                          the query before it plus one per commit and none per refusal before any write, in the same context
+ *                          (epoch unchanged). A 0 or a query not valid before or after, a changed epoch, or a completion whose write
+ *                          attempt is not established (not captured; a status shared by outcomes before and after a write, R5/R8)
+ *                          is INCONCLUSIVE, named; a decrease is FAIL.
  *              LOOKUP      evidence only: a query carrying the committed client_op_id, on the committing open instance (#365
  *                          13.1), prints lookup_result (the producer stage expects NOT_IMPLEMENTED; success-record retrieval is
  *                          #460, never asserted here).
  *              WIRE, STATUS, CLEANUP, RESTORE  as below; WIRE needs a committed schedule and an established observer.
  *            The competing request carries the same schedule, so after a commit its own hardware effect cannot be separated from
  *            the winner's: the query after the race is printed as evidence of one schedule, not as proof that the refusal wrote
- *            nothing. Expected RED against a driver without the 0x80C producer: COMMIT FAIL (not served), the dependent lines
- *            BLOCKED, ACCESS PASS (the I/O manager refuses the read-only handle whatever the handler). Passing COMMIT's status
- *            check does not establish K2 (#352).
+ *            nothing. Expected RED against a driver without the 0x80C producer: COMMIT FAIL (not served), METADATA FAIL while the
+ *            query reports 0, GENERATION INCONCLUSIVE (not reported), the dependent lines BLOCKED, ACCESS PASS (the I/O manager
+ *            refuses the read-only handle whatever the handler). Passing COMMIT does not establish K2 (#352), and an accepted
+ *            unverified commit is not HARDWARE_VERIFIED.
  *   --pass   TEST-TAS-API-005 (#370, Verifies #357), case TC-TASAPI-005, per its amendment of 2026-11-19: the 144-byte
  *            version-1 AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030) with pre_activation PASS (2), debug_fault 0,
  *            flags 0, a distinct non-zero client_op_id, the bound net_luid and the generation and epoch of the test's own query
@@ -1122,13 +1142,6 @@ static DWORD WINAPI op_thread(LPVOID arg)
     return 0;
 }
 
-/** A complete success reply as #365 13.2 defines it: all 144 bytes, the inputs echoed, the success-only outputs 0 */
-static BOOL op_success_ok(const OP_CALL *c)
-{
-    return c->status == 0 && c->got == sizeof(c->r) && memcmp(&c->r, &c->sent, offsetof(AVB_TAS_OP_REQUEST, out_flags)) == 0 &&
-           c->r.out_flags == 0 && c->r.reserved1 == 0;
-}
-
 static void print_op(const char *label, const OP_CALL *c)
 {
     char status_text[96];
@@ -1843,26 +1856,69 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
 
     {
+        /* The accepted HOLD race (#369 amendments 2026-11-18 and 2026-11-19), judged by tas_hold_commit and tas_hold_generation
+         * (tests/ioctl/tas_activate_eval.h, TC-MOCK-062/063) from the two completions and the queries immediately before and after */
         OP_CALL calls[2];
         HANDLE threads[2], go = CreateEventA(NULL, TRUE, FALSE, NULL);
-        unsigned success_ok = 0, success_any = 0, refused_ok = 0, not_served = 0, tier = 0, state_conflict = 0, k, winner = 0;
-        BOOL armed_ok;
-        QUERY_READ qa;
-        char reason[400];
+        unsigned success = 0, not_served = 0, k, winner = 0, transitions = 0;
+        BOOL armed_ok, race_valid;
+        QUERY_READ qr, qa, ql;
+        const AVB_TAS_QUERY_HW_REQUEST *pair;
+        TAS_HOLD_EVIDENCE ev;
+        TAS_HOLD_OUT_EXPECT out;
+        TAS_HOLD_COMMIT_CLASS cc;
+        TAS_HOLD_GEN_CLASS gc;
+        const char *tag;
+        char reason[900], detail[300];
 
         printf("\n  --- IOCTL_AVB_TAS_ACTIVATE_80C from two bound open instances at once ---\n");
+        /* The pair the driver compares under its claim, the driver-owned speed and the HOLD tier are measured immediately before the
+         * race (as #368's cases are, PR #491 review): the observer trial lies between the proved pre-state and here. When this query
+         * is not valid, the proved pre-state's pair is sent as the last observed one and printed NOT measured, never fabricated */
+        query(h, &qr);
+        print_query("immediately before the race", &qr);
+        race_valid = query_valid(&qr);
+        pair = race_valid ? &qr.q : &qbefore.q;
+        if (race_valid) {
+            printf("    [EVIDENCE] query before the race: valid; generation=%llu context_epoch=%llu (0 = not reported, never a value, #352 "
+                   "R1) link_speed_mbps=%u (driver-owned, 0 = unknown, #351 R2) tier_hold=%u (AVB_TAS_TIER_*, 0 = not reported)\n",
+                   qr.q.generation, qr.q.context_epoch, qr.q.link_speed_mbps, qr.q.limits.tier_hold);
+        } else {
+            printf("    [EVIDENCE] query before the race: NOT valid (ntstatus=0x%08lX information=%lu): pair, speed and tier NOT measured; "
+                   "the requests carry the proved pre-state's generation=%llu context_epoch=%llu as the last observed pair\n",
+                   (unsigned long)qr.status, qr.got, qbefore.q.generation, qbefore.q.context_epoch);
+        }
+        /* METADATA (#369 oracle amendment 2026-11-19, #352 R1 L13): once initialized the query reports the context's actual non-zero
+         * generation and epoch. A 0 exposes missing implementation (or an unavailable context), never a valid value. Its own line;
+         * the race still runs with what was measured */
+        if (!race_valid) {
+            verdict("INCONCLUSIVE", "METADATA", index, id->device_id, "the query before the race is not valid: generation and epoch "
+                    "not measured");
+        } else if (qr.q.generation == 0 || qr.q.context_epoch == 0) {
+            sprintf_s(reason, sizeof(reason), "the query reports generation=%llu context_epoch=%llu: #352 R1 requires the actual non-zero "
+                      "pair of the adapter context (0 = not reported, never a value). The accepted control carries it, so the contract "
+                      "requires its refusal as STATE_CONFLICT at R7 step 4 (#352 R1); the actual completions are on the COMMIT "
+                      "line", qr.q.generation, qr.q.context_epoch);
+            verdict("FAIL", "METADATA", index, id->device_id, reason);
+        } else {
+            sprintf_s(reason, sizeof(reason), "generation=%llu context_epoch=%llu, both non-zero (#352 R1)", qr.q.generation,
+                      qr.q.context_epoch);
+            verdict("PASS", "METADATA", index, id->device_id, reason);
+        }
         for (k = 0; k < 2; k++) {
             calls[k].h = k == 0 ? h : h2;
             calls[k].go = go;
-            build_op(&calls[k].sent, id->net_luid, &qbefore.q, base, frame);   /* the same schedule, a distinct client_op_id */
+            build_op(&calls[k].sent, id->net_luid, pair, base, frame);   /* the same schedule, a distinct client_op_id */
+            calls[k].sent.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;   /* #362, #365 R4: executes unverified HOLD, never HARDWARE_VERIFIED */
             calls[k].r = calls[k].sent;
             calls[k].status = (LONG)AVB_NTSTATUS_UNAVAILABLE;
             calls[k].got = 0;
             threads[k] = go != NULL ? CreateThread(NULL, 0, op_thread, &calls[k], 0, NULL) : NULL;
         }
-        printf("    request: pre=HOLD base=%lld (PHC %lld, lead %lld ms) cycle=%lld window=%lld..%lld ms frame=%u gen=%llu epoch=%llu\n",
-               base, phc, (base - phc) / NS_PER_MS, CYCLE_NS, WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS, frame,
-               qbefore.q.generation, qbefore.q.context_epoch);
+        printf("    request: pre=HOLD flags=0x%X (ACCEPT_UNVERIFIED: authorizes execution, not HARDWARE_VERIFIED) base=%lld (PHC %lld, lead "
+               "%lld ms) cycle=%lld window=%lld..%lld ms frame=%u gen=%llu%s epoch=%llu%s\n", calls[0].sent.flags, base, phc,
+               (base - phc) / NS_PER_MS, CYCLE_NS, WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS, frame, pair->generation,
+               pair->generation == 0 ? " (not reported)" : "", pair->context_epoch, pair->context_epoch == 0 ? " (not reported)" : "");
         if (go != NULL) { SetEvent(go); }
         for (k = 0; k < 2; k++) {
             if (threads[k] != NULL) {
@@ -1870,43 +1926,135 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 CloseHandle(threads[k]);
             }
             print_op(k == 0 ? "instance 1" : "instance 2", &calls[k]);
-            if (op_success_ok(&calls[k])) { success_ok++; winner = k; }
-            if (calls[k].status == 0) { success_any++; }
-            if (calls[k].got == 0 && (calls[k].status == (LONG)STATUS_DEVICE_BUSY || calls[k].status == (LONG)STATUS_INVALID_DEVICE_STATE)) {
-                refused_ok++;
-            }
-            if (calls[k].status == (LONG)STATUS_INVALID_DEVICE_REQUEST) { not_served++; }
-            if (calls[k].status == (LONG)STATUS_REQUEST_NOT_ACCEPTED) { tier++; }
-            if (calls[k].got == 0 && calls[k].status == (LONG)STATUS_INVALID_DEVICE_STATE) { state_conflict++; }
         }
         if (go != NULL) { CloseHandle(go); }
         /* h2 stays open through LOOKUP: the record is retrieved on the originating open instance (#365 13.1, PR #481) */
         first_after = g_next_seq;
-        if (not_served != 0) {
-            sprintf_s(reason, sizeof(reason), "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST on %u of 2 calls): the code "
-                      "is allocated to the adapter's TAS function (#362, #357), so this is FAIL, never SKIP", not_served);
-            verdict("FAIL", "COMMIT", index, id->device_id, reason);
-        } else if (success_ok == 1 && refused_ok == 1) {
-            verdict("PASS", "COMMIT", index, id->device_id, "one complete STATUS_SUCCESS reply (144 bytes, inputs echoed, out_flags 0, "
-                    "reserved1 0) and one STATUS_DEVICE_BUSY or STATUS_INVALID_DEVICE_STATE with no output; the request's validity under "
-                    "D.1, D.2 and D.4 rests on the driver's acceptance, it is not proven by the test");
-        } else if (tier != 0 || (success_any == 0 && state_conflict == 2)) {
-            sprintf_s(reason, sizeof(reason), "reported, not judged: %s; see the two calls above",
-                      tier != 0 ? "a tier refusal STATUS_REQUEST_NOT_ACCEPTED (tier behaviour undecided, #365 13.6 D.4)"
-                                : "both refused with STATUS_INVALID_DEVICE_STATE (the baseline carries the query's unreported generation and "
-                                  "epoch, #365 13.6 D.1)");
-            verdict("INCONCLUSIVE", "COMMIT", index, id->device_id, reason);
-        } else {
-            verdict("FAIL", "COMMIT", index, id->device_id, "expected exactly one complete STATUS_SUCCESS reply and one STATUS_DEVICE_BUSY or "
-                    "STATUS_INVALID_DEVICE_STATE with no output; see the two calls above");
+        query(h, &qa);   /* before any further request: GENERATION, COMMIT's isolation and REFUSE's metadata */
+        print_query("after the race", &qa);
+
+        ZeroMemory(&ev, sizeof(ev));
+        for (k = 0; k < 2; k++) {
+            ev.call[k].captured = calls[k].status != AVB_NTSTATUS_UNAVAILABLE;
+            ev.call[k].status = calls[k].status;
+            ev.call[k].information = calls[k].got;
+            ev.call[k].echoed = memcmp(&calls[k].r, &calls[k].sent, offsetof(AVB_TAS_OP_REQUEST, out_flags)) == 0;
+            ev.call[k].out_flags = calls[k].r.out_flags;
+            ev.call[k].reserved1 = calls[k].r.reserved1;
+            if (ev.call[k].captured && calls[k].status == 0) { success++; winner = k; }
+            if (ev.call[k].captured && calls[k].status == (LONG)STATUS_INVALID_DEVICE_REQUEST) { not_served++; }
         }
-        committed = success_ok == 1 && success_any == 1;
+        ev.accept_sent = TRUE;
+        ev.pre_valid = race_valid;
+        ev.pre_generation = pair->generation;
+        ev.pre_epoch = pair->context_epoch;
+        ev.pre_mbps = race_valid ? qr.q.link_speed_mbps : 0u;
+        ev.tier_hold = race_valid ? qr.q.limits.tier_hold : 0u;
+        ev.post_valid = query_valid(&qa);
+        ev.post_generation = ev.post_valid ? qa.q.generation : 0u;
+        ev.post_epoch = ev.post_valid ? qa.q.context_epoch : 0u;
+        ev.post_mbps = ev.post_valid ? qa.q.link_speed_mbps : 0u;
+        out = tas_hold_out_expect(ev.pre_valid, ev.tier_hold);
+        cc = tas_hold_commit(&ev);
+        gc = tas_hold_generation(&ev, &transitions);
+        printf("    [EVIDENCE] race facts: out_flags expectation %s (tier_hold %u%s); query after the race %s generation=%llu "
+               "context_epoch=%llu link_speed_mbps=%u\n", out == TAS_HOLD_OUT_BIT0 ? "bit 0 (acceptance acts)" :
+               (out == TAS_HOLD_OUT_ZERO ? "0 (acceptance does not act)" : "not judged"), ev.tier_hold,
+               race_valid ? "" : ", not measured", ev.post_valid ? "valid" : "NOT valid:", ev.post_generation, ev.post_epoch, ev.post_mbps);
+
+        detail[0] = '\0';
+        if (cc == TAS_HOLD_COMMIT_PAIR_CHANGED || cc == TAS_HOLD_COMMIT_SPEED_UNDETERMINED || cc == TAS_HOLD_COMMIT_OUT_UNJUDGED) {
+            sprintf_s(detail, sizeof(detail), "before the race %s generation=%llu epoch=%llu speed=%u tier_hold=%u; after it %s "
+                      "generation=%llu epoch=%llu speed=%u", race_valid ? "valid" : "NOT measured", ev.pre_generation, ev.pre_epoch,
+                      ev.pre_mbps, ev.tier_hold, ev.post_valid ? "valid" : "NOT measured", ev.post_generation, ev.post_epoch, ev.post_mbps);
+        }
+        switch (cc) {
+        case TAS_HOLD_COMMIT_PASS:
+            sprintf_s(reason, sizeof(reason), "one complete STATUS_SUCCESS reply (144 bytes, inputs echoed, reserved1 0, out_flags 0x%X as "
+                      "tier_hold %u requires, #365 R4) and one STATUS_DEVICE_BUSY or STATUS_INVALID_DEVICE_STATE with no output; an "
+                      "accepted unverified commit is not HARDWARE_VERIFIED and does not establish K2 (#352)", calls[winner].r.out_flags,
+                      ev.tier_hold);
+            break;
+        case TAS_HOLD_COMMIT_NOT_SERVED:
+            sprintf_s(reason, sizeof(reason), "IOCTL_AVB_TAS_ACTIVATE_80C not served (STATUS_INVALID_DEVICE_REQUEST on %u of 2 calls): the "
+                      "code is allocated to the adapter's TAS function (#362, #357), so this is FAIL, never SKIP", not_served);
+            break;
+        case TAS_HOLD_COMMIT_BAD_SUCCESS:
+            sprintf_s(reason, sizeof(reason), "a STATUS_SUCCESS reply is not complete (#365 13.2, R4): Information 144, inputs echoed, "
+                      "reserved1 0 and no out_flags bit but bit 0 are required; see the two calls above");
+            break;
+        case TAS_HOLD_COMMIT_OUT_FLAGS:
+            sprintf_s(reason, sizeof(reason), "out_flags 0x%X, but tier_hold %u requires %s: AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE is set "
+                      "exactly when unverified acceptance acted (#365 R4), not because the flag was sent", calls[winner].r.out_flags,
+                      ev.tier_hold, out == TAS_HOLD_OUT_BIT0 ? "bit 0" : "0");
+            break;
+        case TAS_HOLD_COMMIT_ZERO_ACCEPTED:
+            sprintf_s(reason, sizeof(reason), "a request carrying generation=%llu context_epoch=%llu (0 = not reported) completed "
+                      "STATUS_SUCCESS: #352 R1 requires a zero pair to be refused STATE_CONFLICT at R7 step 4", ev.pre_generation, ev.pre_epoch);
+            break;
+        case TAS_HOLD_COMMIT_TWO_SUCCESSES:
+            sprintf_s(reason, sizeof(reason), "both calls completed STATUS_SUCCESS: the non-waiting per-adapter claim must admit "
+                      "only one (#365 R7 step 3)");
+            break;
+        case TAS_HOLD_COMMIT_TIER_REFUSED:
+            sprintf_s(reason, sizeof(reason), "STATUS_REQUEST_NOT_ACCEPTED although both requests carried AVB_TAS_F_ACCEPT_UNVERIFIED: "
+                      "with it the driver must execute the HOLD operation (#365 R4, #362); no longer an undecided tier policy");
+            break;
+        case TAS_HOLD_COMMIT_R5:
+            sprintf_s(reason, sizeof(reason), "STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR with no output: #365 R5 maps BASE_PASSED and "
+                      "COMMITTED_UNTIMED to these (STATUS_IO_DEVICE_ERROR is also R8's FAILED_RESTORED), so the status does not detail "
+                      "the outcome; no complete commit (the adapter may hold a schedule, the owned cleanup follows)");
+            break;
+        case TAS_HOLD_COMMIT_META_ZERO:
+            sprintf_s(reason, sizeof(reason), "both refused STATUS_INVALID_DEVICE_STATE: the requests carried generation=%llu "
+                      "context_epoch=%llu (0 = not reported), which #352 R1 requires to be refused STATE_CONFLICT; the missing metadata (see "
+                      "METADATA) is the likely cause, not an excuse: no commit", ev.pre_generation, ev.pre_epoch);
+            break;
+        case TAS_HOLD_COMMIT_STATE_REFUSED:
+            sprintf_s(reason, sizeof(reason), "refused STATUS_INVALID_DEVICE_STATE although the pair sent (generation=%llu "
+                      "context_epoch=%llu) was measured unchanged before and after the race on the proved-clean adapter: no commit",
+                      ev.pre_generation, ev.pre_epoch);
+            break;
+        case TAS_HOLD_COMMIT_NOT_READY:
+            sprintf_s(reason, sizeof(reason), "refused STATUS_DEVICE_NOT_READY although the driver-owned speed was measured %u Mbit/s "
+                      "before and after the race (#351 R2): no commit", ev.pre_mbps);
+            break;
+        case TAS_HOLD_COMMIT_OUT_UNJUDGED:
+            sprintf_s(reason, sizeof(reason), "one complete STATUS_SUCCESS reply (out_flags 0x%X) and one BUSY or STATE refusal, but "
+                      "whether unverified acceptance acted is not measured (%s), so out_flags is reported, not judged (#365 R4); never "
+                      "PASS", calls[winner].r.out_flags, detail);
+            break;
+        case TAS_HOLD_COMMIT_PAIR_CHANGED:
+            sprintf_s(reason, sizeof(reason), "refused STATUS_INVALID_DEVICE_STATE, but the pair the driver compared under its claim is "
+                      "not determined: %s", detail);
+            break;
+        case TAS_HOLD_COMMIT_SPEED_UNDETERMINED:
+            sprintf_s(reason, sizeof(reason), "refused STATUS_DEVICE_NOT_READY, but the driver-owned speed it sampled is not determined "
+                      "(#351 R2: NOT_READY is the defined refusal of an unknown speed): %s", detail);
+            break;
+        case TAS_HOLD_COMMIT_NOT_CAPTURED:
+            sprintf_s(reason, sizeof(reason), "a raw NTSTATUS was not captured (no driver completion observed) and no violation was "
+                      "observed: not established");
+            break;
+        default:
+            sprintf_s(reason, sizeof(reason), "expected exactly one complete STATUS_SUCCESS reply and one STATUS_DEVICE_BUSY or "
+                      "STATUS_INVALID_DEVICE_STATE with no output; see the two calls above%s", ev.pre_generation == 0 ||
+                      ev.pre_epoch == 0 ? " (the requests carried generation or epoch 0, which #352 R1 requires to be refused STATE_CONFLICT; see "
+                      "METADATA)" : "");
+            break;
+        }
+        tag = cc == TAS_HOLD_COMMIT_PASS ? "PASS" : (cc == TAS_HOLD_COMMIT_OUT_UNJUDGED || cc == TAS_HOLD_COMMIT_PAIR_CHANGED ||
+              cc == TAS_HOLD_COMMIT_SPEED_UNDETERMINED || cc == TAS_HOLD_COMMIT_NOT_CAPTURED ? "INCONCLUSIVE" : "FAIL");
+        verdict(tag, "COMMIT", index, id->device_id, reason);
+
+        /* The schedule is committed when exactly one call completed STATUS_SUCCESS with the 144-byte reply; its output fields are
+         * COMMIT's to judge, so a wrong output never suppresses the independent STATE, REFUSE and WIRE observations */
+        committed = success == 1 && calls[winner].got == sizeof(calls[winner].r);
         if (committed) {
             req_op = calls[winner].sent;
-            query(h, &qa);
-            print_query("after the race", &qa);
             printf("    [EVIDENCE] the competing request carried the same schedule: after the commit its own hardware effect cannot be "
-                   "separated from the winner's; the query above is evidence of one schedule, not proof that the refusal wrote nothing\n");
+                   "separated from the winner's; the query after the race is evidence of one schedule, not proof that the refusal wrote "
+                   "nothing\n");
             armed_ok = read_state(h, &s);
             if (armed_ok) { print_state("after the activation", &s); }
             verdict(armed_ok && state_matches(&s, base) ? "PASS" : "FAIL", "STATE", index, id->device_id,
@@ -1920,15 +2068,17 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 /* NOT_CLEAN and STATE_CONFLICT both complete STATUS_INVALID_DEVICE_STATE (#365 13.3, 13.4), so a refusal is attributed
                  * to the armed state only when the request carried reported post-commit metadata (0 = not reported, #365 12.2
                  * offset 88; unknown values are not wildcards, #369). Acceptance, output or a changed schedule fails whatever the
-                 * metadata: an armed adapter must refuse and keep its schedule (#369 REFUSE) */
+                 * metadata: an armed adapter must refuse and keep its schedule (#369 REFUSE). The request carries the acceptance
+                 * flag, so R7's NOT_CLEAN (step 9) is reached after the tier step (8) */
                 OP_CALL again;
                 BOOL meta_ok = qa.q.generation != 0 && qa.q.context_epoch != 0, refused;
                 ZeroMemory(&again, sizeof(again));
                 build_op(&again.sent, id->net_luid, &qa.q, base + CYCLE_NS, frame);
+                again.sent.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
                 again.r = again.sent;
                 again.status = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &again.r, sizeof(again.r), &again.r, sizeof(again.r), &again.got);
-                printf("    further request: base=%lld gen=%llu epoch=%llu (from the query after the commit)\n", base + CYCLE_NS,
-                       qa.q.generation, qa.q.context_epoch);
+                printf("    further request: base=%lld flags=0x%X gen=%llu epoch=%llu (from the query after the commit)\n", base + CYCLE_NS,
+                       again.sent.flags, qa.q.generation, qa.q.context_epoch);
                 print_op("activation on the armed adapter", &again);
                 armed_ok = read_state(h, &s);
                 refused = again.status == (LONG)STATUS_INVALID_DEVICE_STATE && again.got == 0 && armed_ok && state_matches(&s, base);
@@ -1937,27 +2087,62 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 } else if (refused) {
                     verdict("INCONCLUSIVE", "REFUSE", index, id->device_id, "reported, not judged: STATUS_INVALID_DEVICE_STATE with no "
                             "output and the schedule kept, but the query after the commit reports generation or epoch 0 (not reported, "
-                            "#365 13.6 D.1), so NOT_CLEAN cannot be told from STATE_CONFLICT");
+                            "#352 R1), so NOT_CLEAN cannot be told from STATE_CONFLICT");
                 } else {
                     verdict("FAIL", "REFUSE", index, id->device_id, "an armed adapter must refuse activation with "
                             "STATUS_INVALID_DEVICE_STATE, no output, and keep the reported schedule");
                 }
             }
-            query_lookup(calls[winner].h, req_op.client_op_id, &qa);
+            query_lookup(calls[winner].h, req_op.client_op_id, &ql);
             printf("    [EVIDENCE] LOOKUP: query on the committing open instance (%s) with client_op_id 0x%016llX: ntstatus=0x%08lX "
                    "information=%lu lookup_result=%u (the producer stage expects NOT_IMPLEMENTED 4; success-record retrieval is #460, "
-                   "not asserted here)\n", winner == 0 ? "instance 1" : "instance 2", req_op.client_op_id, (unsigned long)qa.status, qa.got,
-                   query_valid(&qa) ? qa.q.lookup_result : 0u);
+                   "not asserted here)\n", winner == 0 ? "instance 1" : "instance 2", req_op.client_op_id, (unsigned long)ql.status, ql.got,
+                   query_valid(&ql) ? ql.q.lookup_result : 0u);
         } else {
-            const char *no = success_any != 0 ? "no single complete commit was established (see COMMIT); the adapter may hold a schedule, "
-                                                "the owned cleanup follows" : "no committed schedule (see COMMIT)";
+            const char *no = success != 0 ? "no single complete commit was established (see COMMIT); the adapter may hold a schedule, "
+                                            "the owned cleanup follows" : "no committed schedule (see COMMIT)";
             verdict("BLOCKED", "STATE", index, id->device_id, no);
             verdict("BLOCKED", "REFUSE", index, id->device_id, no);
             printf("    [EVIDENCE] LOOKUP: not queried, %s\n", no);
         }
         CloseHandle(h2);
-        verdict("BLOCKED", "GENERATION", index, id->device_id, "generation production before the #352 store is undecided (#365 13.6 D.1): "
-                "a step after the pre-activation value cannot be asserted; never PASS");
+
+        /* GENERATION across the race (#352 R1 L2/L7/L9), from the queries immediately before and after it */
+        switch (gc) {
+        case TAS_HOLD_GEN_PASS:
+            sprintf_s(reason, sizeof(reason), "generation %llu -> %llu in context %llu: %u transition(s), one per commit and none per "
+                      "refusal before any write (#352 R1)", ev.pre_generation, ev.post_generation, ev.pre_epoch, transitions);
+            break;
+        case TAS_HOLD_GEN_FAIL:
+            if (ev.post_generation < ev.pre_generation) {
+                sprintf_s(reason, sizeof(reason), "generation %llu -> %llu in context %llu: a decrease (never, #352 R1 L12)",
+                          ev.pre_generation, ev.post_generation, ev.pre_epoch);
+            } else {
+                sprintf_s(reason, sizeof(reason), "generation %llu -> %llu in context %llu, expected +%u: one per write-attempting "
+                          "mutation and none per refusal before any write (#352 R1 L2/L7/L9)", ev.pre_generation, ev.post_generation,
+                          ev.pre_epoch, transitions);
+            }
+            break;
+        case TAS_HOLD_GEN_PRE_UNREPORTED:
+            sprintf_s(reason, sizeof(reason), "not judged: the query before the race %s (0 = not reported, never a value; METADATA "
+                      "carries it)", race_valid ? "reports generation or epoch 0" : "is not valid");
+            break;
+        case TAS_HOLD_GEN_POST_UNREPORTED:
+            sprintf_s(reason, sizeof(reason), "not judged: the query after the race %s (0 = not reported, never a value)",
+                      ev.post_valid ? "reports generation or epoch 0" : "is not valid");
+            break;
+        case TAS_HOLD_GEN_EPOCH_CHANGED:
+            sprintf_s(reason, sizeof(reason), "not judged: the context epoch changed across the race (%llu -> %llu), another adapter "
+                      "context (#352 R1 L11)", ev.pre_epoch, ev.post_epoch);
+            break;
+        default:
+            sprintf_s(reason, sizeof(reason), "not judged: a completion's write attempt is not established (not captured, or a status "
+                      "shared by outcomes before and after a write, #365 R5/R8); generation %llu -> %llu", ev.pre_generation,
+                      ev.post_generation);
+            break;
+        }
+        verdict(gc == TAS_HOLD_GEN_PASS ? "PASS" : (gc == TAS_HOLD_GEN_FAIL ? "FAIL" : "INCONCLUSIVE"), "GENERATION", index,
+                id->device_id, reason);
     }
 
     if (committed && wire) {

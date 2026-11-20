@@ -427,3 +427,214 @@ static __inline avb_u64 tas_inv_window_min_ns(avb_u32 max_frame_bytes, avb_u32 l
 
     return link_mbps == 0 ? 0 : bytes * TAS_DR05_NS_MBPS_PER_BYTE / link_mbps;
 }
+
+/* ---- #369 --hold (TEST-TAS-API-004): the race's COMMIT and GENERATION (TC-MOCK-062, 063) ----
+ * Two bound open instances race the same accepted HOLD control (#369 amendments 2026-11-18 and 2026-11-19). */
+typedef struct {
+    BOOL captured;          /* the raw NTSTATUS was captured */
+    LONG status;
+    DWORD information;
+    BOOL echoed;            /* bytes 0..135 (up to out_flags) equal to what was sent */
+    avb_u32 out_flags;
+    avb_u32 reserved1;
+} TAS_HOLD_CALL;
+
+typedef struct {
+    TAS_HOLD_CALL call[2];
+    BOOL accept_sent;            /* both requests carried AVB_TAS_F_ACCEPT_UNVERIFIED */
+    BOOL pre_valid;              /* the query immediately before the race was valid (pair, speed and tier measured) */
+    avb_u64 pre_generation;      /* the pair both requests carried (that query's, or the last observed one when it was not valid) */
+    avb_u64 pre_epoch;
+    avb_u32 pre_mbps;            /* that query's link_speed_mbps, 0 = unknown */
+    avb_u32 tier_hold;           /* that query's limits.tier_hold, AVB_TAS_TIER_*, 0 = not reported */
+    BOOL post_valid;             /* the query right after the race, before any further request, was valid */
+    avb_u64 post_generation;
+    avb_u64 post_epoch;
+    avb_u32 post_mbps;
+} TAS_HOLD_EVIDENCE;
+
+typedef enum {
+    TAS_HOLD_OUT_BIT0 = 0,   /* acceptance acts: AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE */
+    TAS_HOLD_OUT_ZERO,       /* acceptance does not act: 0 */
+    TAS_HOLD_OUT_UNJUDGED    /* not determined by a measurement: reported, not judged */
+} TAS_HOLD_OUT_EXPECT;
+
+typedef enum {
+    TAS_HOLD_COMMIT_PASS = 0,             /* PASS */
+    TAS_HOLD_COMMIT_NOT_SERVED,           /* FAIL */
+    TAS_HOLD_COMMIT_BAD_SUCCESS,          /* FAIL */
+    TAS_HOLD_COMMIT_OUT_FLAGS,            /* FAIL */
+    TAS_HOLD_COMMIT_ZERO_ACCEPTED,        /* FAIL */
+    TAS_HOLD_COMMIT_TWO_SUCCESSES,        /* FAIL */
+    TAS_HOLD_COMMIT_TIER_REFUSED,         /* FAIL */
+    TAS_HOLD_COMMIT_R5,                   /* FAIL */
+    TAS_HOLD_COMMIT_META_ZERO,            /* FAIL */
+    TAS_HOLD_COMMIT_STATE_REFUSED,        /* FAIL */
+    TAS_HOLD_COMMIT_NOT_READY,            /* FAIL */
+    TAS_HOLD_COMMIT_OTHER,                /* FAIL */
+    TAS_HOLD_COMMIT_OUT_UNJUDGED,         /* INCONCLUSIVE */
+    TAS_HOLD_COMMIT_PAIR_CHANGED,         /* INCONCLUSIVE */
+    TAS_HOLD_COMMIT_SPEED_UNDETERMINED,   /* INCONCLUSIVE */
+    TAS_HOLD_COMMIT_NOT_CAPTURED          /* INCONCLUSIVE */
+} TAS_HOLD_COMMIT_CLASS;
+
+typedef enum {
+    TAS_HOLD_GEN_PASS = 0,              /* PASS */
+    TAS_HOLD_GEN_FAIL,                  /* FAIL */
+    TAS_HOLD_GEN_PRE_UNREPORTED,        /* INCONCLUSIVE */
+    TAS_HOLD_GEN_POST_UNREPORTED,       /* INCONCLUSIVE */
+    TAS_HOLD_GEN_EPOCH_CHANGED,         /* INCONCLUSIVE */
+    TAS_HOLD_GEN_UNKNOWN_EXPECTATION    /* INCONCLUSIVE */
+} TAS_HOLD_GEN_CLASS;
+
+/* The out_flags a success must carry (#365 R4, #362, #369 oracle amendment 2026-11-19): AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE
+ * when unverified acceptance actually acted, otherwise 0. Whether it acts is the measured HOLD tier of the query before the race:
+ * IMPLEMENTED_UNVERIFIED needs the acceptance, IMPLEMENTED_VERIFIED does not. Any other value (0 = not reported, or a tier that
+ * leaves no valid control) and a query that is not valid determine nothing: the output is reported, not judged. Never a
+ * permanent 0, never 1 merely because the flag was sent. */
+static __inline TAS_HOLD_OUT_EXPECT tas_hold_out_expect(BOOL pre_valid, avb_u32 tier_hold)
+{
+    if (!pre_valid) {
+        return TAS_HOLD_OUT_UNJUDGED;
+    }
+    if (tier_hold == AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED) {
+        return TAS_HOLD_OUT_BIT0;
+    }
+    return tier_hold == AVB_TAS_TIER_IMPLEMENTED_VERIFIED ? TAS_HOLD_OUT_ZERO : TAS_HOLD_OUT_UNJUDGED;
+}
+
+static __inline BOOL tas_hold_is(const TAS_HOLD_CALL *c, NTSTATUS status)
+{
+    return c->captured && c->status == (LONG)status;
+}
+
+/* Generation transitions one completion establishes (#352 R1 L2/L7/L9): a commit attempted writes (1); the published refusals of
+ * #365 R7 steps 1-9 (and an unserved code) complete before any write (0). -1: not established - the status was not captured, or it
+ * is shared by outcomes before and after a write (R5/R8: STATUS_IO_DEVICE_ERROR, STATUS_UNSUCCESSFUL) or unpublished */
+static __inline int tas_hold_call_transitions(const TAS_HOLD_CALL *c)
+{
+    if (!c->captured) {
+        return -1;
+    }
+    if (c->status == 0) {
+        return 1;
+    }
+    if (c->status == (LONG)STATUS_DEVICE_BUSY || c->status == (LONG)STATUS_INVALID_DEVICE_STATE ||
+        c->status == (LONG)STATUS_REQUEST_NOT_ACCEPTED || c->status == (LONG)STATUS_DEVICE_NOT_READY ||
+        c->status == (LONG)STATUS_INVALID_PARAMETER || c->status == (LONG)STATUS_INVALID_DEVICE_REQUEST) {
+        return 0;
+    }
+    return -1;
+}
+
+/* COMMIT of the race (#369 amendments; #365 R1/R2/R4/R5/R7): exactly one complete success (Information 144, inputs echoed,
+ * reserved1 0, no output bit but bit 0, bit 0 as tas_hold_out_expect requires) and one BUSY or STATE refusal with no output.
+ * Observed violations come first and are kept whatever else is missing. A tier refusal of the accepted control is FAIL (the flag
+ * acts); an R5 status is FAIL and named (a shared status is no outcome detail); a STATE refusal of a request carrying 0 is FAIL
+ * with the zero metadata as the likely cause. A refusal attributable to a prerequisite that changed or was not measured around
+ * the race (the pair under the claim, the driver-owned speed) is INCONCLUSIVE. */
+static __inline TAS_HOLD_COMMIT_CLASS tas_hold_commit(const TAS_HOLD_EVIDENCE *e)
+{
+    const TAS_HOLD_OUT_EXPECT out = tas_hold_out_expect(e->pre_valid, e->tier_hold);
+    const BOOL pair_zero = e->pre_generation == 0 || e->pre_epoch == 0;
+    const BOOL pair_kept = e->pre_valid && e->post_valid && e->post_generation == e->pre_generation &&
+                           e->post_epoch == e->pre_epoch;
+    const BOOL speed_stable = e->pre_valid && e->post_valid && e->pre_mbps != 0 && e->post_mbps == e->pre_mbps;
+    unsigned k, success = 0, state = 0, not_ready = 0;
+    const TAS_HOLD_CALL *refusal = NULL;
+
+    for (k = 0; k < 2; k++) {
+        if (tas_hold_is(&e->call[k], STATUS_INVALID_DEVICE_REQUEST)) {
+            return TAS_HOLD_COMMIT_NOT_SERVED;
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        const TAS_HOLD_CALL *c = &e->call[k];
+        if (!c->captured || c->status != 0) {
+            refusal = c;
+            continue;
+        }
+        success++;
+        if (c->information != (DWORD)sizeof(AVB_TAS_OP_REQUEST) || !c->echoed || c->reserved1 != 0 ||
+            (c->out_flags & ~AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE) != 0) {
+            return TAS_HOLD_COMMIT_BAD_SUCCESS;
+        }
+        if (out != TAS_HOLD_OUT_UNJUDGED &&
+            (c->out_flags & AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE) != (out == TAS_HOLD_OUT_BIT0 ? AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE : 0u)) {
+            return TAS_HOLD_COMMIT_OUT_FLAGS;
+        }
+    }
+    if (success != 0 && pair_zero) {
+        return TAS_HOLD_COMMIT_ZERO_ACCEPTED;   /* #352 R1 L2: a zero pair reaching metadata validation is refused */
+    }
+    if (success == 2) {
+        return TAS_HOLD_COMMIT_TWO_SUCCESSES;
+    }
+    for (k = 0; k < 2; k++) {
+        if (tas_hold_is(&e->call[k], STATUS_REQUEST_NOT_ACCEPTED)) {
+            return e->accept_sent ? TAS_HOLD_COMMIT_TIER_REFUSED : TAS_HOLD_COMMIT_OTHER;
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        if (tas_hold_is(&e->call[k], STATUS_IO_TIMEOUT) || tas_hold_is(&e->call[k], STATUS_IO_DEVICE_ERROR)) {
+            return TAS_HOLD_COMMIT_R5;
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        const TAS_HOLD_CALL *c = &e->call[k];
+        if (c->captured && c->status != 0 && c->information != 0) {
+            return TAS_HOLD_COMMIT_OTHER;   /* errors carry no output */
+        }
+        state += tas_hold_is(c, STATUS_INVALID_DEVICE_STATE);
+        not_ready += tas_hold_is(c, STATUS_DEVICE_NOT_READY);
+    }
+    if (success == 1) {
+        if (!refusal->captured) {
+            return TAS_HOLD_COMMIT_NOT_CAPTURED;
+        }
+        if (refusal->status != (LONG)STATUS_DEVICE_BUSY && refusal->status != (LONG)STATUS_INVALID_DEVICE_STATE) {
+            return TAS_HOLD_COMMIT_OTHER;
+        }
+        return out == TAS_HOLD_OUT_UNJUDGED ? TAS_HOLD_COMMIT_OUT_UNJUDGED : TAS_HOLD_COMMIT_PASS;
+    }
+    if (!e->call[0].captured || !e->call[1].captured) {
+        return TAS_HOLD_COMMIT_NOT_CAPTURED;
+    }
+    if (pair_zero) {
+        return state == 2 ? TAS_HOLD_COMMIT_META_ZERO : TAS_HOLD_COMMIT_OTHER;   /* step 4 refuses a 0 first (#365 R7) */
+    }
+    if (state != 0) {
+        return pair_kept ? TAS_HOLD_COMMIT_STATE_REFUSED : TAS_HOLD_COMMIT_PAIR_CHANGED;
+    }
+    if (not_ready != 0) {
+        return speed_stable ? TAS_HOLD_COMMIT_NOT_READY : TAS_HOLD_COMMIT_SPEED_UNDETERMINED;
+    }
+    return TAS_HOLD_COMMIT_OTHER;
+}
+
+/* GENERATION across the race (#352 R1 L2/L7/L9, #369 oracle amendment 2026-11-19): post = pre + the transitions the two
+ * completions establish (a commit one, a refusal before any write none), from a non-zero pair measured before and after in the same
+ * context (epoch unchanged). 0 is never a value. A decrease is FAIL whatever else is unknown (no wrap, L12). */
+static __inline TAS_HOLD_GEN_CLASS tas_hold_generation(const TAS_HOLD_EVIDENCE *e, unsigned *transitions)
+{
+    int t0 = tas_hold_call_transitions(&e->call[0]), t1 = tas_hold_call_transitions(&e->call[1]);
+
+    *transitions = 0;
+    if (!e->pre_valid || e->pre_generation == 0 || e->pre_epoch == 0) {
+        return TAS_HOLD_GEN_PRE_UNREPORTED;
+    }
+    if (!e->post_valid || e->post_generation == 0 || e->post_epoch == 0) {
+        return TAS_HOLD_GEN_POST_UNREPORTED;
+    }
+    if (e->post_epoch != e->pre_epoch) {
+        return TAS_HOLD_GEN_EPOCH_CHANGED;
+    }
+    if (e->post_generation < e->pre_generation) {
+        return TAS_HOLD_GEN_FAIL;
+    }
+    if (t0 < 0 || t1 < 0) {
+        return TAS_HOLD_GEN_UNKNOWN_EXPECTATION;
+    }
+    *transitions = (unsigned)(t0 + t1);
+    return e->post_generation - e->pre_generation == (avb_u64)*transitions ? TAS_HOLD_GEN_PASS : TAS_HOLD_GEN_FAIL;
+}
