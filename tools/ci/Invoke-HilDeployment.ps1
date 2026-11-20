@@ -93,7 +93,7 @@ if ($Action -eq 'Recover') {
         Write-Host "[HIL-RECOVER] NOT_EXECUTED_BUSY - HIL machine busy: $($rl.Why) (nothing observed, nothing written next to the lock)" -ForegroundColor Red
         exit 1
     }
-    $code = 1
+    $code = 1; $rc = $null
     try {
         $rc = Invoke-AvbHilReconciliation -LockPath $LockPath -Mode 'operator' -LockOwner $rl.Owner -PreviousLockOwner $rl.PreviousOwner -Observe $observe -EvidenceDir $EvidenceDir
         $inc = $rc.incident
@@ -110,7 +110,13 @@ if ($Action -eq 'Recover') {
         }
     } finally {
         $rel = Exit-AvbHilLock -Owner $rl.Owner -Path $LockPath
-        if (-not $rel.Ok) { Write-Host "[LOCK] NOT released: $($rel.Why)" -ForegroundColor Red; $code = 1 }
+        if ($rel.Ok) { Write-Host "[LOCK] released" } else { Write-Host "[LOCK] NOT released: $($rel.Why)" -ForegroundColor Red; $code = 1 }
+        # The machine-local record was written while the lock was held (immutable); the release is added to the
+        # evidence copy.
+        if ($null -ne $rc) {
+            $rc['lockRelease'] = [ordered]@{ ok = [bool]$rel.Ok; why = $rel.Why; utc = [datetime]::UtcNow.ToString('o') }
+            ($rc | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'recovery.json') -Encoding UTF8
+        }
     }
     exit $code
 }

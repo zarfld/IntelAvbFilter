@@ -178,18 +178,105 @@ function ConvertTo-AvbServiceImageFile {
     return $p
 }
 
+# Runs a read-only PowerShell query in a helper process with an ENFORCED time limit that includes output collection
+# (-EncodedCommand: no quoting).  On timeout the only process terminated is this helper, through the process object
+# returned by its own Start call (TEST-CIDEPLOY-016 enforces that structurally); installers, netcfg and every other
+# process are never terminated.  Terminating the helper does not imply that work it requested elsewhere (for example
+# from a WMI provider) was cancelled.  Process.Kill() is asynchronous: termination is reported as confirmed only when
+# the bounded wait observes the exit, otherwise as unconfirmed.
+# @{ status = COMPLETED | TIMEOUT | FAILED; exitCode; stdout; stderr; pid; disposition = exited | terminated |
+#    'exited before termination ...' | 'termination unconfirmed ...' | 'not started'; timeoutSeconds; elapsedMs; error }
+function Invoke-AvbBoundedPowerShell {
+    param([string]$Script, [int]$TimeoutSeconds, [int]$CleanupSeconds = 5)
+    $r = [ordered]@{ status = $null; exitCode = $null; stdout = ''; stderr = ''; pid = $null; disposition = 'not started'
+                     timeoutSeconds = $TimeoutSeconds; elapsedMs = $null; error = $null }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $p = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $psi.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $r.pid = $p.Id
+        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+        $remaining = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$sw.ElapsedMilliseconds)
+        if ($p.WaitForExit($remaining)) {
+            $r.disposition = 'exited'; $r.exitCode = $p.ExitCode
+            # Output collection is inside the limit as well (a grandchild could keep the pipes open).
+            $left = [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$sw.ElapsedMilliseconds)
+            if ([System.Threading.Tasks.Task]::WaitAll(@($out, $err), $left)) { $r.status = 'COMPLETED'; $r.stdout = $out.Result; $r.stderr = $err.Result }
+            else { $r.status = 'TIMEOUT'; $r.error = "helper output not collected within ${TimeoutSeconds}s" }
+        } else {
+            $r.status = 'TIMEOUT'
+            $killError = $null
+            try { $p.Kill() } catch { $killError = $_.Exception.Message }
+            if ($p.WaitForExit($CleanupSeconds * 1000)) {
+                $r.disposition = if ($killError) { "exited before termination (termination request failed: $killError)" } else { 'terminated' }
+            } else {
+                $r.disposition = "termination unconfirmed after ${CleanupSeconds}s (helper PID $($r.pid) may still be running$(if ($killError) { "; termination request failed: $killError" }))"
+            }
+        }
+    } catch {
+        $r.status = 'FAILED'; $r.error = "helper could not be run: $($_.Exception.Message)"
+    } finally {
+        $r.elapsedMs = [int]$sw.ElapsedMilliseconds
+        if ($null -ne $p) { $p.Dispose() }
+    }
+    return $r
+}
+
+# MS_IntelAvbFilter bindings through the bounded helper.  Only "component not found" means no binding (as in
+# New-AvbRealSystem.Bindings).  The helper prints one AVBBIND:<json> line.
+$AvbHilBindingQueryScript = @'
+$ErrorActionPreference = 'Stop'
+try { $b = @(Get-NetAdapterBinding -ComponentID 'MS_IntelAvbFilter' -IncludeHidden -ErrorAction Stop | ForEach-Object { [ordered]@{ name = [string]$_.Name; enabled = [bool]$_.Enabled } }) }
+catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $b = @() } else { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } }
+'AVBBIND:' + (ConvertTo-Json -InputObject @($b) -Compress -Depth 3)
+exit 0
+'@
+# @{ status = MEASURED | TIMEOUT | FAILED; bindings; error; helper = @{ pid; disposition; timeoutSeconds; elapsedMs; exitCode } }
+function Get-AvbHilBindingObservation {
+    param([int]$TimeoutSeconds = 60, [int]$CleanupSeconds = 5, [string]$Script = $AvbHilBindingQueryScript)
+    $h = Invoke-AvbBoundedPowerShell -Script $Script -TimeoutSeconds $TimeoutSeconds -CleanupSeconds $CleanupSeconds
+    $res = [ordered]@{ status = $null; bindings = @(); error = $null
+                       helper = [ordered]@{ pid = $h.pid; disposition = $h.disposition; timeoutSeconds = $h.timeoutSeconds; elapsedMs = $h.elapsedMs; exitCode = $h.exitCode } }
+    if ($h.status -eq 'TIMEOUT') {
+        $res.status = 'TIMEOUT'
+        $res.error = "MS_IntelAvbFilter binding query exceeded ${TimeoutSeconds}s (helper PID $($h.pid) $($h.disposition)$(if ($h.error) { "; $($h.error)" }))"
+    } elseif ($h.status -ne 'COMPLETED') {
+        $res.status = 'FAILED'; $res.error = "MS_IntelAvbFilter binding query failed: $($h.error)"
+    } else {
+        $line = @(([string]$h.stdout) -split "`r?`n" | Where-Object { $_ -match '^AVBBIND:' }) | Select-Object -Last 1
+        if ($h.exitCode -ne 0 -or -not $line) {
+            $res.status = 'FAILED'; $res.error = "MS_IntelAvbFilter binding query failed (exit $($h.exitCode)): $(([string]$h.stderr).Trim())"
+        } else {
+            try {
+                $res.bindings = @(ConvertFrom-Json -InputObject $line.Substring(8) | ForEach-Object { $_ } | ForEach-Object { [ordered]@{ name = [string]$_.name; enabled = [bool]$_.enabled } })
+                $res.status = 'MEASURED'
+            } catch { $res.status = 'FAILED'; $res.error = "MS_IntelAvbFilter binding query output unreadable: $($_.Exception.Message)" }
+        }
+    }
+    return $res
+}
+
 # Real, read-only observation of the current machine.  A probe that fails is recorded as unavailable, never as a clean
 # value.  $WatchPids: process IDs the incident recorded as left running (evidence; a PID can be reused).
+# The binding query (INetCfg) can block while a conflicting netcfg holds the network configuration (PR #494 review):
+# it is not attempted when process enumeration failed or found a conflict, and otherwise runs bounded
+# (Get-AvbHilBindingObservation).  $ProcessQuery / $BindingObservation: injectable for offline tests.
 function Get-AvbHilRecoveryObservation {
-    param([int[]]$WatchPids = @(), [int]$SelfPid = $PID)
+    param([int[]]$WatchPids = @(), [int]$SelfPid = $PID,
+          [scriptblock]$ProcessQuery = { Get-CimInstance -ClassName Win32_Process -ErrorAction Stop },
+          [scriptblock]$BindingObservation = { Get-AvbHilBindingObservation })
     $o = [ordered]@{
         observedUtc = [datetime]::UtcNow.ToString('o')
         processes = @(); processError = $null; watchedPids = @()
         service = $null; imagePath = $null; imageFile = $null; imageSha256 = $null; imageError = $null; system32Sha256 = $null
-        pendingRenames = @(); pendingError = $null; bindings = @(); bindingsError = $null
+        pendingRenames = @(); pendingError = $null; bindings = @(); bindingsError = $null; bindingsStatus = $null; bindingsHelper = $null
     }
     try {
-        $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $all = @(& $ProcessQuery)
         $byId = @{}; foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
         # This process and the chain that started it (CI step shell, operator console) are not survivors.  A parent
         # created AFTER its child is a reused PID, not an ancestor: the walk stops there.
@@ -225,8 +312,19 @@ function Get-AvbHilRecoveryObservation {
         $k = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
         $o.pendingRenames = @(@($k.GetValue('PendingFileRenameOperations')) | Where-Object { $_ -and $_ -match '(?i)IntelAvbFilter' } | ForEach-Object { [string]$_ })
     } catch { $o.pendingError = "PendingFileRenameOperations unreadable: $($_.Exception.Message)" }
-    try { $o.bindings = @(& (New-AvbRealSystem).Bindings | ForEach-Object { [ordered]@{ name = $_.Name; enabled = $_.Enabled } }) }
-    catch { $o.bindingsError = "MS_IntelAvbFilter binding query failed: $($_.Exception.Message)" }
+    if ($o.processError) {
+        $o.bindingsStatus = 'NOT_ATTEMPTED'
+        $o.bindingsError = 'binding query not attempted: process observation failed, so a netcfg holding the network configuration cannot be excluded'
+    } elseif (@($o.processes).Count -gt 0) {
+        $o.bindingsStatus = 'NOT_ATTEMPTED'
+        $o.bindingsError = "binding query not attempted: live conflicting operation(s) PID $((@($o.processes) | ForEach-Object { $_.pid }) -join ', ') may hold the network configuration"
+    } else {
+        try {
+            $b = & $BindingObservation
+            $o.bindingsStatus = [string](Get-AvbHilLockField $b 'status'); $o.bindings = @(Get-AvbHilLockField $b 'bindings')
+            $o.bindingsError = Get-AvbHilLockField $b 'error'; $o.bindingsHelper = Get-AvbHilLockField $b 'helper'
+        } catch { $o.bindingsStatus = 'FAILED'; $o.bindingsError = "MS_IntelAvbFilter binding observation failed: $($_.Exception.Message)" }
+    }
     return $o
 }
 
@@ -253,7 +351,9 @@ function Get-AvbHilReadiness {
     }
     if (& $f 'pendingError') { $r += "pending driver replacement observation unavailable: $(& $f 'pendingError')" }
     foreach ($x in @(& $f 'pendingRenames')) { if ($x) { $r += "reboot-time replacement of IntelAvbFilter pending: $x" } }
-    if (& $f 'bindingsError') { $r += "filter binding observation unavailable: $(& $f 'bindingsError')" }
+    $bs = [string](& $f 'bindingsStatus')
+    if ($bs -ne 'MEASURED') { $r += "filter binding observation $(if ($bs) { $bs } else { 'status missing' }): $(& $f 'bindingsError')" }
+    elseif (& $f 'bindingsError') { $r += "filter binding observation unavailable: $(& $f 'bindingsError')" }
     return @{ Decision = $(if ($r.Count -eq 0) { 'READY' } else { 'NOT_READY' }); Reasons = $r }
 }
 
