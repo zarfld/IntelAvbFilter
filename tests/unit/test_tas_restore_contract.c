@@ -1677,6 +1677,7 @@ static void fill_hold(TAS_HOLD_EVIDENCE *e, avb_u32 tier, LONG s0, LONG s1)
     }
     e->accept_sent = TRUE;
     e->pre_valid = TRUE;
+    e->pre_clean = TRUE;
     e->pre_generation = 5u;
     e->pre_epoch = 0x1234ABCDull;
     e->pre_mbps = 1000u;
@@ -1800,6 +1801,49 @@ static void test_62_hold_commit(void) {
     fill_hold(&e, UNVER, BUSY, BUSY);
     e.call[0].captured = FALSE;
     EXPECT_EQ("no success and a completion not captured is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_CAPTURED);
+
+    /* PR #492 r4638870407: NOT_CLEAN (R7 step 9) and STATE_CONFLICT share STATUS_INVALID_DEVICE_STATE (#365 13.3/13.4), so a STATE
+     * refusal is attributed only when the adapter was measured clean immediately before the race; a success without that
+     * measurement is not PASS. Refusals at earlier steps (4 metadata, 5 speed, 8 tier) and observed violations stay FAIL */
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("both STATE, pair kept, clean not established at the race: INCONCLUSIVE (may be NOT_CLEAN)", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, UNVER, STATE, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("STATE and BUSY, clean not established at the race: INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("a success with clean not established at the race is not PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, 0u, STATE, STATE);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u; e.pre_clean = FALSE;
+    EXPECT_EQ("both STATE with 0/0 sent stays FAIL without clean (step 4 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_META_ZERO);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("NOT_READY at a stable speed stays FAIL without clean (step 5 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, STATE, NOTREADY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("STATE with NOT_READY at a stable speed: the NOT_READY violation is kept without clean", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, NOTACC, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("a tier refusal stays FAIL without clean (step 8 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags = 0u; e.pre_clean = FALSE;
+    EXPECT_EQ("a wrong out_flags is kept FAIL without clean", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+
+    /* PR #492 r4638870535: a captured completion outside SUCCESS/BUSY/STATE/NOT_READY is FAIL; neither missing evidence nor a
+     * changed prerequisite explains it away */
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_PARAMETER, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("INVALID_PARAMETER with the other not captured is FAIL, not NOT_CAPTURED", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_PARAMETER, STATE);
+    e.post_generation = 9u;
+    EXPECT_EQ("INVALID_PARAMETER with STATE and the pair changed is FAIL, not PAIR_CHANGED", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, (LONG)STATUS_UNSUCCESSFUL, NOTREADY);
+    e.post_mbps = 100u;
+    EXPECT_EQ("STATUS_UNSUCCESSFUL with NOT_READY and the speed changed is FAIL, not SPEED_UNDETERMINED", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_OTHER);
 }
 
 /* TC-MOCK-063: TEST-TAS-API-004 (#369) GENERATION across the race (#352 R1 L2/L7/L9; #369 oracle amendment 2026-11-19). A logical
@@ -1861,6 +1905,15 @@ static void test_63_hold_generation(void) {
     fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, BUSY);
     e.post_generation = 4u;
     EXPECT_EQ("a decrease is FAIL even with the expectation unknown", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+
+    /* PR #492 r4638870492: STATUS_IO_TIMEOUT is R5's BASE_PASSED only (#365 R5), an outcome after attempted writes, so it advances
+     * generation exactly once (#352 R1 L7) */
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    e.post_generation = 6u;
+    EXPECT_EQ("IO_TIMEOUT (BASE_PASSED) and BUSY: 5 -> 6 is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with one transition expected", n == 1u);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    EXPECT_EQ("IO_TIMEOUT (BASE_PASSED) with generation unchanged is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
 }
 
 int main(void) {

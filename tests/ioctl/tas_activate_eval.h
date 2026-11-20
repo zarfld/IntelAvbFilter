@@ -443,6 +443,8 @@ typedef struct {
     TAS_HOLD_CALL call[2];
     BOOL accept_sent;            /* both requests carried AVB_TAS_F_ACCEPT_UNVERIFIED */
     BOOL pre_valid;              /* the query immediately before the race was valid (pair, speed and tier measured) */
+    BOOL pre_clean;              /* immediately before the race the adapter was measured clean as the proved pre-state is (GET_TAS_STATE
+                                    CLEAN and a clean, readable TAS query); FALSE when not clean or not measured (#365 R7 step 9) */
     avb_u64 pre_generation;      /* the pair both requests carried (that query's, or the last observed one when it was not valid) */
     avb_u64 pre_epoch;
     avb_u32 pre_mbps;            /* that query's link_speed_mbps, 0 = unknown */
@@ -475,7 +477,8 @@ typedef enum {
     TAS_HOLD_COMMIT_OUT_UNJUDGED,         /* INCONCLUSIVE */
     TAS_HOLD_COMMIT_PAIR_CHANGED,         /* INCONCLUSIVE */
     TAS_HOLD_COMMIT_SPEED_UNDETERMINED,   /* INCONCLUSIVE */
-    TAS_HOLD_COMMIT_NOT_CAPTURED          /* INCONCLUSIVE */
+    TAS_HOLD_COMMIT_NOT_CAPTURED,         /* INCONCLUSIVE */
+    TAS_HOLD_COMMIT_CLEAN_UNDETERMINED    /* INCONCLUSIVE */
 } TAS_HOLD_COMMIT_CLASS;
 
 typedef enum {
@@ -508,15 +511,16 @@ static __inline BOOL tas_hold_is(const TAS_HOLD_CALL *c, NTSTATUS status)
     return c->captured && c->status == (LONG)status;
 }
 
-/* Generation transitions one completion establishes (#352 R1 L2/L7/L9): a commit attempted writes (1); the published refusals of
- * #365 R7 steps 1-9 (and an unserved code) complete before any write (0). -1: not established - the status was not captured, or it
- * is shared by outcomes before and after a write (R5/R8: STATUS_IO_DEVICE_ERROR, STATUS_UNSUCCESSFUL) or unpublished */
+/* Generation transitions one completion establishes (#352 R1 L2/L7/L9): a commit attempted writes (1), and so did BASE_PASSED, R5's
+ * only STATUS_IO_TIMEOUT outcome (1, #352 R1 L7, PR #492); the published refusals of #365 R7 steps 1-9 (and an unserved code)
+ * complete before any write (0). -1: not established - the status was not captured, or it is shared by outcomes before and after a
+ * write (R5/R8: STATUS_IO_DEVICE_ERROR, STATUS_UNSUCCESSFUL) or unpublished */
 static __inline int tas_hold_call_transitions(const TAS_HOLD_CALL *c)
 {
     if (!c->captured) {
         return -1;
     }
-    if (c->status == 0) {
+    if (c->status == 0 || c->status == (LONG)STATUS_IO_TIMEOUT) {
         return 1;
     }
     if (c->status == (LONG)STATUS_DEVICE_BUSY || c->status == (LONG)STATUS_INVALID_DEVICE_STATE ||
@@ -531,8 +535,11 @@ static __inline int tas_hold_call_transitions(const TAS_HOLD_CALL *c)
  * reserved1 0, no output bit but bit 0, bit 0 as tas_hold_out_expect requires) and one BUSY or STATE refusal with no output.
  * Observed violations come first and are kept whatever else is missing. A tier refusal of the accepted control is FAIL (the flag
  * acts); an R5 status is FAIL and named (a shared status is no outcome detail); a STATE refusal of a request carrying 0 is FAIL
- * with the zero metadata as the likely cause. A refusal attributable to a prerequisite that changed or was not measured around
- * the race (the pair under the claim, the driver-owned speed) is INCONCLUSIVE. */
+ * with the zero metadata as the likely cause. Any other captured status than SUCCESS, BUSY, STATE and NOT_READY is FAIL before
+ * any INCONCLUSIVE branch (PR #492). A refusal attributable to a prerequisite that changed or was not measured around the race
+ * (the pair under the claim, the driver-owned speed) is INCONCLUSIVE. NOT_CLEAN (R7 step 9) shares STATUS_INVALID_DEVICE_STATE
+ * with STATE_CONFLICT (#365 13.3/13.4): a STATE refusal and a success are judged only on an adapter measured clean immediately
+ * before the race, otherwise INCONCLUSIVE; refusals at earlier steps (metadata 4, speed 5, tier 8) do not depend on it (PR #492). */
 static __inline TAS_HOLD_COMMIT_CLASS tas_hold_commit(const TAS_HOLD_EVIDENCE *e)
 {
     const TAS_HOLD_OUT_EXPECT out = tas_hold_out_expect(e->pre_valid, e->tier_hold);
@@ -585,6 +592,10 @@ static __inline TAS_HOLD_COMMIT_CLASS tas_hold_commit(const TAS_HOLD_EVIDENCE *e
         if (c->captured && c->status != 0 && c->information != 0) {
             return TAS_HOLD_COMMIT_OTHER;   /* errors carry no output */
         }
+        if (c->captured && c->status != 0 && c->status != (LONG)STATUS_DEVICE_BUSY &&
+            c->status != (LONG)STATUS_INVALID_DEVICE_STATE && c->status != (LONG)STATUS_DEVICE_NOT_READY) {
+            return TAS_HOLD_COMMIT_OTHER;   /* an unexpected completion: no missing measurement explains it away */
+        }
         state += tas_hold_is(c, STATUS_INVALID_DEVICE_STATE);
         not_ready += tas_hold_is(c, STATUS_DEVICE_NOT_READY);
     }
@@ -595,6 +606,9 @@ static __inline TAS_HOLD_COMMIT_CLASS tas_hold_commit(const TAS_HOLD_EVIDENCE *e
         if (refusal->status != (LONG)STATUS_DEVICE_BUSY && refusal->status != (LONG)STATUS_INVALID_DEVICE_STATE) {
             return TAS_HOLD_COMMIT_OTHER;
         }
+        if (!e->pre_clean) {
+            return TAS_HOLD_COMMIT_CLEAN_UNDETERMINED;
+        }
         return out == TAS_HOLD_OUT_UNJUDGED ? TAS_HOLD_COMMIT_OUT_UNJUDGED : TAS_HOLD_COMMIT_PASS;
     }
     if (!e->call[0].captured || !e->call[1].captured) {
@@ -604,7 +618,14 @@ static __inline TAS_HOLD_COMMIT_CLASS tas_hold_commit(const TAS_HOLD_EVIDENCE *e
         return state == 2 ? TAS_HOLD_COMMIT_META_ZERO : TAS_HOLD_COMMIT_OTHER;   /* step 4 refuses a 0 first (#365 R7) */
     }
     if (state != 0) {
-        return pair_kept ? TAS_HOLD_COMMIT_STATE_REFUSED : TAS_HOLD_COMMIT_PAIR_CHANGED;
+        if (!pair_kept) {
+            return TAS_HOLD_COMMIT_PAIR_CHANGED;
+        }
+        if (e->pre_clean) {
+            return TAS_HOLD_COMMIT_STATE_REFUSED;
+        }
+        /* the STATE refusal may be NOT_CLEAN (step 9); a NOT_READY refusal at a stable speed (step 5) is still a violation */
+        return not_ready != 0 && speed_stable ? TAS_HOLD_COMMIT_NOT_READY : TAS_HOLD_COMMIT_CLEAN_UNDETERMINED;
     }
     if (not_ready != 0) {
         return speed_stable ? TAS_HOLD_COMMIT_NOT_READY : TAS_HOLD_COMMIT_SPEED_UNDETERMINED;

@@ -26,13 +26,16 @@
  *                          output is printed and COMMIT is INCONCLUSIVE, never PASS. FAIL: STATUS_INVALID_DEVICE_REQUEST (0x80C not
  *                          served, never SKIP); an incomplete success or a wrong output; two successes; a success of a request
  *                          carrying 0; a tier refusal STATUS_REQUEST_NOT_ACCEPTED of the accepted control (R4: the flag acts);
- *                          STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR (R5 BASE_PASSED / COMMITTED_UNTIMED, named; a shared status
- *                          is no outcome detail); both refused STATE with a 0 sent (the zero metadata named as the likely cause,
- *                          never an excuse); a STATE refusal with an established pair unchanged across the race; NOT_READY at a
- *                          speed measured unchanged and non-zero around it; any other completion or output. INCONCLUSIVE: a
+ *                          STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR (R5 BASE_PASSED / COMMITTED_UNTIMED, named; the shared
+ *                          STATUS_IO_DEVICE_ERROR is no outcome detail); both refused STATE with a 0 sent (the zero metadata named
+ *                          as the likely cause, never an excuse); a STATE refusal with an established pair unchanged across the race
+ *                          on an adapter measured clean immediately before it; NOT_READY at a speed measured unchanged and non-zero
+ *                          around it; any other captured completion (checked before any INCONCLUSIVE) or output. INCONCLUSIVE: a
  *                          completion not captured; a STATE refusal with the pair changed or not measured around the race; NOT_READY
- *                          with the speed unknown, changed or not measured; each measurement printed. Observed violations are kept
- *                          when another measurement is missing.
+ *                          with the speed unknown, changed or not measured; a STATE refusal or a success when the adapter was not
+ *                          measured clean immediately before the race (GET_TAS_STATE CLEAN and a clean query, as the proved
+ *                          pre-state; NOT_CLEAN, R7 step 9, shares STATUS_INVALID_DEVICE_STATE); each measurement printed. Observed
+ *                          violations are kept when another measurement is missing.
  *              STATE       GET_TAS_STATE ARMED with the requested gate list. REFUSE: a further accepted activation on the armed
  *                          adapter is STATUS_INVALID_DEVICE_STATE with Information 0 and no reported state change. Both need a
  *                          committed schedule (exactly one STATUS_SUCCESS with the 144-byte reply; its output is COMMIT's to judge);
@@ -41,7 +44,8 @@
  *                          (#365 13.3, 13.4), so a refusal is PASS only when that query reports a non-zero generation and epoch;
  *                          with 0 (not reported) it is INCONCLUSIVE. Acceptance, output or a changed schedule is FAIL.
  *              GENERATION  (tas_hold_generation, TC-MOCK-063; #352 R1 L2/L7/L9) the query after the race reports the generation of
- *                          the query before it plus one per commit and none per refusal before any write, in the same context
+ *                          the query before it plus one per commit or BASE_PASSED (STATUS_IO_TIMEOUT, #365 R5: writes attempted)
+ *                          and none per refusal before any write, in the same context
  *                          (epoch unchanged). A 0 or a query not valid before or after, a changed epoch, or a completion whose write
  *                          attempt is not established (not captured; a status shared by outcomes before and after a write, R5/R8)
  *                          is INCONCLUSIVE, named; a decrease is FAIL.
@@ -1861,7 +1865,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         OP_CALL calls[2];
         HANDLE threads[2], go = CreateEventA(NULL, TRUE, FALSE, NULL);
         unsigned success = 0, not_served = 0, k, winner = 0, transitions = 0;
-        BOOL armed_ok, race_valid;
+        BOOL armed_ok, race_valid, race_clean;
+        LONG armed_race = -1;
         QUERY_READ qr, qa, ql;
         const AVB_TAS_QUERY_HW_REQUEST *pair;
         TAS_HOLD_EVIDENCE ev;
@@ -1874,10 +1879,15 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         printf("\n  --- IOCTL_AVB_TAS_ACTIVATE_80C from two bound open instances at once ---\n");
         /* The pair the driver compares under its claim, the driver-owned speed and the HOLD tier are measured immediately before the
          * race (as #368's cases are, PR #491 review): the observer trial lies between the proved pre-state and here. When this query
-         * is not valid, the proved pre-state's pair is sent as the last observed one and printed NOT measured, never fabricated */
-        query(h, &qr);
-        print_query("immediately before the race", &qr);
+         * is not valid, the proved pre-state's pair is sent as the last observed one and printed NOT measured, never fabricated.
+         * The clean prerequisite is measured here again, as the pre-state was proved (PR #492): NOT_CLEAN (#365 R7 step 9) shares
+         * STATUS_INVALID_DEVICE_STATE with STATE_CONFLICT, so COMMIT attributes a STATE refusal or judges a success only on an
+         * adapter measured clean immediately before the race. Not clean or not measured is reported, and the race still runs */
+        race_clean = prove_prestate(h, "immediately before the race", &qr, &armed_race);
         race_valid = query_valid(&qr);
+        printf("    [EVIDENCE] clean immediately before the race: %s (GET_TAS_STATE CLEAN and a clean, readable TAS query, as the proved "
+               "pre-state; NOT_CLEAN, #365 R7 step 9, shares STATUS_INVALID_DEVICE_STATE with STATE_CONFLICT)\n", race_clean ? "yes" :
+               (armed_race < 0 || !race_valid ? "NOT measured" : "no"));
         pair = race_valid ? &qr.q : &qbefore.q;
         if (race_valid) {
             printf("    [EVIDENCE] query before the race: valid; generation=%llu context_epoch=%llu (0 = not reported, never a value, #352 "
@@ -1946,6 +1956,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         }
         ev.accept_sent = TRUE;
         ev.pre_valid = race_valid;
+        ev.pre_clean = race_clean;
         ev.pre_generation = pair->generation;
         ev.pre_epoch = pair->context_epoch;
         ev.pre_mbps = race_valid ? qr.q.link_speed_mbps : 0u;
@@ -2001,9 +2012,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                       "with it the driver must execute the HOLD operation (#365 R4, #362); no longer an undecided tier policy");
             break;
         case TAS_HOLD_COMMIT_R5:
-            sprintf_s(reason, sizeof(reason), "STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR with no output: #365 R5 maps BASE_PASSED and "
-                      "COMMITTED_UNTIMED to these (STATUS_IO_DEVICE_ERROR is also R8's FAILED_RESTORED), so the status does not detail "
-                      "the outcome; no complete commit (the adapter may hold a schedule, the owned cleanup follows)");
+            sprintf_s(reason, sizeof(reason), "STATUS_IO_TIMEOUT or STATUS_IO_DEVICE_ERROR with no output: #365 R5 maps BASE_PASSED to "
+                      "STATUS_IO_TIMEOUT and COMMITTED_UNTIMED to STATUS_IO_DEVICE_ERROR, which R8's FAILED_RESTORED shares, so that status "
+                      "does not detail the outcome; no complete commit (the adapter may hold a schedule, the owned cleanup follows)");
             break;
         case TAS_HOLD_COMMIT_META_ZERO:
             sprintf_s(reason, sizeof(reason), "both refused STATUS_INVALID_DEVICE_STATE: the requests carried generation=%llu "
@@ -2012,7 +2023,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             break;
         case TAS_HOLD_COMMIT_STATE_REFUSED:
             sprintf_s(reason, sizeof(reason), "refused STATUS_INVALID_DEVICE_STATE although the pair sent (generation=%llu "
-                      "context_epoch=%llu) was measured unchanged before and after the race on the proved-clean adapter: no commit",
+                      "context_epoch=%llu) was measured unchanged before and after the race on an adapter measured clean immediately "
+                      "before it: no commit",
                       ev.pre_generation, ev.pre_epoch);
             break;
         case TAS_HOLD_COMMIT_NOT_READY:
@@ -2036,6 +2048,13 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             sprintf_s(reason, sizeof(reason), "a raw NTSTATUS was not captured (no driver completion observed) and no violation was "
                       "observed: not established");
             break;
+        case TAS_HOLD_COMMIT_CLEAN_UNDETERMINED:
+            sprintf_s(reason, sizeof(reason), "%s, but the adapter was %s immediately before the race (GET_TAS_STATE CLEAN and a clean, "
+                      "readable TAS query): NOT_CLEAN (#365 R7 step 9) shares STATUS_INVALID_DEVICE_STATE with STATE_CONFLICT, so the "
+                      "outcome is not attributed; see the evidence above", success != 0 ? "one complete STATUS_SUCCESS reply and one "
+                      "BUSY or STATE refusal" : "refused STATUS_INVALID_DEVICE_STATE with the pair measured unchanged",
+                      armed_race < 0 || !race_valid ? "not measured clean" : "measured NOT clean");
+            break;
         default:
             sprintf_s(reason, sizeof(reason), "expected exactly one complete STATUS_SUCCESS reply and one STATUS_DEVICE_BUSY or "
                       "STATUS_INVALID_DEVICE_STATE with no output; see the two calls above%s", ev.pre_generation == 0 ||
@@ -2044,7 +2063,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             break;
         }
         tag = cc == TAS_HOLD_COMMIT_PASS ? "PASS" : (cc == TAS_HOLD_COMMIT_OUT_UNJUDGED || cc == TAS_HOLD_COMMIT_PAIR_CHANGED ||
-              cc == TAS_HOLD_COMMIT_SPEED_UNDETERMINED || cc == TAS_HOLD_COMMIT_NOT_CAPTURED ? "INCONCLUSIVE" : "FAIL");
+              cc == TAS_HOLD_COMMIT_SPEED_UNDETERMINED || cc == TAS_HOLD_COMMIT_NOT_CAPTURED ||
+              cc == TAS_HOLD_COMMIT_CLEAN_UNDETERMINED ? "INCONCLUSIVE" : "FAIL");
         verdict(tag, "COMMIT", index, id->device_id, reason);
 
         /* The schedule is committed when exactly one call completed STATUS_SUCCESS with the 144-byte reply; its output fields are
