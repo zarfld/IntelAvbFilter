@@ -1,0 +1,3 @@
+[mcp_servers.notebooklm]
+command = "node"
+args = ['c:\Users\User\.vscode\extensions\rinaldops.notebooklm-mcp-vscode-0.1.2\vendor\mcp-server\dist\cli.js']

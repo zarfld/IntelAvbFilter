@@ -1296,6 +1296,7 @@ jobs:
     name: Acceptance Tests (XP - Customer Tests, IEEE 1012)
     runs-on: ubuntu-latest
     needs: [integration-tests]
+
     permissions:
       contents: read
       issues: read

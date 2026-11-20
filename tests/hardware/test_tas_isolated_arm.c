@@ -684,12 +684,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
         CloseHandle(h);
         return;
     }
-    if (!other_link) {
-        verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "no independent management link; the NIC cycle would isolate the host");
-        g_blocked++;
-        CloseHandle(h);
-        return;
-    }
+    printf("    [EVIDENCE] another adapter up with a gateway: %s (diagnostic only, not a precondition: the owned NIC cycle may interrupt the host network; evidence is kept locally, #463)\n", other_link ? "yes" : "no");
     if (!read_armed(h, &armed) || armed != 0 || !read_stats(h, &stats) || !read_clock(h, &clock_cfg)) {
         verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "TAS already armed, or driver state unreadable");
         g_blocked++;

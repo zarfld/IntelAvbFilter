@@ -13,8 +13,9 @@
   Path to solution file. Default: IntelAvbFilter.sln in script root.
 .PARAMETER RestartAdapter
   RETIRED 2026-10-29: refused.  It ran "devcon restart *VEN_8086*" - every Intel device, including the NIC that may
-  carry the runner connection, outside the machine lock and without recovery.  Adapter administration is the Unsafe
-  class: attended runs only, through Run-Tests-Elevated.ps1 with AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry.
+  carry the runner connection, outside the machine lock and without recovery.  Adapter administration belongs to the
+  registered Unsafe test entries, which own their setup and restoration and run through tools\test\Run-Tests-CI.ps1
+  (directly or via Run-Tests-Elevated.ps1); Unsafe needs no attendance or per-entry permission (#458).
 .NOTES
   Gated since 2026-10-29 (TEST-HILPATH-012): builds through tools\build\Build-Driver.ps1 / Build-Tests.ps1 (machine
   build exclusion + test build manifest), tests through tools\test\Run-Tests-CI.ps1 (provenance, HIL safety gate,
@@ -91,8 +92,8 @@ function Build-UserTool {
 function Restart-IntelAdapter {
   if(-not $RestartAdapter){ return }
   throw ('-RestartAdapter is retired (2026-10-29): it restarted every Intel device (devcon restart *VEN_8086*) outside the ' +
-         'machine lock and without recovery. Adapter administration runs only as an attended Unsafe entry through ' +
-         'tools\test\Run-Tests-Elevated.ps1 with AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry.')
+         'machine lock and without recovery. Adapter administration belongs to the registered Unsafe test entries, which ' +
+         'own their setup and restoration and run through tools\test\Run-Tests-CI.ps1 (no attendance or per-entry permission, #458).')
 }
 
 function Run-Tests {

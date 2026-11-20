@@ -24,6 +24,85 @@ Abstract:
 #include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
 #include <ntstrsafe.h>
 #include "src/avb_hw_snapshot.h"  // IOCTL_AVB_QUERY_HW_SNAPSHOT builder (family-independent, read-only)
+#include "src/avb_tas_activate_state.h"  // TAS state after IOCTL_AVB_TAS_ACTIVATE, shared with its offline cases (#357)
+
+/* The per-adapter TAS claim (ADR-TSN-002), taken without waiting. Taking it makes tas_op_seq odd and releasing it makes it
+ * even again, so the read-only IOCTL_AVB_TAS_QUERY_HW can see any operation that overlapped its register pass, also one
+ * that started and finished between two of its checks (#350). Same claim semantics as before. */
+static __inline BOOLEAN avb_tas_op_claim(PAVB_DEVICE_CONTEXT ctx)
+{
+    if (InterlockedCompareExchange(&ctx->tas_op_claim, 1, 0) != 0) {
+        return FALSE;
+    }
+    InterlockedIncrement(&ctx->tas_op_seq);
+    return TRUE;
+}
+
+static __inline void avb_tas_op_release(PAVB_DEVICE_CONTEXT ctx)
+{
+    InterlockedIncrement(&ctx->tas_op_seq);
+    InterlockedExchange(&ctx->tas_op_claim, 0);
+}
+
+/* Per-adapter TAS register lock (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350). TAS operations hold it
+ * exclusively (avb_tas_reg_lock); the read-only query tries it once in shared mode and never waits for it
+ * (avb_tas_reg_try_shared). Both raise to DISPATCH_LEVEL: the code under it takes no other lock and does not log. The
+ * hold time is measured from acquisition to release, so it excludes any wait for the lock, and is logged after the
+ * release, as a warning above the #45 limit. A logged hold time is a sample, not a bound. */
+#define AVB_TAS_REG_HOLD_WARN_US 100u   /* #45: warn when a register lock is held longer than 100 us */
+#define AVB_US_PER_SECOND 1000000LL
+
+static ULONG avb_tas_reg_hold_us(LARGE_INTEGER start, LARGE_INTEGER end, LARGE_INTEGER freq, const char *op)
+{
+    ULONG us = (freq.QuadPart > 0) ? (ULONG)(((end.QuadPart - start.QuadPart) * AVB_US_PER_SECOND) / freq.QuadPart) : 0u;
+
+    if (us > AVB_TAS_REG_HOLD_WARN_US) {
+        DEBUGP(DL_ERROR, "!!! [#350] TAS register lock WARNING: op=%s held %lu us (limit %u us, #45)\n", op, us,
+               AVB_TAS_REG_HOLD_WARN_US);
+    } else {
+        DEBUGP(DL_ERROR, "!!! [#350] TAS register lock: op=%s held %lu us\n", op, us);
+    }
+    UNREFERENCED_PARAMETER(op);
+    return us;
+}
+
+/* TAS operations: exclusive; waits while a query holds the lock in shared mode */
+static __inline LARGE_INTEGER avb_tas_reg_lock(PAVB_DEVICE_CONTEXT ctx, KIRQL *irql)
+{
+    *irql = ExAcquireSpinLockExclusive(&ctx->tas_reg_lock);
+    return KeQueryPerformanceCounter(NULL);
+}
+
+static __inline ULONG avb_tas_reg_unlock(PAVB_DEVICE_CONTEXT ctx, KIRQL irql, LARGE_INTEGER start, const char *op)
+{
+    LARGE_INTEGER freq;
+    LARGE_INTEGER end = KeQueryPerformanceCounter(&freq);
+
+    ExReleaseSpinLockExclusive(&ctx->tas_reg_lock, irql);
+    return avb_tas_reg_hold_us(start, end, freq, op);
+}
+
+/* Query: one shared attempt at DISPATCH_LEVEL (the caller raised it), never waits. FALSE when a TAS operation holds the
+ * lock or waits for it; then nothing is held. The release returns the end time; the caller logs the hold time
+ * (avb_tas_reg_hold_us) only after it has lowered the IRQL */
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline BOOLEAN avb_tas_reg_try_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *start)
+{
+    if (ExTryAcquireSpinLockSharedAtDpcLevel(&ctx->tas_reg_lock)) {
+        *start = KeQueryPerformanceCounter(NULL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline LARGE_INTEGER avb_tas_reg_release_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *freq)
+{
+    LARGE_INTEGER end = KeQueryPerformanceCounter(freq);
+
+    ExReleaseSpinLockSharedFromDpcLevel(&ctx->tas_reg_lock);
+    return end;
+}
 
 // Generic register offsets (common across Intel devices)
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
@@ -70,7 +149,8 @@ static VOID AvbContextListRemove(_In_ PAVB_DEVICE_CONTEXT Ctx)
 }
 
 /* Forward declarations */
-static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
+static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin);
+static NTSTATUS AvbBringUpHardwareOwned(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin);
 static VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext);
 /* Role-type forward declaration — carries _Function_class_(NDIS_TIMER_FUNCTION) so CodeQL
  * and SAL can verify this matches the PNDIS_TIMER_FUNCTION parameter of NdisInitializeTimer.
@@ -179,6 +259,27 @@ static void AvbMarkPtpReady(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     }
 }
 
+/**
+ * @brief Initialization ownership of one adapter (#404 part 2; #12 amendment 2026-11-12 row "Another initialization
+ *        running": STATUS_DEVICE_BUSY, no wait, no hardware effect).
+ *
+ * Claimed at entry without waiting, at any IRQL; the owner releases it on every exit. A caller that does not obtain it
+ * returns STATUS_DEVICE_BUSY before any hardware access, context write or #412 fault point. Not a lock: nobody waits for it,
+ * so an owner may wait (including a #412 HOLD) while holding it.
+ */
+static BOOLEAN AvbInitClaim(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    return InterlockedCompareExchange(&Ctx->init_owner, 1, 0) == 0;
+}
+
+static void AvbInitRelease(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    InterlockedExchange(&Ctx->init_owner, 0);
+}
+
+/* The per-open-instance INIT_DEVICE success marker is AVB_OPEN_INSTANCE.init_succeeded (src/avb_integration.h; P2 step 3):
+ * the instance context in FileObject->FsContext2 is allocated at IRP_MJ_CREATE and freed at IRP_MJ_CLOSE */
+
 const struct platform_ops ndis_platform_ops = {
     PlatformInitWrapper,
     PlatformCleanupWrapper,
@@ -233,6 +334,9 @@ NTSTATUS AvbCreateMinimalContext(
         NT_ASSERT(NT_SUCCESS(lockSt));  /* Must always succeed on a fresh remove lock */
         (void)lockSt;
     }
+    /* TAS query MMIO protection (#350): starts run down (no holder yet, so this returns at once); FilterRestart re-arms it */
+    ExInitializeRundownProtection(&ctx->tas_query_rundown);
+    ExWaitForRundownProtectionRelease(&ctx->tas_query_rundown);
     
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
@@ -243,6 +347,7 @@ NTSTATUS AvbCreateMinimalContext(
     /* Initialize timestamp event subscription management (Issue #13) */
     NdisAllocateSpinLock(&ctx->subscription_lock);
     NdisAllocateSpinLock(&ctx->systim_lock);
+    ctx->tas_reg_lock = 0;                       /* EX_SPIN_LOCK, free: TAS register access (#45, #52; #350) */
     ctx->next_ring_id = 1;  // Start ring_id allocation from 1
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
         ctx->subscriptions[i].ring_id = 0;      // 0 = unused
@@ -458,13 +563,63 @@ skip_test_pools:
  * @brief Attempt full HW bring-up (intel_init + MMIO sanity + optional PTP for i210).
  *        A failure is REPORTED through the returned status (and hw_state stays below PTP_READY); it is non-fatal
  *        for ENUMERATION: the context and baseline capabilities remain, and the callers that create contexts or
- *        restart a filter discard the status on purpose.  Success means initialization completed, NOT that the
+ *        restart a filter do not fail on it (FilterRestart uses it only to decide whether the TAS query register gate
+ *        reopens, #350).  Success means initialization completed, NOT that the
  *        hardware clock has been shown to advance at the right rate.
+ *        Takes the adapter's initialization ownership (#404 part 2): while another initialization owns the adapter it
+ *        returns STATUS_DEVICE_BUSY without touching the context or the hardware.
  */
-NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
+    NTSTATUS status;
+
     if (!Ctx) return STATUS_INVALID_PARAMETER;
-    
+    if (!AvbInitClaim(Ctx)) {
+        DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu VID=0x%04X DID=0x%04X: another initialization owns the adapter: "
+               "STATUS_DEVICE_BUSY, no hardware access\n", InitOrigin, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+        return STATUS_DEVICE_BUSY;
+    }
+    status = AvbBringUpHardwareOwned(Ctx, InitOrigin);
+    AvbInitRelease(Ctx);
+    return status;
+}
+
+/* AvbBringUpHardwareWaitOwner (PR #469 review): poll interval and bound of the wait for the initialization ownership. An
+ * owner holds it for at most one bring-up, in a Debug build after at most one #412 HOLD (AVB_INITFAULT_MAX_HOLD_MS); the same
+ * composition (one HOLD plus 5000 ms for intel_init) bounds an in-flight attempt in the #412 test. A bound, not a tolerance:
+ * when it expires the caller is told (STATUS_DEVICE_BUSY) and logs it */
+#define AVB_INIT_OWNER_POLL_MS  10u
+#define AVB_INIT_OWNER_WAIT_MS  (AVB_INITFAULT_MAX_HOLD_MS + 5000u)
+
+NTSTATUS AvbBringUpHardwareWaitOwner(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
+{
+    LARGE_INTEGER delay;
+    ULONG waited = 0;
+    NTSTATUS status;
+
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    delay.QuadPart = -(LONGLONG)AVB_INIT_OWNER_POLL_MS * 10000;
+    while (!AvbInitClaim(Ctx)) {
+        if (waited >= AVB_INIT_OWNER_WAIT_MS || KeGetCurrentIrql() != PASSIVE_LEVEL) {
+            DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu VID=0x%04X DID=0x%04X: initialization ownership not obtained after "
+                   "%lu ms: STATUS_DEVICE_BUSY, bring-up not run\n", InitOrigin, Ctx->intel_device.pci_vendor_id,
+                   Ctx->intel_device.pci_device_id, waited);
+            return STATUS_DEVICE_BUSY;
+        }
+        (void)KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        waited += AVB_INIT_OWNER_POLL_MS;
+    }
+    if (waited != 0) {
+        DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu: waited %lu ms for the initialization ownership\n", InitOrigin, waited);
+    }
+    status = AvbBringUpHardwareOwned(Ctx, InitOrigin);
+    AvbInitRelease(Ctx);
+    return status;
+}
+
+/** The bring-up itself; the caller owns the adapter's initialization (AvbInitClaim) */
+static NTSTATUS AvbBringUpHardwareOwned(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
+{
     // Always set REALISTIC baseline capabilities based on device type and hardware specs
     ULONG baseline_caps = 0;
     switch (Ctx->intel_device.device_type) {
@@ -519,13 +674,14 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     DEBUGP(DL_ERROR, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
            Ctx->intel_device.capabilities);
     
-    NTSTATUS status = AvbPerformBasicInitialization(Ctx);
+    NTSTATUS status = AvbPerformBasicInitialization(Ctx, InitOrigin);
     if (!NT_SUCCESS(status)) {
         DEBUGP(DL_TRACE, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
                status, baseline_caps);
         /* Initialization FAILED, and the caller is told so (INIT_DEVICE returns this status).  The context and the
          * baseline capabilities set above are kept, so the adapter stays ENUMERABLE; the callers that must not fail
-         * (AvbInitializeDevice, FilterRestart) deliberately discard this status.  hw_state stays below PTP_READY. */
+         * (AvbInitializeDevice, FilterRestart) do not fail on this status (FilterRestart keeps the TAS query register
+         * gate closed, #350).  hw_state stays below PTP_READY. */
         return status;
     }
 
@@ -560,7 +716,10 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         // Use intel_init() which properly dispatches to device-specific operations
         // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
         // which initializes PTP clock
+        AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): this attempt is recorded, never armed (not the fault point) */
+        (void)AvbInitFaultEnter(Ctx, InitOrigin, AVB_INITFAULT_SITE_BRINGUP, &faultCall);
         int init_result = intel_init(&Ctx->intel_device);
+        AvbInitFaultExit(Ctx, &faultCall, init_result);
         
         DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
         
@@ -593,7 +752,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
  * @return STATUS_SUCCESS on success, error status on failure
  * @note Implements Intel datasheet generic initialization sequence
  */
-static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
     DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: Starting for VID=0x%04X DID=0x%04X\n", 
            Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
@@ -732,9 +891,23 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
            Ctx->intel_device.private_data);
     
     // Now call device-specific initialization
-    if (intel_init(&Ctx->intel_device) != 0) {
-        DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
-        return STATUS_UNSUCCESSFUL;
+    /* #412 (Debug only): the fault point. No device register write of this initialization precedes it (PCI configuration
+     * reads, MmMapIoSpace and allocations only). An armed FAIL replaces the call and fails the attempt exactly as a
+     * non-zero intel_init return; an armed HOLD has waited inside AvbInitFaultEnter. Release: the call is unconditional */
+    AVB_INITFAULT_CALL faultCall;
+    int basic_init_result;
+    if (AvbInitFaultEnter(Ctx, InitOrigin, AVB_INITFAULT_SITE_BASIC, &faultCall) == AVB_INITFAULT_ACT_FAIL) {
+        basic_init_result = -1;
+    } else {
+        basic_init_result = intel_init(&Ctx->intel_device);
+    }
+    AvbInitFaultExit(Ctx, &faultCall, basic_init_result);
+    if (basic_init_result != 0) {
+        /* #404 part 2: this step's own failure is the device library's hardware initialization (intel_init returned
+         * non-zero), reported as STATUS_DEVICE_HARDWARE_ERROR exactly as AvbBringUpHardware reports the same failure of its
+         * intel_init; the other steps keep their own statuses (BAR0 discovery and mapping, allocation, MMIO sanity) */
+        DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library): STATUS_DEVICE_HARDWARE_ERROR\n");
+        return STATUS_DEVICE_HARDWARE_ERROR;
     }
     DEBUGP(DL_TRACE, "? STEP 3 SUCCESS: intel_init completed successfully\n");
 
@@ -823,19 +996,37 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id,
            context->intel_device.device_type);
     
+    /* #404 part 2: the initialization below needs the adapter's initialization ownership; while another initialization
+     * owns it, STATUS_DEVICE_BUSY without hardware access. READY is re-checked under ownership: an initialization that
+     * completed in between is not repeated */
+    if (!AvbInitClaim(context)) {
+        DEBUGP(DL_ERROR, "!!! [#404] AvbEnsureDeviceReady VID=0x%04X DID=0x%04X: another initialization owns the adapter: "
+               "STATUS_DEVICE_BUSY, no hardware access\n", context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
+        return STATUS_DEVICE_BUSY;
+    }
+    if (context->hw_state >= AVB_HW_PTP_READY) {
+        AvbInitRelease(context);
+        return STATUS_SUCCESS;
+    }
+
     // CLEAN ARCHITECTURE: Use Intel library device-specific initialization
     // No device-specific register access in generic integration layer
+    AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): recorded, never armed; reached from OPEN_ADAPTER */
+    (void)AvbInitFaultEnter(context, AVB_INITFAULT_ORIGIN_OPEN_HANDLER, AVB_INITFAULT_SITE_ENSURE, &faultCall);
     int init_result = intel_init(&context->intel_device);
+    AvbInitFaultExit(context, &faultCall, init_result);
     if (init_result != 0) {
         DEBUGP(DL_ERROR, "? AvbEnsureDeviceReady: intel_init failed: %d\n", init_result);
+        AvbInitRelease(context);
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
-    
+
     DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Device initialization successful\n");
-    
+
     // Establish readiness (single shared helper; only reached after intel_init succeeded)
     AvbMarkPtpReady(context);
-    
+    AvbInitRelease(context);
+
     return STATUS_SUCCESS;
 }
 
@@ -855,7 +1046,7 @@ NTSTATUS AvbI210EnsureSystimRunning(PAVB_DEVICE_CONTEXT context)
 
 /* ======================================================================= */
 /* NDIS attach entry */
-NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CONTEXT *AvbContext)
+NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CONTEXT *AvbContext, _In_ ULONG InitOrigin)
 {
     if (!AvbContext) return STATUS_INVALID_PARAMETER;
     USHORT ven=0, dev=0;
@@ -890,7 +1081,7 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     /* Deliberately ignore a bring-up failure HERE: creating the context must succeed so that the adapter stays
      * enumerable even when its hardware initialization failed.  The failure is not hidden - hw_state stays below
      * PTP_READY and INIT_DEVICE / OPEN_ADAPTER (explicit recovery) report or retry it. */
-    (void)AvbBringUpHardware(*AvbContext);
+    (void)AvbBringUpHardware(*AvbContext, InitOrigin);
     return STATUS_SUCCESS;
 }
 
@@ -1538,6 +1729,7 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     }
     NdisFreeSpinLock(&AvbContext->subscription_lock);
     NdisFreeSpinLock(&AvbContext->systim_lock);
+    /* tas_reg_lock is an EX_SPIN_LOCK: nothing to free */
 
     /* Release ATDECC subscription lock (no heap to free — queue is embedded) */
     NdisFreeSpinLock(&AvbContext->atdecc_sub_lock);
@@ -1873,10 +2065,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
-    // On-demand initialization: only initialize on first IOCTL, not at driver load
-    if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER)
+    /* Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization): an adapter not initialized at attach is initialized by
+     * IOCTL_AVB_INIT_DEVICE, in its handler only (#404 part 2). The former pre-dispatch bring-up here discarded its status,
+     * ran before the per-instance check and was followed by a second bring-up in the handler; it is removed */
+    /* IOCTL_AVB_TAS_QUERY_HW is an observation like GET_HW_STATE: never initializes, never STATUS_DEVICE_NOT_READY; an
+     * adapter it cannot read is reported in the reply (hw_read NOT_RUNNING / NO_MMIO, #365 12.1, 12.3) */
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER && code != IOCTL_AVB_TAS_QUERY_HW)
         return STATUS_DEVICE_NOT_READY;
 
     // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
@@ -1945,20 +2139,50 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_INIT_DEVICE:
         {
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
-            
-            // UT-DEV-INIT-002: Duplicate Initialization Prevention (per-handle).
-            // FsContext2 is NULL for every new file handle (zeroed by I/O Manager).
-            // Setting it to (PVOID)1 on the first INIT_DEVICE call lets us detect and
-            // reject a second call on the SAME handle — without polluting per-adapter
-            // state that would break subsequent test cases that open fresh handles.
-            // Implements #313 (TEST-DEV-LIFECYCLE-001 / UT-DEV-INIT-002)
-            if (sp->FileObject->FsContext2 != NULL) {
+
+            /* #404 part 2, #12/#313 amendment 2026-11-12. Order:
+             *   1. the same open instance after its own success: STATUS_INVALID_DEVICE_STATE, no hardware access
+             *      (UT-DEV-INIT-002). The per-instance marker (init_succeeded of the open instance's context, 0 for every new
+             *      file object) is set only after a successful initialization of this instance, so the same instance retries
+             *      after its own failure;
+             *   2. another initialization of this adapter running: STATUS_DEVICE_BUSY, no wait, no hardware access; once the
+             *      ownership is obtained, 1. is checked again (overlapping requests on the same file object);
+             *   3. adapter READY: STATUS_SUCCESS, no hardware access (also when an initialization completed in between);
+             *   4. otherwise exactly one bring-up, under the ownership taken in 2, and its own status.
+             * The former forced BAR0 path here is removed: AvbPerformBasicInitialization discovers and maps BAR0 whenever
+             * no hardware context exists (with the alternative discovery for I219/I217 the forced path lacked), at the #412
+             * fault point, before the bring-up's own intel_init.
+             * P2 step 3: the marker is this open instance's context (AVB_OPEN_INSTANCE in FileObject->FsContext2, allocated at
+             * IRP_MJ_CREATE, freed at IRP_MJ_CLOSE). A request without that context is a driver defect: reported, nothing done */
+            PAVB_OPEN_INSTANCE inst = (PAVB_OPEN_INSTANCE)sp->FileObject->FsContext2;
+            if (inst == NULL) {
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: FileObject=%p has no open-instance context: STATUS_DRIVER_INTERNAL_ERROR\n",
+                       sp->FileObject);
+                status = STATUS_DRIVER_INTERNAL_ERROR;
+                break;
+            }
+            if (InterlockedCompareExchange(&inst->init_succeeded, 0, 0) != 0) {
                 DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected\n");
                 status = STATUS_INVALID_DEVICE_STATE;
                 break;
             }
-            sp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)1;
-            
+            if (!AvbInitClaim(currentContext)) {
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: adapter VID=0x%04X DID=0x%04X: another initialization is running: "
+                       "STATUS_DEVICE_BUSY, no hardware access\n", currentContext->intel_device.pci_vendor_id,
+                       currentContext->intel_device.pci_device_id);
+                status = STATUS_DEVICE_BUSY;
+                break;
+            }
+            /* PR #469 review: re-checked under the ownership. Two overlapping requests on the same (asynchronous) file
+             * object can both pass the check above before either publishes the marker; the marker is published below
+             * before the ownership is released, so the later one sees it here */
+            if (InterlockedCompareExchange(&inst->init_succeeded, 0, 0) != 0) {
+                AvbInitRelease(currentContext);
+                DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected (under ownership)\n");
+                status = STATUS_INVALID_DEVICE_STATE;
+                break;
+            }
+
             DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
                    currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
             DEBUGP(DL_TRACE, "   - Current hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
@@ -1968,52 +2192,27 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             DEBUGP(DL_TRACE, "   - Device type: %d (%s)\n", currentContext->intel_device.device_type,
                    currentContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
                    currentContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
-            
-            // Force immediate BAR0 discovery if hardware context is missing,
-            // regardless of hw_state.  OPEN_ADAPTER's MDIO-fallback may have
-            // promoted I219/I217 to PTP_READY without actually mapping BAR0.
-            if (currentContext->hardware_context == NULL) {
-                DEBUGP(DL_TRACE, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
-                
-                PHYSICAL_ADDRESS bar0 = {0};
-                ULONG barLen = 0;
-                NTSTATUS ds = AvbDiscoverIntelControllerResources(currentContext->filter_instance, &bar0, &barLen);
-                if (NT_SUCCESS(ds)) {
-                    DEBUGP(DL_TRACE, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
-                    NTSTATUS ms = AvbMapIntelControllerMemory(currentContext, bar0, barLen);
-                    if (NT_SUCCESS(ms)) {
-                        DEBUGP(DL_TRACE, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
-                        
-                        // Complete initialization sequence
-                        if (intel_init(&currentContext->intel_device) == 0) {
-                            DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
-                            
-                            // Test MMIO sanity using generic register access
-                            ULONG ctrl = INTEL_MASK_32BIT;
-                            if (intel_read_reg(&currentContext->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) == 0 && ctrl != INTEL_MASK_32BIT) {
-                                DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
-                                AVB_SET_HW_STATE(currentContext, AVB_HW_BAR_MAPPED);
-                                currentContext->hw_access_enabled = TRUE;
-                                currentContext->initialized = TRUE;
-                                
-                                // Device-specific initialization handled by Intel library
-                                DEBUGP(DL_TRACE, "? Device-specific initialization complete\n");
-                            } else {
-                                DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
-                            }
-                        } else {
-                            DEBUGP(DL_ERROR, "? MANUAL intel_init FAILED\n");
-                        }
-                    } else {
-                        DEBUGP(DL_ERROR, "*** BAR0 MAPPING FAILED *** Status=0x%08X\n", ms);
-                    }
-                } else {
-                    DEBUGP(DL_ERROR, "*** BAR0 DISCOVERY FAILED *** Status=0x%08X\n", ds);
-                }
+
+            /* #404, #12/#313 amendment 2026-11-12 row 1: the first INIT_DEVICE on an open instance of an adapter that is already
+             * READY initializes that instance only. STATUS_SUCCESS, no hardware effect: running bring-up again re-runs the
+             * device PTP initialization, and on the I226 it reset a healthy clock (UT-DEV-INIT-001 and UT-DEV-INIT-SECOND RED,
+             * logs/issue313/evidence-313-*). READY here is the adapter's own published state with its BAR mapped; an adapter
+             * that reached PTP_READY without a hardware context (MDIO fallback) still takes the path below, as before. The
+             * READY check now runs under the initialization ownership (row 3 above) */
+            if (currentContext->hw_state == AVB_HW_PTP_READY && currentContext->hardware_context != NULL) {
+                status = STATUS_SUCCESS;
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: adapter VID=0x%04X DID=0x%04X already READY: open instance initialized, no "
+                       "hardware access\n", currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
+            } else {
+                status = AvbBringUpHardwareOwned(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER);
             }
-            
-            status = AvbBringUpHardware(currentContext);
-            
+            if (NT_SUCCESS(status)) {
+                /* only after this instance's successful initialization, and before the ownership is released (the
+                 * interlocked release orders it before any later owner's re-check) */
+                InterlockedExchange(&inst->init_succeeded, 1);
+            }
+            AvbInitRelease(currentContext);
+
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
             DEBUGP(DL_TRACE, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
             DEBUGP(DL_TRACE, "   - Final hardware access: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
@@ -3115,16 +3314,25 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (AvbContext == NULL) {
                     disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
                     status = STATUS_DEVICE_NOT_CONNECTED;
+                } else if (!avb_tas_op_claim(AvbContext)) {
+                    /* ADR-TSN-002: DISARM_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    disarm->status = (avb_u32)STATUS_DEVICE_BUSY;
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     const intel_device_ops_t *ops =
                         intel_get_device_ops(AvbContext->intel_device.device_type);
                     int hw_result = 0;
+                    int path;   /* 1 device disable path, 2 no TAS hardware, 3 blocked: selects the log after release */
+                    KIRQL lock_irql;
+                    /* TAS register lock (#45, #52) from the device operation to the record update (#350). Nothing is
+                     * logged under it; the outcome is logged after the release */
+                    LARGE_INTEGER lock_t0 = avb_tas_reg_lock(AvbContext, &lock_irql);
 
                     if (ops && ops->disable_tas) {
                         /* Use device-specific hardware disable path with readback */
+                        path = 1;
                         hw_result = ops->disable_tas(&AvbContext->intel_device);
                         if (hw_result == 0) {
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TQAVCTRL cleared on ctx=%p\n", AvbContext);
                             InterlockedExchange(&AvbContext->tas_armed, 0);
                             RtlZeroMemory(&AvbContext->last_tas_config,
                                           sizeof(AvbContext->last_tas_config));
@@ -3133,40 +3341,53 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             /* P0.2: disable_tas intentionally returns -ENOTSUP (no safe in-place
                              * disable path for this device).  Map to STATUS_NOT_SUPPORTED so the
                              * caller receives a distinct, unambiguous status code. */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] ENOTSUP: no disable path on ctx=%p\n", AvbContext);
                             disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
                             status = STATUS_NOT_SUPPORTED;
                             /* tas_armed NOT cleared — hardware state indeterminate */
                         } else if (hw_result == -2) {
                             /* Hardware refused to clear TRANSMIT_MODE_TSN */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n",
-                                   AvbContext, hw_result);
                             disarm->status = (avb_u32)STATUS_UNSUCCESSFUL;
                             status = STATUS_UNSUCCESSFUL;
                             /* tas_armed NOT cleared — state is unknown/dirty */
                         } else {
                             /* MMIO error */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] MMIO error ctx=%p rc=%d\n",
-                                   AvbContext, hw_result);
                             disarm->status = (avb_u32)STATUS_IO_DEVICE_ERROR;
                             status = STATUS_IO_DEVICE_ERROR;
                             /* tas_armed NOT cleared */
                         }
                     } else if (ops && ops->setup_tas == NULL) {
                         /* Device never had TAS hardware — driver flag only, no HW action needed */
-                        DEBUGP(DL_TRACE, "TAS disarm: no TAS hardware on ctx=%p (device has no setup_tas)\n", AvbContext);
+                        path = 2;
                         InterlockedExchange(&AvbContext->tas_armed, 0);
                         RtlZeroMemory(&AvbContext->last_tas_config, sizeof(AvbContext->last_tas_config));
                         disarm->status = (avb_u32)STATUS_SUCCESS;
                     } else {
                         /* Device has setup_tas but no disable_tas — hardware path unknown.
                          * Cannot safely disarm; block and require driver update. */
-                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] BLOCKED: device has setup_tas but no disable_tas path ctx=%p\n",
-                               AvbContext);
+                        path = 3;
                         disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_NOT_SUPPORTED;
                         /* tas_armed NOT cleared — state is indeterminate */
                     }
+                    (void)avb_tas_reg_unlock(AvbContext, lock_irql, lock_t0, "disarm");
+                    avb_tas_op_release(AvbContext);
+
+                    if (path == 1 && hw_result == 0) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TQAVCTRL cleared on ctx=%p\n", AvbContext);
+                    } else if (path == 1 && hw_result == -ENOTSUP) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] ENOTSUP: no disable path on ctx=%p (no safe NDIS-compatible "
+                               "TAS disable without adapter reset, P0.2)\n", AvbContext);
+                    } else if (path == 1 && hw_result == -2) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n", AvbContext, hw_result);
+                    } else if (path == 1) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] MMIO error ctx=%p rc=%d\n", AvbContext, hw_result);
+                    } else if (path == 2) {
+                        DEBUGP(DL_TRACE, "TAS disarm: no TAS hardware on ctx=%p (device has no setup_tas)\n", AvbContext);
+                    } else {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] BLOCKED: device has setup_tas but no disable_tas path ctx=%p\n",
+                               AvbContext);
+                    }
+                    UNREFERENCED_PARAMETER(path);
                 }
                 info = sizeof(AVB_DISARM_TAS_REQUEST);
                 if (status == STATUS_SUCCESS) {
@@ -4105,6 +4326,125 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         break;
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
+    case IOCTL_AVB_TAS_QUERY_HW:
+        /* Read-only TAS hardware query (#350), contract #365 "Query v1 contract" with Amendment 1 (12.10: version 2 only, a
+         * version 1 request is STATUS_REVISION_MISMATCH by the version check below). device.c routes bound handles only and
+         * refuses an unbound one with STATUS_INVALID_DEVICE_STATE before any fallback (12.1 row 1). Checks in the 12.1
+         * order; on any error IoStatus.Information is 0 and nothing is written. The system buffer is used directly: no
+         * ProbeForWrite. Never writes a register, never takes the TAS claim, never blocks: a held claim is reported as
+         * OP_IN_PROGRESS. link_speed_mbps is the driver's own NDIS link speed (K8, #351). Not reported in v1 (0 or their
+         * "not reported" value): origin, gate_policy, revision (K9), context epoch and generation (#352), tiers other than
+         * PASS (#351), legacy conflicts (#355); the #352
+         * operation store does not exist, so a lookup is NOT_IMPLEMENTED, never NOT_FOUND. */
+        if (buf == NULL || inLen < sizeof(AVB_TAS_QUERY_HW_REQUEST) || outLen < sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_TAS_QUERY_HW_REQUEST q = (PAVB_TAS_QUERY_HW_REQUEST)buf;
+            const intel_device_ops_t *ops = intel_get_device_ops(currentContext->intel_device.device_type);
+
+            if (q->version != AVB_TAS_QUERY_VERSION) {
+                status = STATUS_REVISION_MISMATCH;
+            } else if (q->size != (avb_u32)sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+                status = STATUS_INVALID_PARAMETER;
+            } else if (!(currentContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                status = STATUS_NOT_SUPPORTED;      /* capability evidenced absent for the bound adapter */
+            } else if (ops == NULL || ops->query_tas == NULL) {
+                status = STATUS_NOT_IMPLEMENTED;    /* TAS-capable, but the family has no query register map */
+            } else {
+                avb_u64 lookup = q->lookup_client_op_id;
+                BOOLEAN held, locked = FALSE;
+                int running, mmio, busy, contended = 0;
+                LONG seq0, seq1;
+                avb_u32 record;
+                ULONG hold_us = 0;
+                KIRQL irql;
+                LARGE_INTEGER lock_t0, lock_t1, lock_freq;
+                /* Holder discipline (#350): the IOCTL runs in the caller's thread at PASSIVE_LEVEL with APCs enabled, so no
+                 * caller guarantee keeps that thread from being suspended or preempted. The IRQL is therefore raised to
+                 * DISPATCH_LEVEL BEFORE the rundown is acquired and lowered only AFTER the lock and the rundown are released:
+                 * the whole holder interval runs without APC delivery or preemption, and FilterPause's wait for the holders
+                 * cannot be held up by a suspended query thread. The interval has no exit: both are released on every path
+                 * below, before the IRQL is lowered and before any logging */
+                lock_t0.QuadPart = 0;
+                lock_t1.QuadPart = 0;
+                lock_freq.QuadPart = 0;
+                KeRaiseIrql(DISPATCH_LEVEL, &irql);
+                /* Lifecycle: registers are read only while this rundown is held. FilterPause waits for its holders before
+                 * it publishes FilterPausing, and FilterRestart re-arms it only after a successful hardware bring-up. Not
+                 * acquired: nothing is read (NOT_RUNNING) and the register lock is not touched */
+                held = ExAcquireRundownProtection(&currentContext->tas_query_rundown);
+                /* Register access (#45, #52): one shared attempt at the TAS register lock, never a wait (#365 12.1 "Never
+                 * blocking"). Obtained: it is held from the state samples to the end of the read pass, and since every TAS
+                 * register write and record update holds it exclusively, the registers read and the record are one state.
+                 * Not obtained: a TAS operation holds it or waits for it (queries share it, and every operation takes the
+                 * claim first), so nothing is read: the register-lock reply of #365 12.10 (Amendment 1), with hw_read PARTIAL
+                 * (an incomplete observation; no MMIO is implied), OP_IN_PROGRESS, every read_failed bit, both PHC values
+                 * invalid, READ_FAILED clear, slots and restoration UNKNOWN. UNVERIFIED on hardware: no test forces it */
+                if (held) {
+                    locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
+                    contended = !locked;
+                }
+
+                running = held && currentContext->filter_instance != NULL && currentContext->filter_instance->State == FilterRunning;
+                mmio = currentContext->hw_state >= AVB_HW_BAR_MAPPED && (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) != 0;
+                /* TAS operations: tas_op_seq is odd while one runs and changes with every start and end, so comparing it
+                 * around the pass also catches an operation that started (claimed) and finished in between */
+                seq0 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
+                busy = (seq0 & 1) != 0 || InterlockedCompareExchange(&currentContext->tas_op_claim, 0, 0) != 0 || contended;
+                record = (avb_u32)InterlockedCompareExchange(&currentContext->tas_armed, 0, 0);
+
+                RtlZeroMemory(q, sizeof(*q));
+                q->version = AVB_TAS_QUERY_VERSION;
+                q->size = (avb_u32)sizeof(*q);
+                q->lookup_client_op_id = lookup;
+                q->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+                /* K8 (#351, #365 12.2): the adapter's current link speed as NDIS reported it at attach and in its last
+                 * NDIS_STATUS_LINK_STATE (filter.c), 0 = unknown. One interlocked read: never waits, writes nothing */
+                q->link_speed_mbps = (currentContext->filter_instance != NULL)
+                                         ? (avb_u32)(ULONG)InterlockedCompareExchange(&currentContext->filter_instance->LinkSpeedMbps, 0, 0)
+                                         : 0u;
+                q->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
+                q->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
+                q->flags = busy ? AVB_TAS_FLAG_OP_IN_PROGRESS : 0u;
+                q->lookup_result = (lookup == 0) ? AVB_TAS_LOOKUP_NOT_REQUESTED : AVB_TAS_LOOKUP_NOT_IMPLEMENTED;
+                q->legacy_conflicts = AVB_TAS_NOT_REPORTED_U32;
+                (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended);
+                seq1 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
+                if (locked) {
+                    lock_t1 = avb_tas_reg_release_shared_at_dpc(currentContext, &lock_freq);
+                }
+                if (held) {
+                    ExReleaseRundownProtection(&currentContext->tas_query_rundown);
+                }
+                KeLowerIrql(irql);
+                if (locked) {
+                    hold_us = avb_tas_reg_hold_us(lock_t0, lock_t1, lock_freq, "query");   /* logs; after the lowering */
+                }
+                if (seq1 != seq0) {
+                    /* An operation overlapped the pass: the registers and the record may belong to different states.
+                     * Conservative: OP_IN_PROGRESS, both slots UNKNOWN (#365 12.4 S1), restoration not established */
+                    q->flags |= AVB_TAS_FLAG_OP_IN_PROGRESS;
+                    q->current_status = AVB_TAS_ST_UNKNOWN;
+                    q->current_reasons = 0u;
+                    q->next_status = AVB_TAS_ST_UNKNOWN;
+                    q->next_reasons = 0u;
+                    q->restoration = AVB_TAS_RESTORE_UNKNOWN;
+                } else if (busy) {
+                    q->restoration = AVB_TAS_RESTORE_UNKNOWN;   /* an operation was running throughout the pass */
+                }
+                /* Logged after both releases, so the trace is not part of the measured hold */
+                DEBUGP(DL_ERROR, "!!! [#350] TAS query: running=%d mmio=%d record=%u busy=%d contended=%d seq=%ld/%ld hold_us=%lu "
+                       "hw_read=%u mode=%u current=%u/0x%X next=%u/0x%X restoration=%u snap=0x%X failed=0x%X dtx=%u/%u\n", running,
+                       mmio, record, busy, contended, seq0, seq1, hold_us, q->hw_read, q->hw_mode, q->current_status, q->current_reasons,
+                       q->next_status, q->next_reasons, q->restoration, q->snapshot_reasons, q->regs.read_failed,
+                       q->dtx_max_frame_bytes, q->dtx_max_frame_state);
+                UNREFERENCED_PARAMETER(hold_us);
+                info = sizeof(*q);
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+
     case IOCTL_AVB_QUERY_HW_SNAPSHOT:
         /* Read-only HIL restoration verification (Q 2026-10-22), Debug and Release.  device.c routes bound handles
          * only.  One entry per AVB_HWREG_* id: the family's intel-ethernet-regs offset map (device HAL) selects the
@@ -4227,7 +4567,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_TRACE, "   - Current state: %s\n", AvbHwStateName(targetContext->hw_state));
                     DEBUGP(DL_TRACE, "   - Initialized: %s\n", targetContext->initialized ? "YES" : "NO");
                     
-                    NTSTATUS initStatus = AvbBringUpHardware(targetContext);
+                    NTSTATUS initStatus = AvbBringUpHardware(targetContext, AVB_INITFAULT_ORIGIN_OPEN_HANDLER);
                     if (!NT_SUCCESS(initStatus)) {
                         DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Target adapter initialization failed: 0x%08X\n", initStatus);
                         // Continue anyway - some functionality may still work
@@ -4313,9 +4653,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
+                } else if (!avb_tas_op_claim(activeContext)) {
+                    /* ADR-TSN-002: SETUP_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     PAVB_TAS_REQUEST r = (PAVB_TAS_REQUEST)buf;
-                    
+
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_TRACE, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
@@ -4333,11 +4676,24 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         // Call Intel library TAS setup function (standard implementation)
                         DEBUGP(DL_ERROR, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
                         DEBUGP(DL_TRACE, "? TAS SETUP: Calling Intel library TAS implementation\n");
+                        /* TAS register lock (#45, #52) from the register writes to the record update (#350). Nothing is
+                         * logged under it; the outcome is logged after the release */
+                        KIRQL lock_irql;
+                        LARGE_INTEGER lock_t0 = avb_tas_reg_lock(activeContext, &lock_irql);
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
-                        DEBUGP(DL_ERROR, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-                        
+                        if (rc == 0) {
+                            /* Record armed state for test-state-restoration (fix #328 / A9). Arms from clean only: a dirty
+                             * adapter stays dirty (#357), since this write does not make an unknown state known */
+                            if (InterlockedCompareExchange(&activeContext->tas_armed, AVB_TAS_STATE_ARMED, AVB_TAS_STATE_CLEAN) != AVB_TAS_STATE_DIRTY) {
+                                /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
+                                RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            }
+                        }
+                        (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "setup");
+                        DEBUGP(DL_ERROR, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
+
                         if (rc == 0) {
                             /* [#328 probe-D] TAS armed -- show adapter id, base_time, cycle_time in DbgView.
                              * This hardware state survives driver unload and blocks reinstall. */
@@ -4349,10 +4705,6 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                    (unsigned)r->config.cycle_time_s,
                                    (unsigned)r->config.cycle_time_ns);
                             DEBUGP(DL_TRACE, "? TAS configuration successful\n");
-                            /* Record armed state for test-state-restoration (fix #328 / A9) */
-                            InterlockedExchange(&activeContext->tas_armed, 1);
-                            /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
-                            RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             
@@ -4376,9 +4728,70 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             }
                         }
                     }
-                    
+
                     info = sizeof(*r);
+                    avb_tas_op_release(activeContext);
                 }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_TAS_ACTIVATE:
+        /* First gate schedule on a clean adapter (#357). A refusal completes with STATUS_SUCCESS and r->result, because
+         * METHOD_BUFFERED would drop the output on an error status. ADR-TSN-002 and ADR-TSN-003 govern this write path.
+         * Exception: a valid PASS request completes with STATUS_NOT_IMPLEMENTED and no output until ADR-TSN-003 is
+         * accepted (#363 interim Option C, avb_tas_activate_completion). */
+        if (buf == NULL || inLen < sizeof(AVB_TAS_ACTIVATE_REQUEST) || outLen < sizeof(AVB_TAS_ACTIVATE_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* per-handle selected adapter */
+            PAVB_TAS_ACTIVATE_REQUEST r = (PAVB_TAS_ACTIVATE_REQUEST)buf;
+            const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+
+            if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                status = STATUS_DEVICE_NOT_READY;
+            } else if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                status = STATUS_NOT_SUPPORTED;
+            } else if (ops == NULL || ops->activate_tas == NULL) {
+                status = STATUS_NOT_IMPLEMENTED;
+            } else if (!avb_tas_op_claim(activeContext)) {
+                /* Another TAS operation holds this adapter: refuse without reading or writing anything */
+                r->phc_at_commit_ns = 0;
+                r->result = AVB_TAS_ACT_BUSY;
+                r->status = (avb_u32)STATUS_SUCCESS;
+                info = sizeof(*r);
+            } else {
+                /* TAS register lock (#45, #52) from the record read to the record update: a query sees the registers and
+                 * the record either both before or both after this activation, or reads nothing. Nothing is logged under
+                 * it; the outcome is logged after the release */
+                KIRQL lock_irql;
+                LARGE_INTEGER lock_t0 = avb_tas_reg_lock(activeContext, &lock_irql);
+                avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
+                int outcome, tsn_mode_written = 0;
+
+                /* Armed and dirty are both not clean, so the device code refuses without writing */
+                outcome = ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN, &tsn_mode_written);
+                status = (NTSTATUS)avb_tas_activate_completion(outcome, &info);
+                if (outcome == AVB_TAS_ACTIVATE_RAN) {
+                    avb_u32 after = avb_tas_state_after(r->result, before, tsn_mode_written);
+
+                    r->status = (avb_u32)STATUS_SUCCESS;
+                    if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {
+                        /* The full gate list of what was written; validation already refused anything that does not fit */
+                        (void)avb_tas_gcl_from_windows(r, &activeContext->last_tas_config);
+                    } else if (after == AVB_TAS_STATE_DIRTY) {
+                        RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
+                    }
+                    InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+                }
+                /* Otherwise a valid request the device code refused without any register access (PASS, #363 interim
+                 * Option C): STATUS_NOT_IMPLEMENTED, no output, the adapter's TAS state unchanged */
+                (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "activate");
+                avb_tas_op_release(activeContext);
+                /* Same trace as before, now emitted after the release (it was in the device wrapper, under the lock) */
+                DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u modeWritten=%d phcAtCommit=%llu\n",
+                       r->pre_activation, (unsigned long long)r->base_time_ns, r->cycle_ns, r->reserved, outcome,
+                       r->result, tsn_mode_written, (unsigned long long)r->phc_at_commit_ns);
             }
         }
         break;

@@ -389,9 +389,10 @@ function Close-AvbHilSessionIncidents {
 # ---------------------------------------------------------------------------------------------------------
 # Machine-wide HIL safety record (Q 2026-10-21): %ProgramData%\IntelAvbFilter-hil-safety.json, schema avb-hil-safety/1.
 # Shared by every process, configuration and run on this machine (Debug, Release, LocalSuites, CI).
-#   UNBASELINED record infrastructure exists, no authorized hardware baseline -> Init/Mutating BLOCKED
-#   CLEAR       authorized, evidence-backed baseline and no unrecovered event   -> Init/Mutating may run
-#   HALTED      at least one safety event with recovery PENDING / ATTEMPTED    -> Init/Mutating BLOCKED, ReadOnly runs
+#   UNBASELINED record infrastructure exists, no authorized hardware baseline -> state unknown: reported, no dispatch veto
+#                                                                                (#458); no session baseline, no PHC tolerances
+#   CLEAR       authorized, evidence-backed baseline and no unrecovered event   -> Init/Mutating/Unsafe may run
+#   HALTED      at least one safety event with recovery PENDING / ATTEMPTED    -> Init/Mutating/Unsafe BLOCKED, ReadOnly runs
 #   UNAVAILABLE missing / unreadable / corrupt / wrong schema / other host /
 #               internally inconsistent                                       -> fail closed (as HALTED)
 # Events are appended, never removed.  Nothing clears a halt implicitly (reboot, reinstall, new run, new baseline);

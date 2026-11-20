@@ -361,6 +361,13 @@ typedef struct _MS_FILTER
     BOOLEAN                         HwTimestampEnabled;  // TRUE if HW timestamping configured via OID_TIMESTAMP_CONFIG
     PDEVICE_OBJECT                  MiniportPhysicalDeviceObject; // PCI PDO from NDIS_FILTER_ATTACH_PARAMETERS
 
+    /* K8 (#351; #365 12.2 link_speed_mbps, 13.6 D.2): this adapter's current transmit link speed in Mbit/s as NDIS reports
+     * it, 0 = unknown (not connected, unknown or zero rate, or a rate not exactly representable in Mbit/s; AvbLinkSpeedMbps in
+     * filter.c). One 32-bit value, so a reader never sees a speed from one indication with a state from another. Written at
+     * FilterAttach from NDIS_FILTER_ATTACH_PARAMETERS and on every NDIS_STATUS_LINK_STATE in FilterStatus; read without
+     * waiting by IOCTL_AVB_TAS_QUERY_HW (interlocked). Lives as long as this filter module. Stored as the unsigned bit pattern */
+    volatile LONG                   LinkSpeedMbps;
+
 }MS_FILTER, * PMS_FILTER;
 
 

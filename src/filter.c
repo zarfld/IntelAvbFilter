@@ -82,6 +82,23 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 static BOOLEAN UnicodeStringContainsInsensitive(PCUNICODE_STRING Str, PCWSTR Sub);
 static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
 
+/* K8 (#351; #365 12.2 link_speed_mbps "0 = unknown", 13.6 D.2): NDIS link state to the query's integer Mbit/s.
+ * Encoding as published in #365 "K8 link-speed encoding - decision 2026-11-18": with B the NDIS transmit rate in bit/s,
+ * exactly B / 1,000,000 only when the link is Connected, B is known and non-zero, B % 1,000,000 == 0 and the quotient is in
+ * 1..UINT32_MAX. Everything else is 0 (unknown): disconnected or unknown state, NDIS_LINK_SPEED_UNKNOWN, 0, a fractional
+ * Mbit/s rate or a rate beyond the field; never truncated, rounded, clamped, wrapped or replaced by a nominal speed.
+ * Generic: no device, model or fixed-speed assumption */
+#define AVB_LINK_BITS_PER_MBIT 1000000ULL
+
+static LONG AvbLinkSpeedMbps(NDIS_MEDIA_CONNECT_STATE State, ULONG64 XmitBitsPerSecond)
+{
+    if (State != MediaConnectStateConnected || XmitBitsPerSecond == 0 || XmitBitsPerSecond == NDIS_LINK_SPEED_UNKNOWN ||
+        (XmitBitsPerSecond % AVB_LINK_BITS_PER_MBIT) != 0 || (XmitBitsPerSecond / AVB_LINK_BITS_PER_MBIT) > (ULONG64)MAXULONG) {
+        return 0;
+    }
+    return (LONG)(ULONG)(XmitBitsPerSecond / AVB_LINK_BITS_PER_MBIT);
+}
+
 
 // AvbIsSupportedIntelController is defined in avb_bar0_discovery.c
 extern BOOLEAN AvbIsSupportedIntelController(PMS_FILTER pFilter, PUSHORT pVendorId, PUSHORT pDeviceId);
@@ -185,6 +202,7 @@ Return Value:
      * Safe read-only call at PASSIVE_LEVEL — no spinlock, no BSOD risk.
      */
     FilterReadDebugSettings(RegistryPath);
+    AvbInitFaultSetRegistryPath(RegistryPath);   /* #412: Debug-only initialization fault mechanism; no-op in Release */
 
     DEBUGP(DL_TRACE, "===>DriverEntry...\n");
     /* #328 diagnostic: confirm whether module actually reloaded after service restart */
@@ -566,6 +584,12 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
          * Required to correctly read DevicePropertyHardwareID for PCH-integrated
          * NICs (e.g. I219) where the NDIS binding device and PCI PDO differ. */
         pFilter->MiniportPhysicalDeviceObject = AttachParameters->MiniportPhysicalDeviceObject;
+        /* K8 (#351): the link state NDIS hands the filter at attach (NDIS_FILTER_ATTACH_PARAMETERS MediaConnectState and
+         * XmitLinkSpeed, present from revision 1); NDIS_STATUS_LINK_STATE in FilterStatus keeps it current afterwards */
+        InterlockedExchange(&pFilter->LinkSpeedMbps,
+                            AvbLinkSpeedMbps(AttachParameters->MediaConnectState, AttachParameters->XmitLinkSpeed));
+        DEBUGP(DL_INFO, "FilterAttach: link state=%d xmit=%I64u bit/s -> link_speed_mbps=%lu\n",
+               (int)AttachParameters->MediaConnectState, AttachParameters->XmitLinkSpeed, (ULONG)pFilter->LinkSpeedMbps);
         //
         // The filter should initialize TrackReceives and TrackSends properly. For this
         // driver, since its default characteristic has both a send and a receive handler,
@@ -619,7 +643,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             DEBUGP(DL_TRACE, "FilterAttach: *** STARTING AVB INITIALIZATION *** for %wZ\n", 
                    &pFilter->MiniportFriendlyName);
                    
-            Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+            Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext, AVB_INITFAULT_ORIGIN_ATTACH);
             if (Status != STATUS_SUCCESS)
             {
                 DEBUGP(DL_TRACE, "FilterAttach: *** AVB INIT FAILED *** Intel NIC 0x%04x:0x%04x Status=0x%x for %wZ\n", 
@@ -735,6 +759,18 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     // Set the flag that the filter is going to pause
     //
     FILTER_ASSERT(pFilter->State == FilterRunning);
+
+    /* #350: TAS query register passes are drained BEFORE FilterPausing is published. From the wait on, no query can acquire
+     * the rundown (it then reads nothing and reports NOT_RUNNING), and the wait returns when every query that holds it has
+     * released it. So every query register pass both starts and ends while the filter is FilterRunning. A query never
+     * waits while it holds the rundown. Skipped when the rundown is already run down (no successful bring-up since the
+     * last pause or since allocation). */
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        if (InterlockedExchange(&avbCtx->tas_query_armed, 0) != 0) {
+            ExWaitForRundownProtectionRelease(&avbCtx->tas_query_rundown);
+        }
+    }
 
     FILTER_ACQUIRE_LOCK(&pFilter->Lock, bFalse);
     pFilter->State = FilterPausing;
@@ -852,6 +888,7 @@ FilterRestart(
     PNDIS_RESTART_GENERAL_ATTRIBUTES NdisGeneralAttributes;
     PNDIS_RESTART_ATTRIBUTES         NdisRestartAttributes;
     NDIS_CONFIGURATION_OBJECT        ConfigObject;
+    NTSTATUS                         bringUpStatus = STATUS_UNSUCCESSFUL;   /* #350: gates the TAS query reopening */
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
@@ -1046,14 +1083,35 @@ FilterRestart(
      * AvbPerformBasicInitialization returns immediately; intel_init/init_ptp then re-programs
      * the PHC.  Must run before AvbRestartTimers so the DPC finds a running clock.
      * Verifies: TC-S3-004 (PHC non-zero post-wake). */
+    /* The restart itself does not fail on a bring-up failure (the adapter stays enumerable); the status only decides
+     * whether the TAS query register gate reopens below (#350). #404 part 2 (PR #469 review): the restart's bring-up must
+     * not be skipped because an INIT_DEVICE or OPEN_ADAPTER owns the adapter's initialization at this moment, so it waits
+     * (bounded) for that ownership instead of returning STATUS_DEVICE_BUSY at once. */
     if (pFilter->AvbContext != NULL) {
         AvbTraceTxState((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, "FilterRestart");
-        (void)AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+        bringUpStatus = AvbBringUpHardwareWaitOwner((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, AVB_INITFAULT_ORIGIN_RESTART);
     }
 
     /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
     if (pFilter->AvbContext != NULL) {
         AvbRestartTimers((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+    }
+
+    /* #350: TAS query register reads allowed again only now, and only after an actually successful hardware bring-up
+     * above: AvbBringUpHardware succeeded AND completed initialization (PTP_READY; it also returns success when it skipped
+     * intel_init with no BAR mapped). Only on a Running filter, and only re-armed when the previous pause (or the
+     * allocation) ran it down. Otherwise the gate stays closed and the query reports NOT_RUNNING until a restart whose
+     * bring-up succeeds. */
+    if (pFilter->AvbContext != NULL && Status == NDIS_STATUS_SUCCESS && pFilter->State == FilterRunning) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        if (NT_SUCCESS(bringUpStatus) && avbCtx->hw_state >= AVB_HW_PTP_READY) {
+            if (InterlockedCompareExchange(&avbCtx->tas_query_armed, 1, 0) == 0) {
+                ExReInitializeRundownProtection(&avbCtx->tas_query_rundown);
+            }
+        } else {
+            DEBUGP(DL_ERROR, "!!! [#350] FilterRestart: TAS query gate stays closed: bring-up status=0x%08X hw_state=%d\n",
+                   bringUpStatus, (int)avbCtx->hw_state);
+        }
     }
 
     DEBUGP(DL_TRACE, "<===FilterRestart:  FilterModuleContext %p, Status %x\n", FilterModuleContext, Status);
@@ -1586,6 +1644,30 @@ NOTE: called at <= DISPATCH_LEVEL
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         InterlockedIncrement64(&avbCtx->stats_filter_status_count);
+    }
+
+    /* K8 (#351): every link state change NDIS indicates updates this adapter's link speed before the indication is passed
+     * up. Only a well-formed NDIS_LINK_STATE is read, checked in this order (each check only reads what the previous ones
+     * established): a buffer; StatusBufferSize covering the revision-1 fields this driver reads (so the header is inside it);
+     * header type DEFAULT; revision at least 1; a declared Header.Size of at least the revision-1 size AND not beyond
+     * StatusBufferSize (PR #478 review: a header claiming more bytes than were supplied is malformed). A later revision
+     * with a larger, fully supplied structure is accepted; only its revision-1 prefix is read. A malformed indication sets
+     * the speed unknown (0), never a stale value from before the change (#365 K8 encoding decision) */
+    if (StatusIndication->StatusCode == NDIS_STATUS_LINK_STATE) {
+        const NDIS_LINK_STATE *linkState = (const NDIS_LINK_STATE *)StatusIndication->StatusBuffer;
+        LONG mbps = 0;
+
+        if (linkState != NULL && StatusIndication->StatusBufferSize >= NDIS_SIZEOF_LINK_STATE_REVISION_1 &&
+            linkState->Header.Type == NDIS_OBJECT_TYPE_DEFAULT && linkState->Header.Revision >= NDIS_LINK_STATE_REVISION_1 &&
+            linkState->Header.Size >= NDIS_SIZEOF_LINK_STATE_REVISION_1 && linkState->Header.Size <= StatusIndication->StatusBufferSize) {
+            mbps = AvbLinkSpeedMbps(linkState->MediaConnectState, linkState->XmitLinkSpeed);
+            DEBUGP(DL_INFO, "FilterStatus: NDIS_STATUS_LINK_STATE state=%d xmit=%I64u bit/s -> link_speed_mbps=%lu\n",
+                   (int)linkState->MediaConnectState, linkState->XmitLinkSpeed, (ULONG)mbps);
+        } else {
+            DEBUGP(DL_WARN, "FilterStatus: malformed NDIS_STATUS_LINK_STATE (buffer %p, size %lu): link speed unknown\n",
+                   StatusIndication->StatusBuffer, StatusIndication->StatusBufferSize);
+        }
+        InterlockedExchange(&pFilter->LinkSpeedMbps, mbps);
     }
 
 
