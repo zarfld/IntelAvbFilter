@@ -13,8 +13,10 @@
 #   -Action Recover  OPERATOR interface (refused under GitHub Actions), elevated:
 #                      .\tools\ci\Invoke-HilDeployment.ps1 -Action Recover -EvidenceDir <new-evidence-directory>
 #                    takes the machine lock (no wait unless -LockWaitSeconds), observes the CURRENT machine state and
-#                    records the readiness decision (<lock>.recovery-<utc>.json + <EvidenceDir>\recovery.json); it never
-#                    rewrites the incident and never installs anything.  Exit 0 READY | 3 NOT_READY | 1 busy/refused.
+#                    records the readiness decision (<lock>.recovery-<utc>.json + a NEW attempt directory
+#                    <EvidenceDir>\recover-<utc>-pid<PID>\ with recovery.json, lock-release.json and SHA256SUMS, each
+#                    written once; the directory is printed); it never rewrites the incident or earlier evidence and
+#                    never installs anything.  Exit 0 READY | 3 NOT_READY | 1 busy/refused.
 #
 # Local evidence that survives a lost job: before the installer runs (netcfg can interrupt the runner's network
 # connection, #328), the record so far is written next to the lock (<lock>.inflight.json) and replaced by the final
@@ -82,25 +84,47 @@ if ($Action -eq 'Release') {
 $observe = if ($ProbeScript) { { param([int[]]$WatchPids) & $script:ProbeScript -WatchPids $WatchPids } }
            else { { param([int[]]$WatchPids) Get-AvbHilRecoveryObservation -WatchPids $WatchPids } }
 
+# Per-attempt evidence for -Action Recover (2026-11-20: a later run with the same -EvidenceDir overwrote an earlier
+# attempt's recovery.json).  Every invocation gets its own directory under the requested one; each file in it is written
+# once; nothing that already exists there is replaced.  Reusing a requested directory never blocks recovery.
+function New-AvbRecoverAttemptDir([string]$Root) {
+    $base = Join-Path $Root ('recover-{0}-pid{1}' -f [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), $PID)
+    $dir = $base; $n = 1
+    while (Test-Path -LiteralPath $dir) { $n++; $dir = "$base-$n" }
+    New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null
+    return $dir
+}
+function Write-AvbNewEvidenceFile([string]$Path, [string]$Text) {
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $b = [System.Text.Encoding]::UTF8.GetBytes($Text); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
+}
+function Write-AvbAttemptManifest([string]$Dir) {
+    $lines = @(Get-ChildItem -LiteralPath $Dir -File | Where-Object Name -ne 'SHA256SUMS' | Sort-Object Name |
+               ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name })
+    Write-AvbNewEvidenceFile -Path (Join-Path $Dir 'SHA256SUMS') -Text (($lines -join "`r`n") + "`r`n")
+}
+
 if ($Action -eq 'Recover') {
     if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-RECOVER] -Action Recover is the operator interface and is refused under GitHub Actions; CI reconciles inside -Action Deploy under its own lock" -ForegroundColor Red; exit 1 }
+    $attemptDir = New-AvbRecoverAttemptDir -Root $EvidenceDir
+    Write-Host "[HIL-RECOVER] evidence: $attemptDir"
     $wait = if ($PSBoundParameters.ContainsKey('LockWaitSeconds')) { $LockWaitSeconds } else { 0 }
     $rl = Enter-AvbHilLock -Kind 'local' -Label 'hil recover' -Path $LockPath -WaitSeconds $wait
     if (-not $rl.Ok) {
-        ([ordered]@{ schema = 'avb-hil-recovery/1'; mode = 'operator'; host = $env:COMPUTERNAME; decision = 'NOT_EXECUTED_BUSY'
-                     reasons = @("HIL machine busy: $($rl.Why)"); recordPath = $null } | ConvertTo-Json -Depth 6) |
-            Set-Content -LiteralPath (Join-Path $EvidenceDir 'recovery.json') -Encoding UTF8
-        Write-Host "[HIL-RECOVER] NOT_EXECUTED_BUSY - HIL machine busy: $($rl.Why) (nothing observed, nothing written next to the lock)" -ForegroundColor Red
+        Write-AvbNewEvidenceFile -Path (Join-Path $attemptDir 'recovery.json') -Text ([ordered]@{ schema = 'avb-hil-recovery/1'; mode = 'operator'; host = $env:COMPUTERNAME
+            decision = 'NOT_EXECUTED_BUSY'; reasons = @("HIL machine busy: $($rl.Why)"); recordPath = $null } | ConvertTo-Json -Depth 6)
+        Write-AvbAttemptManifest -Dir $attemptDir
+        Write-Host "[HIL-RECOVER] NOT_EXECUTED_BUSY - HIL machine busy: $($rl.Why) (nothing observed, nothing written next to the lock; evidence: $attemptDir)" -ForegroundColor Red
         exit 1
     }
     $code = 1; $rc = $null
     try {
-        $rc = Invoke-AvbHilReconciliation -LockPath $LockPath -Mode 'operator' -LockOwner $rl.Owner -PreviousLockOwner $rl.PreviousOwner -Observe $observe -EvidenceDir $EvidenceDir
+        $rc = Invoke-AvbHilReconciliation -LockPath $LockPath -Mode 'operator' -LockOwner $rl.Owner -PreviousLockOwner $rl.PreviousOwner -Observe $observe -EvidenceDir $attemptDir
         $inc = $rc.incident
         Write-Host ("[HIL-RECOVER] incident: {0}" -f $(if (-not $inc.present) { 'none' } elseif (-not $inc.readable) { "unreadable record $($inc.path) (SHA256 $($inc.sha256))" }
                                                      else { "$($inc.verdict) $($inc.configuration) run $($inc.runId)/$($inc.runAttempt) revision $($inc.revision) (SHA256 $($inc.sha256), left unchanged)" }))
         foreach ($why in @($rc.reasons)) { Write-Host "[HIL-RECOVER]   current condition: $why" -ForegroundColor Red }
-        Write-Host "[HIL-RECOVER] recovery record: $($rc.recordPath); evidence copy: $(Join-Path $EvidenceDir 'recovery.json')"
+        Write-Host "[HIL-RECOVER] recovery record: $($rc.recordPath); evidence copy: $(Join-Path $attemptDir 'recovery.json')"
         if ($rc.decision -eq 'READY') {
             Write-Host "[HIL-RECOVER] READY - the machine is ready for a new deployment now; the next Deploy re-establishes readiness under its own lock, archives the incident and verifies the staged package through the normal path" -ForegroundColor Green
             $code = 0
@@ -111,12 +135,11 @@ if ($Action -eq 'Recover') {
     } finally {
         $rel = Exit-AvbHilLock -Owner $rl.Owner -Path $LockPath
         if ($rel.Ok) { Write-Host "[LOCK] released" } else { Write-Host "[LOCK] NOT released: $($rel.Why)" -ForegroundColor Red; $code = 1 }
-        # The machine-local record was written while the lock was held (immutable); the release is added to the
-        # evidence copy.
-        if ($null -ne $rc) {
-            $rc['lockRelease'] = [ordered]@{ ok = [bool]$rel.Ok; why = $rel.Why; utc = [datetime]::UtcNow.ToString('o') }
-            ($rc | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'recovery.json') -Encoding UTF8
-        }
+        # Both records stay as written while the lock was held; the release outcome is its own file, then the manifest.
+        Write-AvbNewEvidenceFile -Path (Join-Path $attemptDir 'lock-release.json') -Text ([ordered]@{ ok = [bool]$rel.Ok; why = $rel.Why; utc = [datetime]::UtcNow.ToString('o')
+            recordPath = $(if ($rc) { $rc.recordPath } else { $null }) } | ConvertTo-Json -Depth 4)
+        Write-AvbAttemptManifest -Dir $attemptDir
+        Write-Host "[HIL-RECOVER] evidence written: $attemptDir (recovery.json, lock-release.json, SHA256SUMS)"
     }
     exit $code
 }

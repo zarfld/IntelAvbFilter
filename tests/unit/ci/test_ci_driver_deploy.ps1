@@ -561,10 +561,15 @@ function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$Pre
     } finally { $env:GITHUB_ACTIONS = $ghPrev; $ErrorActionPreference = $eap }
     $env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''; $env:FAKE_PROBE_JSON = ''
     $dep = $null; $dj = Join-Path $evd 'deployment.json'; if (Test-Path $dj) { $dep = Get-Content $dj -Raw | ConvertFrom-Json }
-    $rcv = $null; $rj = Join-Path $evd 'recovery.json'; if (Test-Path $rj) { $rcv = Get-Content $rj -Raw | ConvertFrom-Json }
+    # Deploy: <EvidenceDir>\recovery.json.  Recover: the attempt directory THIS run reports ("[HIL-RECOVER] evidence: <dir>").
+    $attempt = $null; $lockRel = $null
+    if ($Action -eq 'Recover' -and $out -match '\[HIL-RECOVER\] evidence: ([^\r\n]+)') { $attempt = $Matches[1].Trim() }
+    $rj = if ($attempt) { Join-Path $attempt 'recovery.json' } else { Join-Path $evd 'recovery.json' }
+    $rcv = $null; if (Test-Path $rj) { $rcv = Get-Content $rj -Raw | ConvertFrom-Json }
+    if ($attempt -and (Test-Path (Join-Path $attempt 'lock-release.json'))) { $lockRel = Get-Content (Join-Path $attempt 'lock-release.json') -Raw | ConvertFrom-Json }
     $cl = @(); if (Test-Path $calls) { $cl = @(Get-Content $calls) }
     $pc = @(); if (Test-Path $probeCalls) { $pc = @(Get-Content $probeCalls) }
-    return @{ Exit = $rc; Dep = $dep; Recovery = $rcv; Calls = $cl; ProbeCalls = $pc; Out = $out; Evd = $evd; Lock = $LockFile }
+    return @{ Exit = $rc; Dep = $dep; Recovery = $rcv; LockRelease = $lockRel; Attempt = $attempt; Calls = $cl; ProbeCalls = $pc; Out = $out; Evd = $evd; Lock = $LockFile }
 }
 # Observation document as the real probe returns it; $Over replaces individual fields.
 function New-Obs([hashtable]$Over = @{}) {
@@ -1000,13 +1005,13 @@ $dLock = Join-Path $Tmp 'disp.lock'
 $oRt = Invoke-Orch 'disp_recover' $null -LockFile $dLock -ProbeJson (New-Obs $tmoObs) -Action Recover
 $dRecs = Get-RecoveryRecords $dLock
 $dDoc = if ($dRecs.Count -eq 1) { Get-Content $dRecs[0].FullName -Raw | ConvertFrom-Json } else { $null }
-$rel = if ($oRt.Recovery) { Get-P $oRt.Recovery 'lockRelease' } else { $null }
+$rel = $oRt.LockRelease
 if ($oRt.Exit -ne 3 -or $null -eq $dDoc -or $dDoc.decision -ne 'NOT_READY' -or $dDoc.observations.bindingsHelper.disposition -ne 'terminated' -or
     $null -eq $rel -or $rel.ok -ne $true -or (Test-Path -LiteralPath $dLock) -or [IO.File]::ReadAllText("$dLock.inflight.json") -cne $incidentBody) {
     $dispFail += "recover: exit=$($oRt.Exit) records=$($dRecs.Count) helper=$(if ($dDoc) { $dDoc.observations.bindingsHelper.disposition }) lockRelease=$(if ($rel) { $rel | ConvertTo-Json -Compress }) lockLeft=$(Test-Path -LiteralPath $dLock)"
 }
 $rOk = Invoke-Orch 'disp_recover_ok' $null -LockFile $dLock -ProbeJson (New-Obs) -Action Recover
-$relOk = if ($rOk.Recovery) { Get-P $rOk.Recovery 'lockRelease' } else { $null }
+$relOk = $rOk.LockRelease
 if ($rOk.Exit -ne 0 -or $null -eq $relOk -or $relOk.ok -ne $true -or (Test-Path -LiteralPath $dLock)) { $dispFail += "recover-ready: exit=$($rOk.Exit) lockRelease=$(if ($relOk) { $relOk | ConvertTo-Json -Compress })" }
 $oDt = Invoke-Orch 'disp_deploy' $pOk -LockFile $dLock -ProbeJson (New-Obs $tmoObs)
 $depRec = Get-P $oDt.Dep 'recovery'
@@ -1019,6 +1024,46 @@ if ($oDt.Exit -ne 3 -or $null -eq $oDt.Dep -or $oDt.Dep.verdict -ne 'NEEDS_OPERA
 $dRel = Invoke-Orch 'disp_release' $null -LockFile $dLock -Action Release -EvdName 'disp_deploy'
 if ($dRel.Exit -ne 0 -or (Test-Path -LiteralPath $dLock) -or $dRel.Out -notmatch '\[LOCK\] released') { $dispFail += "deploy-release: exit=$($dRel.Exit) lockLeft=$(Test-Path -LiteralPath $dLock)" }
 tc_check 'TEST-CIDEPLOY-063-helper-and-lock-disposition-are-recorded' ($dispFail.Count -eq 0) ($dispFail -join '; ')
+
+# Repeated -Action Recover into the SAME requested evidence directory (2026-11-20: a later run overwrote the 11:43Z
+# attempt's recovery.json).  Every attempt writes its own directory (recovery.json, lock-release.json, SHA256SUMS -
+# each written once), reports where, and never replaces an earlier attempt's files or a pre-existing file.
+$shLock = Join-Path $Tmp 'shared.lock'
+[IO.File]::WriteAllText("$shLock.inflight.json", $incidentBody)
+$shEvd = Join-Path $Tmp 'ev_shared'; New-Item -ItemType Directory -Path $shEvd -Force | Out-Null
+$legacy = Join-Path $shEvd 'recovery.json'; [IO.File]::WriteAllText($legacy, '{"legacy":"evidence from an earlier layout"}'); $legacySha = (Get-FileHash -LiteralPath $legacy).Hash
+function Get-AttemptHashes([string]$Dir) { $h = [ordered]@{}; if ($Dir -and (Test-Path -LiteralPath $Dir)) { foreach ($f in @(Get-ChildItem -LiteralPath $Dir -File | Sort-Object Name)) { $h[$f.Name] = (Get-FileHash -LiteralPath $f.FullName).Hash } }; return $h }
+function Test-AttemptManifest([string]$Dir) {
+    if (-not $Dir) { return 'no attempt directory reported' }
+    $m = Join-Path $Dir 'SHA256SUMS'; if (-not (Test-Path -LiteralPath $m)) { return 'manifest missing' }
+    $bad = @(); $listed = @()
+    foreach ($l in @(Get-Content -LiteralPath $m)) { if ($l -match '^([0-9A-F]{64})\s+(\S+)') { $listed += $Matches[2]; $f = Join-Path $Dir $Matches[2]; if (-not (Test-Path -LiteralPath $f) -or (Get-FileHash -LiteralPath $f).Hash -ne $Matches[1]) { $bad += "$($Matches[2]) mismatch" } } }
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -File | Where-Object Name -ne 'SHA256SUMS')) { if ($listed -notcontains $f.Name) { $bad += "$($f.Name) not listed" } }
+    return ($bad -join ', ')
+}
+$a1 = Invoke-Orch 'sh1' $null -LockFile $shLock -ProbeJson (New-Obs) -Action Recover -EvdName 'shared'
+$a1Hashes = Get-AttemptHashes $a1.Attempt
+$a2 = Invoke-Orch 'sh2' $null -LockFile $shLock -ProbeJson (New-Obs) -Action Recover -EvdName 'shared'
+$holdSh = Enter-AvbHilLock -Kind 'local' -Label 'operator session' -Path $shLock -IsProcessAlive $alive -Sleep $noSleep
+$a3 = Invoke-Orch 'sh3' $null -LockFile $shLock -ProbeJson (New-Obs) -Action Recover -EvdName 'shared'
+$null = Exit-AvbHilLock -Owner $holdSh.Owner -Path $shLock
+$a1After = Get-AttemptHashes $a1.Attempt
+$attemptDirs = @(Get-ChildItem -LiteralPath $shEvd -Directory -Filter 'recover-*' -ErrorAction SilentlyContinue)
+$rp1 = [string](Get-P $a1.Recovery 'recordPath'); $rp2 = [string](Get-P $a2.Recovery 'recordPath')
+tc_preds 'TEST-CIDEPLOY-064-repeated-recover-keeps-every-attempt-and-reports-its-own-evidence' ([ordered]@{
+    'exits 0 / 0 / 1 (READY, READY, busy)'      = @(($a1.Exit -eq 0 -and $a2.Exit -eq 0 -and $a3.Exit -eq 1), "$($a1.Exit)/$($a2.Exit)/$($a3.Exit)")
+    'three distinct reported attempts'          = @(($a1.Attempt -and $a2.Attempt -and $a3.Attempt -and $a1.Attempt -ne $a2.Attempt -and $a2.Attempt -ne $a3.Attempt -and $a1.Attempt -ne $a3.Attempt), "'$($a1.Attempt)' '$($a2.Attempt)' '$($a3.Attempt)'")
+    'attempts inside the requested directory'   = @(($attemptDirs.Count -eq 3 -and @($a1.Attempt, $a2.Attempt, $a3.Attempt | Where-Object { $_ -and (Split-Path $_ -Parent) -eq $shEvd }).Count -eq 3), "dirs=$($attemptDirs.Count)")
+    'first attempt files unchanged'             = @(($a1Hashes.Count -eq 3 -and (($a1Hashes | ConvertTo-Json -Compress) -ceq ($a1After | ConvertTo-Json -Compress))), "before=$($a1Hashes | ConvertTo-Json -Compress) after=$($a1After | ConvertTo-Json -Compress)")
+    'first attempt manifest verifies'           = @(((Test-AttemptManifest $a1.Attempt) -eq ''), (Test-AttemptManifest $a1.Attempt))
+    'second attempt manifest verifies'          = @(((Test-AttemptManifest $a2.Attempt) -eq ''), (Test-AttemptManifest $a2.Attempt))
+    'busy attempt manifest verifies'            = @(((Test-AttemptManifest $a3.Attempt) -eq ''), (Test-AttemptManifest $a3.Attempt))
+    'each READY record names its own record'    = @(($rp1 -and $rp2 -and $rp1 -ne $rp2 -and (Test-Path -LiteralPath $rp1) -and (Test-Path -LiteralPath $rp2)), "'$rp1' '$rp2'")
+    'lock release recorded per READY attempt'   = @(((Get-P $a1.LockRelease 'ok') -eq $true -and (Get-P $a2.LockRelease 'ok') -eq $true -and $null -eq $a3.LockRelease), "$((Get-P $a1.LockRelease 'ok'))/$((Get-P $a2.LockRelease 'ok'))/$($null -ne $a3.LockRelease)")
+    'busy attempt recorded as NOT_EXECUTED_BUSY' = @(((Get-P $a3.Recovery 'decision') -eq 'NOT_EXECUTED_BUSY'), (Get-P $a3.Recovery 'decision'))
+    'pre-existing evidence file untouched'      = @(((Get-FileHash -LiteralPath $legacy).Hash -eq $legacySha), (Get-FileHash -LiteralPath $legacy).Hash)
+    'incident untouched'                        = @(([IO.File]::ReadAllText("$shLock.inflight.json") -ceq $incidentBody), ([IO.File]::ReadAllText("$shLock.inflight.json") -ceq $incidentBody))
+})
 
 # Do not impose a permanent hold after a completed previous deployment with affirmative machineOk.
 $priorSafeLock = Join-Path $Tmp 'prior_safe.lock'

@@ -857,6 +857,13 @@ $HilTestTimeoutSeconds = [ordered]@{
     # test).  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095).  No issue-level requirement fixes
     # this value; the testing contract requires every unattended process to be bounded.
     'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 450
+    # Offline deployment-orchestration contract (#493 / PR #494).  Its gate-passing cases run the real orchestrator,
+    # whose crash-evidence collection reads the real System log (4.7-5.0 s per call measured); the recovery cases add
+    # about 20 child processes.  Registered run of 5839435 (default 60 s): FAILED(TIMEOUT) after 60.4 s at case 056.
+    # Direct runs on the HIL host 2026-11-20: 74 s, 81 s, 111.8 s (62/62).  Same rule as above: 111.8 s + 48 % = 165 s
+    # -> 180 s.  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095); a hung run is detected after
+    # 180 s.  Separate from the trust-boundary timeout tracked in #476.
+    'ps1:tests/unit/ci/test_ci_driver_deploy.ps1' = 180
 }
 
 # ===========================
