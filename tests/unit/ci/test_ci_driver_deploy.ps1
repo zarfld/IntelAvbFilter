@@ -427,23 +427,79 @@ $pinCer = Join-Path $Tmp 'pin.cer'
 # The orchestrator runs as an OFFLINE child (-SkipTrustCheck seam) whatever environment this test runs in: under GitHub
 # Actions the child would otherwise inherit GITHUB_ACTIONS=true and be refused by the seam guard before any scenario
 # (CI run 40824241990: abort at CIDEPLOY-040).  -GitHubActions 'true' exercises that guard itself (CIDEPLOY-046).
-function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$PreRc = '0', [string]$Sha = $null, [string]$LockFile = (Join-Path $Tmp "$Name.lock"), [string]$GitHubActions = '') {
+# Recovery observations (#493): -ProbeJson replaces ONLY the machine observation (tools/lib/DriverDeploy.ps1
+# Get-AvbHilRecoveryObservation) through the -ProbeScript seam; the readiness decision, incident preservation and the
+# deployment gate are the real code.  Without -ProbeJson no seam is passed.
+$probeCalls = Join-Path $Tmp 'probe_calls.log'
+$fakeProbe = Join-Path $Tmp 'fake_probe.ps1'
+@"
+param([int[]]`$WatchPids)
+Add-Content -LiteralPath '$probeCalls' -Value "probe watch=`$(@(`$WatchPids) -join ',')"
+Get-Content -LiteralPath `$env:FAKE_PROBE_JSON -Raw -ErrorAction Stop | ConvertFrom-Json
+"@ | Set-Content -LiteralPath $fakeProbe -Encoding UTF8
+function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$PreRc = '0', [string]$Sha = $null, [string]$LockFile = (Join-Path $Tmp "$Name.lock"), [string]$GitHubActions = '',
+                     [string]$ProbeJson = '', [string]$Action = 'Deploy') {
     if (Test-Path $calls) { Remove-Item $calls -Force }
+    if (Test-Path $probeCalls) { Remove-Item $probeCalls -Force }
     $evd = Join-Path $Tmp "ev_$Name"
-    $env:FAKE_INSTALL_RC = $InstallRc; $env:FAKE_PRE_RC = $PreRc
+    $env:FAKE_INSTALL_RC = $InstallRc; $env:FAKE_PRE_RC = $PreRc; $env:FAKE_PROBE_JSON = $ProbeJson
     $env:GITHUB_RUN_ID = '600'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = "job-$Name"
     $ghPrev = $env:GITHUB_ACTIONS; $env:GITHUB_ACTIONS = $GitHubActions
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $orch, '-Action', $Action, '-EvidenceDir', $evd, '-LockWaitSeconds', '0', '-LockPath', $LockFile)
+    if ($Action -eq 'Deploy') {
+        $a += @('-Configuration', 'Debug', '-PackageDir', $Pkg.Dir, '-ExpectedRevision', $Rev, '-ExpectedRepository', 'zarfld/IntelAvbFilter', '-ExpectedRunId', '1234',
+                '-ExpectedRunAttempt', '1', '-ExpectedDriverSha256', $(if ($Sha) { $Sha } else { $Pkg.Sha }), '-PinnedCertificate', $pinCer,
+                '-InstallScript', $fakeInstall, '-PreFlightScript', $fakePre, '-SkipTrustCheck')
+    }
+    if ($ProbeJson) { $a += @('-ProbeScript', $fakeProbe) }
+    # PS 5.1 wraps redirected native stderr in ErrorRecords; under this script's 'Stop' preference a child's error text
+    # would abort the whole test instead of becoming that scenario's verdict.
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
-        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Action Deploy -Configuration Debug -PackageDir $Pkg.Dir -ExpectedRevision $Rev `
-                   -ExpectedRepository 'zarfld/IntelAvbFilter' -ExpectedRunId '1234' -ExpectedRunAttempt '1' -ExpectedDriverSha256 $(if ($Sha) { $Sha } else { $Pkg.Sha }) `
-                   -EvidenceDir $evd -PinnedCertificate $pinCer -LockWaitSeconds 0 -InstallScript $fakeInstall -PreFlightScript $fakePre -LockPath $LockFile -SkipTrustCheck 2>&1 | Out-String
+        $out = & powershell.exe @a 2>&1 | Out-String
         $rc = $LASTEXITCODE
-    } finally { $env:GITHUB_ACTIONS = $ghPrev }
-    $env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''
+    } finally { $env:GITHUB_ACTIONS = $ghPrev; $ErrorActionPreference = $eap }
+    $env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''; $env:FAKE_PROBE_JSON = ''
     $dep = $null; $dj = Join-Path $evd 'deployment.json'; if (Test-Path $dj) { $dep = Get-Content $dj -Raw | ConvertFrom-Json }
+    $rcv = $null; $rj = Join-Path $evd 'recovery.json'; if (Test-Path $rj) { $rcv = Get-Content $rj -Raw | ConvertFrom-Json }
     $cl = @(); if (Test-Path $calls) { $cl = @(Get-Content $calls) }
-    return @{ Exit = $rc; Dep = $dep; Calls = $cl; Out = $out; Evd = $evd; Lock = $LockFile }
+    $pc = @(); if (Test-Path $probeCalls) { $pc = @(Get-Content $probeCalls) }
+    return @{ Exit = $rc; Dep = $dep; Recovery = $rcv; Calls = $cl; ProbeCalls = $pc; Out = $out; Evd = $evd; Lock = $LockFile }
 }
+# Observation document as the real probe returns it; $Over replaces individual fields.
+function New-Obs([hashtable]$Over = @{}) {
+    $o = [ordered]@{
+        observedUtc = '2026-11-20T10:00:00.0000000Z'
+        processes = @(); processError = $null; watchedPids = @()
+        service = 'RUNNING'
+        imagePath = '\SystemRoot\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_x\IntelAvbFilter.sys'
+        imageFile = 'C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_x\IntelAvbFilter.sys'
+        imageSha256 = ('C0' * 32); imageError = $null; system32Sha256 = ('C0' * 32)
+        pendingRenames = @(); pendingError = $null
+        bindings = @([ordered]@{ name = 'Ethernet'; enabled = $true }); bindingsError = $null
+    }
+    foreach ($k in $Over.Keys) { $o[$k] = $Over[$k] }
+    $p = Join-Path $Tmp ("obs_{0}.json" -f (Get-Random))
+    [IO.File]::WriteAllText($p, ($o | ConvertTo-Json -Depth 6))
+    return $p
+}
+# The retained 2026-11-17 incident shape (run 44052954003): netcfg -u left running, no post-state.
+$incidentBody = [ordered]@{
+    schema = 'avb-hil-deployment/1'; configuration = 'Release'; verdict = 'NEEDS_OPERATOR'
+    reason = 'installation stopped in a state only a reboot or the operator can resolve (no reboot performed): netcfg -u did not finish in 180s (left running; #328 hang signature)'
+    authorized = [ordered]@{ revision = ('2' * 40); repository = 'zarfld/IntelAvbFilter'; runId = '44052954003'; runAttempt = '1'; driverSha256 = ('A9' * 32) }
+    install = [ordered]@{ outcome = 'NEEDS_OPERATOR'; exitCode = 3; reason = 'netcfg -u did not finish in 180s (left running; #328 hang signature)'
+                          steps = @([ordered]@{ step = 'etw-unregister'; ok = $true; detail = 'completed=True rc=0' },
+                                    [ordered]@{ step = 'netcfg-uninstall'; ok = $false; detail = 'completed=False rc= still running after 180s (PID 16216, left running)' })
+                          postState = $null }
+    machineOk = $false; machineOkReason = "deployment verdict 'NEEDS_OPERATOR' needs the operator or left the machine in an unknown state"
+} | ConvertTo-Json -Depth 6
+$liveNetcfg = @([ordered]@{ pid = 16216; name = 'netcfg.exe'; startedUtc = '2026-11-17T10:31:40.0000000Z'; commandLine = 'netcfg.exe -u MS_IntelAvbFilter'; why = 'driver-installation tool' })
+# StrictMode-safe property read: $null for an absent property or object (never a throw that hides the real verdict).
+function Get-P($o, [string]$n) { if ($null -ne $o -and $o.PSObject.Properties[$n]) { $o.PSObject.Properties[$n].Value } else { $null } }
+# Unary comma: an empty result stays an empty array (StrictMode: $null.Count would throw).
+function Get-Archives([string]$Lock) { return ,@(Get-ChildItem -Path (Split-Path $Lock) -Filter ((Split-Path $Lock -Leaf) + '.incident-*.json') -ErrorAction SilentlyContinue) }
+function Get-RecoveryRecords([string]$Lock) { return ,@(Get-ChildItem -Path (Split-Path $Lock) -Filter ((Split-Path $Lock -Leaf) + '.recovery-*.json') -ErrorAction SilentlyContinue) }
 # The pinned certificate: a throw-away self-signed certificate created in memory (never in a store) and exported
 # public-only; the synthetic package is "signed" by its thumbprint through the manifest signer injection above, so
 # the orchestrator (real signature reader) is exercised with -SkipTrustCheck plus a matching-thumbprint check below.
@@ -471,20 +527,24 @@ tc_check 'TEST-CIDEPLOY-046-skiptrustcheck-seam-is-refused-under-github-actions-
     ("exit={0} deployment.json={1} calls={2} out={3}" -f $oSeam.Exit, ($null -ne $oSeam.Dep), ($oSeam.Calls -join '|'), (($oSeam.Out -split "`n" | Select-Object -Last 3) -join ' | '))
 
 # A job lost during installation (runner connection interrupted by netcfg, #328): its lock and IN_FLIGHT record stay
-# on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.
+# on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.  #493: the record
+# alone no longer decides - the CURRENT machine state does.  Here the lost job's netcfg is still running (genuinely
+# unrecovered), so the deployment must still block and preserve everything.
 $lostLock = Join-Path $Tmp 'lost.lock'
 [System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil'; configuration = 'Debug'; runnerWorkerPid = 999999; runnerWorkerStartedUtc = '2026-10-28T23:52:19.0000000Z'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
 [System.IO.File]::WriteAllText("$lostLock.inflight.json", ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started' } | ConvertTo-Json))
-$oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock
+$oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock -ProbeJson (New-Obs @{ processes = $liveNetcfg })
 $after = Get-Content -LiteralPath "$lostLock.inflight.json" -Raw | ConvertFrom-Json
 tc_check 'TEST-CIDEPLOY-044-lost-job-in-flight-record-blocks-new-install-and-is-preserved' (
     $null -ne $oLost.Dep -and $oLost.Exit -eq 3 -and $oLost.Dep.verdict -eq 'NEEDS_OPERATOR' -and
     $oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT' -and $oLost.Dep.lock.previousOwner.owner.runId -eq '590' -and
     $oLost.Dep.lock.previousOwner.owner.runnerWorkerPid -eq 999999 -and $after.verdict -eq 'IN_FLIGHT' -and
-    $oLost.Calls.Count -eq 0 -and $oLost.Dep.machineOk -eq $false
-) ("exit={0} current={1} prev={2} persisted={3} calls={4}" -f $oLost.Exit, $oLost.Dep.verdict, $oLost.Dep.previousDeployment.verdict, $after.verdict, $oLost.Calls.Count)
+    $oLost.Calls.Count -eq 0 -and $oLost.Dep.machineOk -eq $false -and $oLost.ProbeCalls.Count -eq 1 -and
+    $oLost.Dep.reason -match 'netcfg\.exe' -and (Get-Archives $lostLock).Count -eq 0
+) ("exit={0} current={1} prev={2} persisted={3} calls={4} probe={5} archives={6} reason={7}" -f $oLost.Exit, $(if ($oLost.Dep) { $oLost.Dep.verdict }), (Get-P (Get-P $oLost.Dep 'previousDeployment') 'verdict'), $after.verdict, $oLost.Calls.Count, $oLost.ProbeCalls.Count, (Get-Archives $lostLock).Count, $(if ($oLost.Dep) { $oLost.Dep.reason }))
 
-# A previous unsafe/unreadable record remains untouched and blocks deployment before package verification.
+# A previous unsafe/unreadable record remains untouched and blocks deployment before package verification while the
+# machine is genuinely unrecovered (#493: a live netcfg); the recovery attempt is recorded separately.
 $unsafePrevious = @(
     @{ Name = 'prior_needs_operator'; Body = '{"schema":"avb-hil-deployment/1","configuration":"Debug","verdict":"NEEDS_OPERATOR","machineOk":false,"reason":"native installer still running"}' },
     @{ Name = 'prior_unreadable'; Body = '{ invalid json' }
@@ -493,14 +553,217 @@ $unsafeFailures = @()
 foreach ($case in $unsafePrevious) {
     $lpPrevious = Join-Path $Tmp "$($case.Name).lock"
     [IO.File]::WriteAllText("$lpPrevious.inflight.json", $case.Body)
-    $o = Invoke-Orch $case.Name $pOk -LockFile $lpPrevious
+    $o = Invoke-Orch $case.Name $pOk -LockFile $lpPrevious -ProbeJson (New-Obs @{ processes = $liveNetcfg })
     $persisted = [IO.File]::ReadAllText("$lpPrevious.inflight.json")
-    if ($o.Exit -ne 3 -or $o.Dep.verdict -ne 'NEEDS_OPERATOR' -or $o.Calls.Count -ne 0 -or
-        $persisted -cne $case.Body -or $o.Dep.machineOk -ne $false) {
-        $unsafeFailures += "$($case.Name): exit=$($o.Exit) verdict=$($o.Dep.verdict) calls=$($o.Calls.Count) preserved=$($persisted -ceq $case.Body)"
+    $recs = Get-RecoveryRecords $lpPrevious
+    if ($o.Exit -ne 3 -or $null -eq $o.Dep -or $o.Dep.verdict -ne 'NEEDS_OPERATOR' -or $o.Calls.Count -ne 0 -or
+        $persisted -cne $case.Body -or $o.Dep.machineOk -ne $false -or (Get-Archives $lpPrevious).Count -ne 0 -or
+        $recs.Count -ne 1 -or (Get-Content $recs[0].FullName -Raw | ConvertFrom-Json).decision -ne 'NOT_READY') {
+        $unsafeFailures += "$($case.Name): exit=$($o.Exit) verdict=$(if ($o.Dep) { $o.Dep.verdict }) calls=$($o.Calls.Count) preserved=$($persisted -ceq $case.Body) archives=$((Get-Archives $lpPrevious).Count) recoveryRecords=$($recs.Count)"
     }
 }
 tc_check 'TEST-CIDEPLOY-044a-needs-operator-and-unreadable-predecessors-block-without-erasing-evidence' ($unsafeFailures.Count -eq 0) ($unsafeFailures -join '; ')
+
+# #493: the retained incident (netcfg -u left running, run 44052954003) no longer vetoes forever.  The deployment
+# re-establishes readiness under ITS OWN lock from current observations; when ready it preserves the incident
+# byte-for-byte, records the recovery separately and continues to the normal package verification (here: the
+# synthetic package is unsigned, so the normal path rejects it - recovery never produces DEPLOYED by itself).
+$recLock = Join-Path $Tmp 'recovered.lock'
+[IO.File]::WriteAllText("$recLock.inflight.json", $incidentBody)
+$incSha = (Get-FileHash -LiteralPath "$recLock.inflight.json" -Algorithm SHA256).Hash
+$oRec = Invoke-Orch 'recovered' $pOk -LockFile $recLock -ProbeJson (New-Obs)
+$recArch = Get-Archives $recLock; $recRecs = Get-RecoveryRecords $recLock
+$recDoc = if ($recRecs.Count -eq 1) { Get-Content $recRecs[0].FullName -Raw | ConvertFrom-Json } else { $null }
+$depRecovery = Get-P $oRec.Dep 'recovery'
+tc_check 'TEST-CIDEPLOY-049-verified-recovery-preserves-the-incident-and-reaches-normal-package-verification' (
+    $null -ne $oRec.Dep -and $oRec.Exit -eq 1 -and $oRec.Dep.verdict -eq 'REJECTED_PACKAGE' -and $oRec.Calls.Count -eq 0 -and
+    $oRec.ProbeCalls.Count -eq 1 -and $oRec.ProbeCalls[0] -eq 'probe watch=16216' -and
+    (Get-P (Get-P $oRec.Dep 'previousDeployment') 'verdict') -eq 'NEEDS_OPERATOR' -and
+    $null -ne $depRecovery -and $depRecovery.decision -eq 'READY' -and $depRecovery.mode -eq 'automatic' -and
+    $recArch.Count -eq 1 -and (Get-FileHash -LiteralPath $recArch[0].FullName -Algorithm SHA256).Hash -eq $incSha -and
+    $null -ne $recDoc -and $recDoc.schema -eq 'avb-hil-recovery/1' -and $recDoc.decision -eq 'READY' -and
+    $recDoc.incident.sha256 -eq $incSha -and $recDoc.incident.verdict -eq 'NEEDS_OPERATOR' -and $recDoc.incident.runId -eq '44052954003' -and
+    $recDoc.incident.archivePath -eq $recArch[0].FullName -and $null -ne $oRec.Recovery -and $oRec.Recovery.decision -eq 'READY'
+) ("exit={0} verdict={1} calls={2} probe={3} recovery={4} archives={5} records={6} archiveSha={7}" -f $oRec.Exit, $(if ($oRec.Dep) { $oRec.Dep.verdict }), $oRec.Calls.Count, ($oRec.ProbeCalls -join '|'),
+    $(if ($depRecovery) { $depRecovery.decision }), $recArch.Count, $recRecs.Count, $(if ($recArch.Count -eq 1) { (Get-FileHash -LiteralPath $recArch[0].FullName).Hash -eq $incSha }))
+
+# #493 negative cases: a CURRENT condition keeps the machine unrecovered.  Each must block before package verification,
+# leave the incident byte-for-byte in place (no archive), record a NOT_READY recovery attempt and name the condition.
+$notReadyCases = [ordered]@{
+    'TEST-CIDEPLOY-051-recorded-hung-netcfg-still-alive-blocks-and-is-named' = @{
+        Obs = @{ processes = $liveNetcfg; watchedPids = @([ordered]@{ pid = 16216; alive = $true; name = 'netcfg.exe' }) }; Want = 'netcfg\.exe.*16216' }
+    'TEST-CIDEPLOY-052-surviving-installer-process-blocks-and-is-named' = @{
+        Obs = @{ processes = @([ordered]@{ pid = 5150; name = 'powershell.exe'; startedUtc = '2026-11-20T09:45:36.0000000Z'; commandLine = 'powershell.exe -NoProfile -File C:\r\tools\setup\Install-Driver.ps1 -Reinstall -NonInteractive'; why = 'deployment script' }) }; Want = 'powershell\.exe.*5150.*Install-Driver\.ps1' }
+    'TEST-CIDEPLOY-053-pending-driver-replacement-blocks-and-is-named' = @{
+        Obs = @{ pendingRenames = @('\??\C:\Windows\System32\drivers\IntelAvbFilter.sys') }; Want = 'replacement.*IntelAvbFilter\.sys' }
+}
+foreach ($tc in $notReadyCases.Keys) {
+    $c = $notReadyCases[$tc]
+    $lk = Join-Path $Tmp ("nr_{0}.lock" -f $tc.Substring(14, 3))
+    [IO.File]::WriteAllText("$lk.inflight.json", $incidentBody)
+    $o = Invoke-Orch ("nr_{0}" -f $tc.Substring(14, 3)) $pOk -LockFile $lk -ProbeJson (New-Obs $c.Obs)
+    $persisted = [IO.File]::ReadAllText("$lk.inflight.json")
+    $recs = Get-RecoveryRecords $lk
+    $doc = if ($recs.Count -eq 1) { Get-Content $recs[0].FullName -Raw | ConvertFrom-Json } else { $null }
+    $reasons = if ($doc) { (@($doc.reasons) -join ' | ') } else { '' }
+    tc_check $tc (
+        $o.Exit -eq 3 -and $null -ne $o.Dep -and $o.Dep.verdict -eq 'NEEDS_OPERATOR' -and $o.Calls.Count -eq 0 -and $o.Dep.machineOk -eq $false -and
+        $persisted -ceq $incidentBody -and (Get-Archives $lk).Count -eq 0 -and $null -ne $doc -and $doc.decision -eq 'NOT_READY' -and
+        $reasons -match $c.Want -and $o.Dep.reason -match $c.Want -and $null -ne $o.Recovery -and $o.Recovery.decision -eq 'NOT_READY'
+    ) ("exit={0} verdict={1} calls={2} preserved={3} archives={4} records={5} decision={6} reasons={7}" -f $o.Exit, $(if ($o.Dep) { $o.Dep.verdict }), $o.Calls.Count,
+        ($persisted -ceq $incidentBody), (Get-Archives $lk).Count, $recs.Count, $(if ($doc) { $doc.decision }), $reasons)
+}
+
+# Unavailable observations, incomplete installed-driver identity and failed verification never establish readiness
+# (function level: the real decision over the observation document).  A reused PID of the incident is not a conflict.
+if (Get-Command Get-AvbHilReadiness -ErrorAction SilentlyContinue) {
+    $rd = [ordered]@{
+        'ready baseline'                          = @(@{}, 'READY', '')
+        'driver absent (service NOT_FOUND)'       = @(@{ service = 'NOT_FOUND'; imagePath = $null; imageFile = $null; imageSha256 = $null }, 'READY', '')
+        'incident PID reused by another image'    = @(@{ watchedPids = @([ordered]@{ pid = 16216; alive = $true; name = 'svchost.exe' }) }, 'READY', '')
+        'process list unavailable'                = @(@{ processError = 'Zugriff verweigert' }, 'NOT_READY', 'process')
+        'service state unknown'                   = @(@{ service = 'UNKNOWN:ACCESS_DENIED (Win32 error 5)' }, 'NOT_READY', 'service')
+        'service STOP_PENDING'                    = @(@{ service = 'STOP_PENDING' }, 'NOT_READY', 'service')
+        'image identity unavailable'              = @(@{ imageSha256 = $null; imageError = "image file 'C:\x\IntelAvbFilter.sys' not found" }, 'NOT_READY', 'identity')
+        'image identity missing without error'    = @(@{ service = 'STOPPED'; imageSha256 = $null }, 'NOT_READY', 'identity')
+        'pending-rename query failed'             = @(@{ pendingError = 'registry read failed' }, 'NOT_READY', 'replacement')
+        'binding query failed'                    = @(@{ bindingsError = 'INetCfg busy' }, 'NOT_READY', 'binding')
+    }
+    $bad = @(foreach ($k in $rd.Keys) {
+        $obs = Get-Content -LiteralPath (New-Obs $rd[$k][0]) -Raw | ConvertFrom-Json
+        $r = Get-AvbHilReadiness -Observation $obs
+        $txt = (@($r.Reasons) -join ' | ')
+        if ($r.Decision -ne $rd[$k][1] -or ($rd[$k][1] -eq 'NOT_READY' -and $txt -notmatch $rd[$k][2]) -or ($rd[$k][1] -eq 'READY' -and @($r.Reasons).Count -ne 0)) { "$k -> $($r.Decision) [$txt]" }
+    })
+    $rNull = Get-AvbHilReadiness -Observation $null
+    if ($rNull.Decision -ne 'NOT_READY') { $bad += "no observation -> $($rNull.Decision)" }
+    tc_check 'TEST-CIDEPLOY-054-unavailable-observation-or-incomplete-identity-never-establishes-readiness' ($bad.Count -eq 0) ($bad -join '; ')
+} else {
+    tc_fail 'TEST-CIDEPLOY-054-unavailable-observation-or-incomplete-identity-never-establishes-readiness' 'Get-AvbHilReadiness missing in tools/lib/DriverDeploy.ps1'
+}
+# Failed verification at orchestration level: the observation itself fails (probe throws) -> blocked, preserved, named.
+$failLock = Join-Path $Tmp 'probefail.lock'
+[IO.File]::WriteAllText("$failLock.inflight.json", $incidentBody)
+$oPF = Invoke-Orch 'probefail' $pOk -LockFile $failLock -ProbeJson (Join-Path $Tmp 'no-such-observation.json')
+$pfRecs = Get-RecoveryRecords $failLock
+$pfDoc = if ($pfRecs.Count -eq 1) { Get-Content $pfRecs[0].FullName -Raw | ConvertFrom-Json } else { $null }
+tc_check 'TEST-CIDEPLOY-054a-failed-observation-blocks-and-preserves-the-incident' (
+    $oPF.Exit -eq 3 -and $null -ne $oPF.Dep -and $oPF.Dep.verdict -eq 'NEEDS_OPERATOR' -and $oPF.Calls.Count -eq 0 -and
+    [IO.File]::ReadAllText("$failLock.inflight.json") -ceq $incidentBody -and (Get-Archives $failLock).Count -eq 0 -and
+    $null -ne $pfDoc -and $pfDoc.decision -eq 'NOT_READY' -and ((@($pfDoc.reasons) -join ' ') -match 'observation')
+) ("exit={0} verdict={1} archives={2} records={3} reasons={4}" -f $oPF.Exit, $(if ($oPF.Dep) { $oPF.Dep.verdict }), (Get-Archives $failLock).Count, $pfRecs.Count, $(if ($pfDoc) { @($pfDoc.reasons) -join ' | ' }))
+
+# Repeated recovery: the operator interface (-Action Recover) observes and records under the lock but never rewrites the
+# incident; each later deployment re-establishes readiness under its own lock.  A second, later incident is preserved
+# separately and the first archive stays byte-for-byte unchanged.
+$repLock = Join-Path $Tmp 'repeat.lock'
+[IO.File]::WriteAllText("$repLock.inflight.json", $incidentBody)
+$incSha1 = (Get-FileHash -LiteralPath "$repLock.inflight.json").Hash
+$r1 = Invoke-Orch 'rep_op1' $null -LockFile $repLock -ProbeJson (New-Obs) -Action Recover
+$r2 = Invoke-Orch 'rep_op2' $null -LockFile $repLock -ProbeJson (New-Obs) -Action Recover
+$afterOps = [IO.File]::ReadAllText("$repLock.inflight.json")
+$opRecs = (Get-RecoveryRecords $repLock).Count; $opArch = (Get-Archives $repLock).Count; $lockAfterOps = Test-Path -LiteralPath $repLock
+$d1 = Invoke-Orch 'rep_dep1' $pOk -LockFile $repLock -ProbeJson (New-Obs)
+$arch1 = Get-Archives $repLock
+$incident2 = ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started; second incident'; machineOk = $false } | ConvertTo-Json)
+Start-Sleep -Milliseconds 50
+[IO.File]::WriteAllText("$repLock.inflight.json", $incident2)
+$incSha2 = (Get-FileHash -LiteralPath "$repLock.inflight.json").Hash
+$d2 = Invoke-Orch 'rep_dep2' $pOk -LockFile $repLock -ProbeJson (New-Obs)
+$arch2 = Get-Archives $repLock; $arch2 = @($arch2 | Sort-Object Name)
+$archShas = @($arch2 | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName).Hash })
+tc_check 'TEST-CIDEPLOY-050-repeated-recovery-keeps-every-incident-and-never-rewrites-an-archive' (
+    $r1.Exit -eq 0 -and $r2.Exit -eq 0 -and $null -ne $r1.Recovery -and $r1.Recovery.decision -eq 'READY' -and $r1.Recovery.mode -eq 'operator' -and
+    $afterOps -ceq $incidentBody -and $opRecs -eq 2 -and $opArch -eq 0 -and -not $lockAfterOps -and
+    $null -ne $d1.Dep -and $d1.Dep.verdict -eq 'REJECTED_PACKAGE' -and $arch1.Count -eq 1 -and
+    $null -ne $d2.Dep -and $d2.Dep.verdict -eq 'REJECTED_PACKAGE' -and $arch2.Count -eq 2 -and
+    (Get-FileHash -LiteralPath $arch1[0].FullName).Hash -eq $incSha1 -and ($archShas -contains $incSha1) -and ($archShas -contains $incSha2) -and
+    (Get-RecoveryRecords $repLock).Count -eq 4
+) ("op exits={0},{1} opDecision={2} inflightKept={3} opRecords={4} opArchives={5} lockLeft={6} dep1={7} dep2={8} archives={9} records={10}" -f $r1.Exit, $r2.Exit,
+    $(if ($r1.Recovery) { $r1.Recovery.decision }), ($afterOps -ceq $incidentBody), $opRecs, $opArch, $lockAfterOps, $(if ($d1.Dep) { $d1.Dep.verdict }), $(if ($d2.Dep) { $d2.Dep.verdict }), $arch2.Count, (Get-RecoveryRecords $repLock).Count)
+
+# The operator interface: NOT_READY exits 3 and names the condition; a busy machine is not observed and writes nothing
+# machine-local; it is refused under GitHub Actions (CI reconciles inside Deploy), and the observation seam is refused
+# there before anything runs.
+$opFail = @()
+$opLock = Join-Path $Tmp 'op.lock'
+[IO.File]::WriteAllText("$opLock.inflight.json", $incidentBody)
+$oNr = Invoke-Orch 'op_notready' $null -LockFile $opLock -ProbeJson (New-Obs @{ processes = $liveNetcfg }) -Action Recover
+if ($oNr.Exit -ne 3 -or $null -eq $oNr.Recovery -or $oNr.Recovery.decision -ne 'NOT_READY' -or ((@($oNr.Recovery.reasons) -join ' ') -notmatch 'netcfg\.exe') -or
+    [IO.File]::ReadAllText("$opLock.inflight.json") -cne $incidentBody -or (Test-Path -LiteralPath $opLock)) {
+    $opFail += "not-ready: exit=$($oNr.Exit) decision=$(if ($oNr.Recovery) { $oNr.Recovery.decision }) lockLeft=$(Test-Path -LiteralPath $opLock)"
+}
+$opBusy = Join-Path $Tmp 'opbusy.lock'
+[IO.File]::WriteAllText("$opBusy.inflight.json", $incidentBody)
+$holdOp = Enter-AvbHilLock -Kind 'local' -Label 'operator session' -Path $opBusy -IsProcessAlive $alive -Sleep $noSleep
+$oOb = Invoke-Orch 'op_busy' $null -LockFile $opBusy -ProbeJson (New-Obs) -Action Recover
+$null = Exit-AvbHilLock -Owner $holdOp.Owner -Path $opBusy
+if ($oOb.Exit -ne 1 -or $oOb.Out -notmatch 'NOT_EXECUTED_BUSY' -or $oOb.ProbeCalls.Count -ne 0 -or (Get-RecoveryRecords $opBusy).Count -ne 0 -or
+    [IO.File]::ReadAllText("$opBusy.inflight.json") -cne $incidentBody -or $null -eq $oOb.Recovery -or $oOb.Recovery.decision -ne 'NOT_EXECUTED_BUSY') {
+    $opFail += "busy: exit=$($oOb.Exit) probe=$($oOb.ProbeCalls.Count) records=$((Get-RecoveryRecords $opBusy).Count) evidence=$(if ($oOb.Recovery) { $oOb.Recovery.decision })"
+}
+$oGh = Invoke-Orch 'op_gha' $null -LockFile $opLock -Action Recover -GitHubActions 'true'
+if ($oGh.Exit -ne 1 -or $oGh.Out -notmatch 'operator interface' -or (Get-RecoveryRecords $opLock).Count -ne 1) {
+    $opFail += "gha: exit=$($oGh.Exit) records=$((Get-RecoveryRecords $opLock).Count) out=$(($oGh.Out -replace '\s+', ' ').Trim())"
+}
+$oGhSeam = Invoke-Orch 'op_gha_seam' $null -LockFile $opLock -ProbeJson (New-Obs) -Action Recover -GitHubActions 'true'
+if ($oGhSeam.Exit -ne 1 -or $oGhSeam.ProbeCalls.Count -ne 0 -or $oGhSeam.Out -notmatch 'ProbeScript is an offline-test seam') {
+    $opFail += "gha-seam: exit=$($oGhSeam.Exit) probe=$($oGhSeam.ProbeCalls.Count) out=$(($oGhSeam.Out -replace '\s+', ' ').Trim())"
+}
+tc_check 'TEST-CIDEPLOY-055-operator-recover-reports-conditions-respects-the-lock-and-is-refused-in-ci' ($opFail.Count -eq 0) ($opFail -join '; ')
+
+# What counts as a surviving deployment operation (real classifier) and what the incident record yields (real parser).
+if ((Get-Command Test-AvbHilConflictProcess -ErrorAction SilentlyContinue) -and (Get-Command Get-AvbHilIncident -ErrorAction SilentlyContinue)) {
+    $cls = @(
+        @('netcfg.exe', 'netcfg.exe -u MS_IntelAvbFilter', $true), @('NETCFG.EXE', $null, $true), @('pnputil.exe', 'pnputil /enum-drivers', $true),
+        @('wevtutil.exe', 'wevtutil um x.man', $true),
+        @('powershell.exe', 'powershell.exe -NoProfile -File C:\r\tools\setup\Install-Driver.ps1 -Reinstall', $true),
+        @('powershell.exe', '"powershell.exe" -File C:\r\tools\setup\Install-Driver-Elevated.ps1 -Configuration Debug', $true),
+        @('pwsh.exe', 'pwsh -File C:\r\tools\ci\Invoke-HilDeployment.ps1 -Action Deploy', $true),
+        @('powershell.exe', $null, $true),
+        @('powershell.exe', 'powershell.exe -File C:\r\tools\test\Run-Tests-CI.ps1', $false),
+        @('Code.exe', 'Code.exe C:\r\tools\setup\Install-Driver.ps1', $false), @('notepad.exe', 'notepad.exe', $false)
+    )
+    $clsBad = @(foreach ($c in $cls) { $w = Test-AvbHilConflictProcess -Name $c[0] -CommandLine $c[1]; if ([bool]$w -ne $c[2]) { "$($c[0]) '$($c[1])' -> '$w'" } })
+    $incP = Join-Path $Tmp 'parse.lock.inflight.json'; [IO.File]::WriteAllText($incP, $incidentBody)
+    $i1 = Get-AvbHilIncident -Path $incP
+    if (-not $i1.present -or -not $i1.readable -or $i1.verdict -ne 'NEEDS_OPERATOR' -or $i1.runId -ne '44052954003' -or (@($i1.hungPids) -join ',') -ne '16216' -or
+        $i1.sha256 -ne (Get-FileHash -LiteralPath $incP).Hash -or $i1.configuration -ne 'Release') { $clsBad += "incident parse: $(($i1 | ConvertTo-Json -Compress))" }
+    [IO.File]::WriteAllText($incP, '{ invalid json'); $i2 = Get-AvbHilIncident -Path $incP
+    if (-not $i2.present -or $i2.readable -or -not $i2.sha256 -or @($i2.hungPids).Count -ne 0) { $clsBad += "unreadable parse: $(($i2 | ConvertTo-Json -Compress))" }
+    $i3 = Get-AvbHilIncident -Path (Join-Path $Tmp 'absent.inflight.json')
+    if ($i3.present) { $clsBad += 'absent record reported present' }
+    tc_check 'TEST-CIDEPLOY-056-conflicting-operations-and-incident-identity-are-classified' ($clsBad.Count -eq 0) ($clsBad -join '; ')
+} else {
+    tc_fail 'TEST-CIDEPLOY-056-conflicting-operations-and-incident-identity-are-classified' 'Test-AvbHilConflictProcess / Get-AvbHilIncident missing in tools/lib/DriverDeploy.ps1'
+}
+
+# LOCAL SMOKE (structure only, read-only): the real probe returns every observation field on this host and never lists
+# itself.  Its values are host-dependent and are NOT asserted; hardware readiness is verified only on the HIL runner.
+if (Get-Command Get-AvbHilRecoveryObservation -ErrorAction SilentlyContinue) {
+    $real = Get-AvbHilRecoveryObservation -WatchPids @($PID)
+    $keys = 'observedUtc', 'processes', 'processError', 'watchedPids', 'service', 'imagePath', 'imageFile', 'imageSha256', 'imageError', 'system32Sha256', 'pendingRenames', 'pendingError', 'bindings', 'bindingsError'
+    $missingKeys = @($keys | Where-Object { -not $real.Contains($_) })
+    $selfListed = @(@($real.processes) | Where-Object { $_ -and [int]$_.pid -eq $PID }).Count
+    $watchedSelf = @(@($real.watchedPids) | Where-Object { $_ -and [int]$_.pid -eq $PID -and $_.alive }).Count
+    tc_check 'TEST-CIDEPLOY-057-LOCALSMOKE-real-observation-probe-returns-every-field-and-excludes-itself' (
+        $missingKeys.Count -eq 0 -and $selfListed -eq 0 -and $watchedSelf -eq 1
+    ) ("missing={0} selfListed={1} watchedSelf={2}" -f ($missingKeys -join ','), $selfListed, $watchedSelf)
+} else {
+    tc_fail 'TEST-CIDEPLOY-057-LOCALSMOKE-real-observation-probe-returns-every-field-and-excludes-itself' 'Get-AvbHilRecoveryObservation missing in tools/lib/DriverDeploy.ps1'
+}
+
+# STATIC: reconciliation runs under the deployment's own lock, before crash evidence and package verification (no
+# unlocked gap), and recovery can never produce DEPLOYED (only the verified installation path does).
+$orchSrc = [IO.File]::ReadAllText($orch)
+$iL = $orchSrc.IndexOf('Enter-AvbHilLock -Kind ''ci'''); $iR = $orchSrc.IndexOf('Invoke-AvbHilReconciliation -Mode ''automatic'''); $iC = $orchSrc.IndexOf('Get-AvbCrashEvidence -Source'); $iP = $orchSrc.IndexOf('Test-AvbDriverPackage -PackageDir')
+$ddAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\lib\DriverDeploy.ps1'), [ref]$null, [ref]$null)
+$recFns = @($ddAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -match '^(Invoke-AvbHilReconciliation|Get-AvbHilReadiness|Get-AvbHilRecoveryObservation|Get-AvbHilIncident)$' }, $true))
+$recDeployed = @($recFns | Where-Object { $_.Extent.Text -match 'DEPLOYED' })
+tc_check 'TEST-CIDEPLOY-058-STATIC-reconciliation-is-locked-precedes-package-checks-and-never-yields-deployed' (
+    $iL -gt 0 -and $iR -gt $iL -and $iC -gt $iR -and $iP -gt $iC -and $recFns.Count -eq 4 -and $recDeployed.Count -eq 0 -and
+    ([regex]::Matches($orchSrc, "Complete-Deployment 'DEPLOYED'")).Count -eq 1
+) ("lock@{0} reconcile@{1} crash@{2} pkg@{3} recoveryFunctions={4} mentionDEPLOYED={5}" -f $iL, $iR, $iC, $iP, $recFns.Count, (($recDeployed | ForEach-Object Name) -join ','))
 
 # Do not impose a permanent hold after a completed previous deployment with affirmative machineOk.
 $priorSafeLock = Join-Path $Tmp 'prior_safe.lock'

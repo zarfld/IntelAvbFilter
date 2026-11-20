@@ -10,18 +10,30 @@
 #                      service RUNNING, device node)
 #                    -> <EvidenceDir>\deployment.json; exit 0 only for DEPLOYED.
 #   -Action Release  releases the lock taken by this CI job (always() step).
+#   -Action Recover  OPERATOR interface (refused under GitHub Actions), elevated:
+#                      .\tools\ci\Invoke-HilDeployment.ps1 -Action Recover -EvidenceDir <new-evidence-directory>
+#                    takes the machine lock (no wait unless -LockWaitSeconds), observes the CURRENT machine state and
+#                    records the readiness decision (<lock>.recovery-<utc>.json + <EvidenceDir>\recovery.json); it never
+#                    rewrites the incident and never installs anything.  Exit 0 READY | 3 NOT_READY | 1 busy/refused.
 #
 # Local evidence that survives a lost job: before the installer runs (netcfg can interrupt the runner's network
 # connection, #328), the record so far is written next to the lock (<lock>.inflight.json) and replaced by the final
 # record afterwards.  RUNNER_TEMP is emptied when the next job starts; this file is not.  The next deployment attaches
 # it as previousDeployment, together with the stale-lock owner and the crash evidence.
+# A previous record that is not machineOk (NEEDS_OPERATOR, IN_FLIGHT, unreadable) is history, not the current state
+# (#493): Deploy reconciles it under its OWN lock - held on through installation and verification, so there is no
+# unlocked gap - from current observations (tools/lib/DriverDeploy.ps1 Invoke-AvbHilReconciliation: no surviving
+# netcfg/pnputil/wevtutil or deployment script, service settled, installed driver identity known, no pending
+# replacement, bindings readable).  READY: the incident is archived byte-for-byte (<lock>.incident-<utc>.json) and the
+# staged package goes through the normal verification and installation.  Otherwise NEEDS_OPERATOR names the current
+# condition and the incident stays untouched.
 # Verdicts: DEPLOYED | NOT_EXECUTED_BUSY | REJECTED_PACKAGE | DEPLOY_FAILED | NEEDS_OPERATOR.  A deployment is
 # "pre-deployment absent driver" tolerant: an absent or different installed driver is replaced, never a failure.
 # The running image is not hashed: after deployment "loaded image == installed file" rests on the observed
 # unload (service released) and reload (RUNNING) during this deployment - disclosed in the record.
 
 param(
-    [ValidateSet('Deploy', 'Release')]
+    [ValidateSet('Deploy', 'Release', 'Recover')]
     [string]$Action = 'Deploy',
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration,
@@ -39,11 +51,13 @@ param(
     [string]$InstallScript = '',
     [string]$PreFlightScript = '',
     [string]$LockPath = '',
+    [string]$ProbeScript = '', # offline tests only: replaces the machine observation of the recovery reconciliation
     [switch]$SkipTrustCheck   # offline tests only: synthetic packages are not signed
 )
 
 $ErrorActionPreference = 'Stop'
 if ($SkipTrustCheck -and $env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-DEPLOY] -SkipTrustCheck is an offline-test seam and is refused under GitHub Actions" -ForegroundColor Red; exit 1 }
+if ($ProbeScript -and $env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-DEPLOY] -ProbeScript is an offline-test seam and is refused under GitHub Actions" -ForegroundColor Red; exit 1 }
 $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 foreach ($lib in 'NativeExit.ps1', 'HilLock.ps1', 'HilMachineHealth.ps1', 'DriverPackage.ps1', 'DriverDeploy.ps1') { . (Join-Path $RepoRoot "tools\lib\$lib") }
 if (-not $InstallScript)     { $InstallScript = Join-Path $RepoRoot 'tools\setup\Install-Driver.ps1' }
@@ -63,13 +77,51 @@ if ($Action -eq 'Release') {
     exit 1
 }
 
+# Machine observation for the recovery reconciliation: the real read-only probe, or the offline seam.  No
+# GetNewClosure(): it re-validates every captured variable and fails on the unbound ValidateSet $Configuration (Recover).
+$observe = if ($ProbeScript) { { param([int[]]$WatchPids) & $script:ProbeScript -WatchPids $WatchPids } }
+           else { { param([int[]]$WatchPids) Get-AvbHilRecoveryObservation -WatchPids $WatchPids } }
+
+if ($Action -eq 'Recover') {
+    if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-RECOVER] -Action Recover is the operator interface and is refused under GitHub Actions; CI reconciles inside -Action Deploy under its own lock" -ForegroundColor Red; exit 1 }
+    $wait = if ($PSBoundParameters.ContainsKey('LockWaitSeconds')) { $LockWaitSeconds } else { 0 }
+    $rl = Enter-AvbHilLock -Kind 'local' -Label 'hil recover' -Path $LockPath -WaitSeconds $wait
+    if (-not $rl.Ok) {
+        ([ordered]@{ schema = 'avb-hil-recovery/1'; mode = 'operator'; host = $env:COMPUTERNAME; decision = 'NOT_EXECUTED_BUSY'
+                     reasons = @("HIL machine busy: $($rl.Why)"); recordPath = $null } | ConvertTo-Json -Depth 6) |
+            Set-Content -LiteralPath (Join-Path $EvidenceDir 'recovery.json') -Encoding UTF8
+        Write-Host "[HIL-RECOVER] NOT_EXECUTED_BUSY - HIL machine busy: $($rl.Why) (nothing observed, nothing written next to the lock)" -ForegroundColor Red
+        exit 1
+    }
+    $code = 1
+    try {
+        $rc = Invoke-AvbHilReconciliation -LockPath $LockPath -Mode 'operator' -LockOwner $rl.Owner -PreviousLockOwner $rl.PreviousOwner -Observe $observe -EvidenceDir $EvidenceDir
+        $inc = $rc.incident
+        Write-Host ("[HIL-RECOVER] incident: {0}" -f $(if (-not $inc.present) { 'none' } elseif (-not $inc.readable) { "unreadable record $($inc.path) (SHA256 $($inc.sha256))" }
+                                                     else { "$($inc.verdict) $($inc.configuration) run $($inc.runId)/$($inc.runAttempt) revision $($inc.revision) (SHA256 $($inc.sha256), left unchanged)" }))
+        foreach ($why in @($rc.reasons)) { Write-Host "[HIL-RECOVER]   current condition: $why" -ForegroundColor Red }
+        Write-Host "[HIL-RECOVER] recovery record: $($rc.recordPath); evidence copy: $(Join-Path $EvidenceDir 'recovery.json')"
+        if ($rc.decision -eq 'READY') {
+            Write-Host "[HIL-RECOVER] READY - the machine is ready for a new deployment now; the next Deploy re-establishes readiness under its own lock, archives the incident and verifies the staged package through the normal path" -ForegroundColor Green
+            $code = 0
+        } else {
+            Write-Host "[HIL-RECOVER] NOT_READY - resolve the condition(s) above, then run -Action Recover again" -ForegroundColor Red
+            $code = 3
+        }
+    } finally {
+        $rel = Exit-AvbHilLock -Owner $rl.Owner -Path $LockPath
+        if (-not $rel.Ok) { Write-Host "[LOCK] NOT released: $($rel.Why)" -ForegroundColor Red; $code = 1 }
+    }
+    exit $code
+}
+
 $record = [ordered]@{
     schema = 'avb-hil-deployment/1'; configuration = $Configuration; verdict = $null; reason = ''
     authorized = [ordered]@{ revision = $ExpectedRevision; repository = $ExpectedRepository; runId = $ExpectedRunId; runAttempt = $ExpectedRunAttempt; driverSha256 = $ExpectedDriverSha256 }
     runStartUtc = (Get-Date).ToUniversalTime().ToString('o'); lock = $null; crashEvidence = $null; package = $null
     install = $null; installExitCode = $null; preflightExitCode = $null; finishedUtc = $null
     loadedImageEvidence = 'not hashed; DEPLOYED requires the service to be released (unloaded) and to reach RUNNING again during this deployment'
-    previousDeployment = $null; machineOk = $null; machineOkReason = ''
+    previousDeployment = $null; recovery = $null; machineOk = $null; machineOkReason = ''
 }
 # Never replace an unsafe predecessor's machine-local evidence with a new nonmutating attempt.
 $preservePriorInflight = $false
@@ -95,16 +147,23 @@ if (Test-Path -LiteralPath $inflightFile) {
 
     # The persisted record is machine-wide and outlives RUNNER_TEMP/CI jobs.
     # In particular, a timed-out netcfg/wevtutil child may still be running after its CI worker and lock exit.
-    # A new Debug/Release leg must NOT infer recovery merely from owning a newly acquired lock.
+    # A new Debug/Release leg must NOT infer recovery merely from owning a newly acquired lock - nor stay vetoed by a
+    # historical verdict (#493): it re-establishes readiness from current observations under this lock.
     $prior = $record.previousDeployment
     $priorValid = ($null -ne $prior -and $prior -isnot [string] -and
                    $null -ne $prior.PSObject.Properties['schema'] -and $prior.schema -ceq 'avb-hil-deployment/1' -and
                    $null -ne $prior.PSObject.Properties['machineOk'])
     $priorState = if ($priorValid) { Get-AvbMachineOk -Record $prior } else { @{ Ok = $false; Reason = 'unreadable or incomplete previous deployment record' } }
     if (-not $priorValid -or $prior.machineOk -ne $true -or -not $priorState.Ok) {
-        $preservePriorInflight = $true
         $oldVerdict = if ($priorValid) { [string]$prior.verdict } else { 'UNVERIFIABLE' }
-        Complete-Deployment 'NEEDS_OPERATOR' ("previous HIL deployment $oldVerdict remains unsafe/unverified; machine-local incident evidence preserved at $inflightFile; operator-verified recovery is required before any driver mutation: " + $priorState.Reason) 3
+        $rc = Invoke-AvbHilReconciliation -Mode 'automatic' -LockPath $LockPath -LockOwner $lock.Owner -PreviousLockOwner $lock.PreviousOwner -Observe $observe -EvidenceDir $EvidenceDir -ArchiveIncident
+        $record.recovery = $rc
+        if ($rc.decision -ne 'READY') {
+            $preservePriorInflight = $true
+            Complete-Deployment 'NEEDS_OPERATOR' ("previous HIL deployment $oldVerdict is not recovered ($($priorState.Reason)); current readiness not established: " +
+                                                  ((@($rc.reasons)) -join '; ') + "; incident preserved unchanged at $inflightFile; recovery attempt recorded at $($rc.recordPath)") 3
+        }
+        Write-Host "[HIL-DEPLOY] previous deployment $oldVerdict reconciled: machine ready now (incident archived at $($rc.incident.archivePath); recovery record $($rc.recordPath)); the staged package is verified and deployed through the normal path" -ForegroundColor Yellow
     }
 }
 

@@ -13,7 +13,8 @@
 #   - pre-state and post-state are recorded; success requires service RUNNING, the filter bound, the installed .sys
 #     equal to the staged SHA256 and the ETW provider registered.
 # Outcomes / exit codes: DEPLOYED 0 | FAILED 1 (infrastructure failure, machine usable) | NEEDS_OPERATOR 3 (reboot or
-# manual inspection required; no further HIL on this machine until the operator clears it).
+# manual inspection required; the record stays as the incident, and a later deployment proceeds only after
+# Invoke-AvbHilReconciliation establishes from CURRENT observations that the machine has recovered, #493).
 #
 # All system access goes through the $Sys adapter (New-AvbRealSystem); tests/unit/ci/test_ci_driver_deploy.ps1
 # drives the same code with a scripted fake.
@@ -140,6 +141,187 @@ function Get-AvbDeployState {
         pendingRenames = @(& $Sys.PendingRenames); managementAdapter = $mgmt
         managementAdapterBound = [bool](@($b | Where-Object { $_.Name -eq $mgmt -and $_.Enabled }).Count)
     }
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# Deployment-incident reconciliation (#493).  A persisted unsafe deployment record (NEEDS_OPERATOR, IN_FLIGHT,
+# unreadable) is a historical failure: it stays recorded, but it does not veto every later deployment.  The CALLER
+# HOLDS THE MACHINE LOCK (tools/lib/HilLock.ps1; Get-AvbHilLockField is used from there).  Readiness is established
+# only from CURRENT observations - never from the record's age, a free lock, a runner configuration or an
+# acknowledgement.  The incident file is never rewritten: before a deployment may replace it, it is archived
+# byte-for-byte (<lock>.incident-<utc>.json, SHA256 verified), and every attempt writes its own recovery record
+# (<lock>.recovery-<utc>.json, schema avb-hil-recovery/1).  Recovery never yields DEPLOYED: the staged package is still
+# verified and deployed through the normal path.
+# ---------------------------------------------------------------------------------------------------------
+
+# A live process that is (or may be) a deployment operation: the native tools the installer drives and the PowerShell
+# entry points that drive them.  Returns the reason, or $null.  Attended installs are additionally excluded by the
+# machine lock (Install-Driver.ps1 holds it), so a console that started one is covered while it runs.
+function Test-AvbHilConflictProcess {
+    param([string]$Name, $CommandLine)
+    $n = ([string]$Name).ToLowerInvariant()
+    if ($n -in @('netcfg.exe', 'pnputil.exe', 'wevtutil.exe')) { return 'driver-installation tool' }
+    if ($n -in @('powershell.exe', 'pwsh.exe')) {
+        if ([string]::IsNullOrEmpty([string]$CommandLine)) { return 'PowerShell process whose command line cannot be read (a deployment script cannot be excluded)' }
+        if ([string]$CommandLine -match '(?i)(Install-Driver(-Elevated)?|Invoke-HilDeployment)\.ps1') { return 'deployment script' }
+    }
+    return $null
+}
+
+# Service ImagePath (registry form) -> file path.
+function ConvertTo-AvbServiceImageFile {
+    param([string]$ImagePath)
+    $p = $ImagePath.Trim().Trim('"')
+    if ($p -match '^(?i)\\SystemRoot\\(.+)$') { return (Join-Path $env:SystemRoot $Matches[1]) }
+    if ($p -match '^\\\?\?\\(.+)$') { return $Matches[1] }
+    if ($p -match '^(?i)System32\\') { return (Join-Path $env:SystemRoot $p) }
+    return $p
+}
+
+# Real, read-only observation of the current machine.  A probe that fails is recorded as unavailable, never as a clean
+# value.  $WatchPids: process IDs the incident recorded as left running (evidence; a PID can be reused).
+function Get-AvbHilRecoveryObservation {
+    param([int[]]$WatchPids = @(), [int]$SelfPid = $PID)
+    $o = [ordered]@{
+        observedUtc = [datetime]::UtcNow.ToString('o')
+        processes = @(); processError = $null; watchedPids = @()
+        service = $null; imagePath = $null; imageFile = $null; imageSha256 = $null; imageError = $null; system32Sha256 = $null
+        pendingRenames = @(); pendingError = $null; bindings = @(); bindingsError = $null
+    }
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $byId = @{}; foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
+        # This process and the chain that started it (CI step shell, operator console) are not survivors.  A parent
+        # created AFTER its child is a reused PID, not an ancestor: the walk stops there.
+        $skip = @($SelfPid); $cur = $byId[$SelfPid]
+        for ($i = 0; $i -lt 32 -and $null -ne $cur; $i++) {
+            $par = $byId[[int]$cur.ParentProcessId]
+            if ($null -eq $par -or $skip -contains [int]$par.ProcessId -or ($par.CreationDate -and $cur.CreationDate -and $par.CreationDate -gt $cur.CreationDate)) { break }
+            $skip += [int]$par.ProcessId; $cur = $par
+        }
+        $o.processes = @(foreach ($p in $all) {
+            if ($skip -contains [int]$p.ProcessId) { continue }
+            $why = Test-AvbHilConflictProcess -Name $p.Name -CommandLine $p.CommandLine
+            if ($why) {
+                [ordered]@{ pid = [int]$p.ProcessId; name = [string]$p.Name
+                            startedUtc = $(if ($p.CreationDate) { ([datetime]$p.CreationDate).ToUniversalTime().ToString('o') } else { $null })
+                            commandLine = [string]$p.CommandLine; why = $why }
+            }
+        })
+        $o.watchedPids = @(foreach ($w in @($WatchPids)) { $p = $byId[[int]$w]; [ordered]@{ pid = [int]$w; alive = ($null -ne $p); name = $(if ($p) { [string]$p.Name } else { $null }) } })
+    } catch { $o.processError = "process enumeration failed: $($_.Exception.Message)" }
+    try { $o.service = Get-AvbServiceState -Name 'IntelAvbFilter' } catch { $o.service = "UNKNOWN:PROBE_FAILED ($($_.Exception.Message))" }
+    $s32 = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
+    try { if (Test-Path -LiteralPath $s32 -PathType Leaf) { $o.system32Sha256 = (Get-FileHash -LiteralPath $s32 -Algorithm SHA256 -ErrorAction Stop).Hash } } catch { $o.system32Sha256 = $null }
+    if ($o.service -ne 'NOT_FOUND') {
+        try {
+            $o.imagePath = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter' -Name ImagePath -ErrorAction Stop).ImagePath
+            $o.imageFile = ConvertTo-AvbServiceImageFile -ImagePath $o.imagePath
+            if (-not (Test-Path -LiteralPath $o.imageFile -PathType Leaf)) { $o.imageError = "service image '$($o.imageFile)' not found" }
+            else { $o.imageSha256 = (Get-FileHash -LiteralPath $o.imageFile -Algorithm SHA256 -ErrorAction Stop).Hash }
+        } catch { $o.imageError = "service image identity unavailable: $($_.Exception.Message)" }
+    }
+    try {
+        $k = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
+        $o.pendingRenames = @(@($k.GetValue('PendingFileRenameOperations')) | Where-Object { $_ -and $_ -match '(?i)IntelAvbFilter' } | ForEach-Object { [string]$_ })
+    } catch { $o.pendingError = "PendingFileRenameOperations unreadable: $($_.Exception.Message)" }
+    try { $o.bindings = @(& (New-AvbRealSystem).Bindings | ForEach-Object { [ordered]@{ name = $_.Name; enabled = $_.Enabled } }) }
+    catch { $o.bindingsError = "MS_IntelAvbFilter binding query failed: $($_.Exception.Message)" }
+    return $o
+}
+
+# Readiness for a NEW deployment from one observation document (real probe or the offline seam).  Each reason names
+# the current condition.  The installed driver need not match the next staged package (the deployment replaces and
+# verifies it), but its identity must be known.  @{ Decision = READY | NOT_READY; Reasons }
+function Get-AvbHilReadiness {
+    param($Observation)
+    if ($null -eq $Observation) { return @{ Decision = 'NOT_READY'; Reasons = @('current machine observation unavailable') } }
+    $f = { param([string]$n) Get-AvbHilLockField $Observation $n }
+    $r = @()
+    if (& $f 'processError') { $r += "process observation unavailable: $(& $f 'processError')" }
+    foreach ($p in @(& $f 'processes')) {
+        if ($null -eq $p) { continue }
+        $r += ("live conflicting operation: {0} PID {1} (started {2}; {3}): {4}" -f (Get-AvbHilLockField $p 'name'), (Get-AvbHilLockField $p 'pid'),
+               (Get-AvbHilLockField $p 'startedUtc'), (Get-AvbHilLockField $p 'why'), (Get-AvbHilLockField $p 'commandLine'))
+    }
+    $svc = [string](& $f 'service')
+    if (-not $svc) { $r += 'IntelAvbFilter service state observation unavailable' }
+    elseif ($svc -notin @('NOT_FOUND', 'STOPPED', 'RUNNING')) { $r += "IntelAvbFilter service state '$svc' is not settled/known" }
+    if ($svc -ne 'NOT_FOUND') {
+        if (& $f 'imageError') { $r += "installed driver identity unavailable: $(& $f 'imageError')" }
+        elseif (-not (& $f 'imageSha256')) { $r += "installed driver identity incomplete: service registered (state '$svc') but no service image SHA256 observed" }
+    }
+    if (& $f 'pendingError') { $r += "pending driver replacement observation unavailable: $(& $f 'pendingError')" }
+    foreach ($x in @(& $f 'pendingRenames')) { if ($x) { $r += "reboot-time replacement of IntelAvbFilter pending: $x" } }
+    if (& $f 'bindingsError') { $r += "filter binding observation unavailable: $(& $f 'bindingsError')" }
+    return @{ Decision = $(if ($r.Count -eq 0) { 'READY' } else { 'NOT_READY' }); Reasons = $r }
+}
+
+# The persisted deployment record as evidence: identity, exact bytes (SHA256) and the PIDs it recorded as left running.
+function Get-AvbHilIncident {
+    param([string]$Path)
+    $i = [ordered]@{ path = $Path; present = $false; readable = $false; bytes = $null; sha256 = $null; schema = $null; verdict = $null
+                     configuration = $null; runId = $null; runAttempt = $null; revision = $null; reason = $null; finishedUtc = $null
+                     machineOk = $null; hungPids = @(); archivePath = $null }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $i }
+    $i.present = $true
+    $i.bytes = (Get-Item -LiteralPath $Path).Length
+    $i.sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    $rec = $null
+    try { $rec = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { return $i }
+    if ($null -eq $rec -or $rec -is [string] -or [string](Get-AvbHilLockField $rec 'schema') -cne 'avb-hil-deployment/1') { return $i }
+    $auth = Get-AvbHilLockField $rec 'authorized'; $inst = Get-AvbHilLockField $rec 'install'
+    $i.readable = $true; $i.schema = [string]$rec.schema
+    foreach ($n in 'verdict', 'configuration', 'reason', 'finishedUtc', 'machineOk') { $i[$n] = Get-AvbHilLockField $rec $n }
+    $i.runId = Get-AvbHilLockField $auth 'runId'; $i.runAttempt = Get-AvbHilLockField $auth 'runAttempt'; $i.revision = Get-AvbHilLockField $auth 'revision'
+    $i.hungPids = @(foreach ($s in @(Get-AvbHilLockField $inst 'steps')) {
+        if ($null -ne $s -and (Get-AvbHilLockField $s 'ok') -eq $false -and [string](Get-AvbHilLockField $s 'detail') -match 'PID (\d+)') { [int]$Matches[1] }
+    })
+    return $i
+}
+
+# Shared reconciliation (Deploy: -Mode automatic -ArchiveIncident; Recover: -Mode operator).  Caller holds the lock.
+# $Observe: scriptblock(int[] watchPids) -> observation document.  Returns the recovery record (decision READY |
+# NOT_READY); the machine-local record path is in .recordPath, a copy goes to <EvidenceDir>\recovery.json.
+function Invoke-AvbHilReconciliation {
+    param([string]$LockPath, [ValidateSet('automatic', 'operator')][string]$Mode, $LockOwner, $PreviousLockOwner,
+          [scriptblock]$Observe, [string]$EvidenceDir, [switch]$ArchiveIncident)
+    $inflight = "$LockPath.inflight.json"
+    $stamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    $incident = Get-AvbHilIncident -Path $inflight
+    $rec = [ordered]@{
+        schema = 'avb-hil-recovery/1'; mode = $Mode; host = $env:COMPUTERNAME; startedUtc = [datetime]::UtcNow.ToString('o')
+        lockOwner = $LockOwner; previousLockOwner = $PreviousLockOwner; incident = $incident
+        observations = $null; decision = $null; reasons = @(); recordPath = $null; finishedUtc = $null
+    }
+    $reasons = @()
+    try { $rec.observations = & $Observe @($incident.hungPids) }
+    catch { $reasons += "current machine observation failed: $($_.Exception.Message)" }
+    if ($reasons.Count -eq 0) { $reasons += @((Get-AvbHilReadiness -Observation $rec.observations).Reasons) }
+    if ($reasons.Count -eq 0 -and $ArchiveIncident -and $incident.present) {
+        $arch = "$LockPath.incident-$stamp.json"
+        try {
+            [System.IO.File]::Copy($inflight, $arch, $false)   # never overwrites an earlier archive
+            $h = (Get-FileHash -LiteralPath $arch -Algorithm SHA256).Hash
+            if ($h -ne $incident.sha256) { throw "archive SHA256 $h differs from the incident SHA256 $($incident.sha256)" }
+            $incident.archivePath = $arch
+        } catch { $reasons += "incident could not be preserved before deployment: $($_.Exception.Message)" }
+    }
+    $rp = "$LockPath.recovery-$stamp.json"
+    $rec.recordPath = $rp
+    $rec.reasons = $reasons
+    $rec.decision = $(if ($reasons.Count -eq 0) { 'READY' } else { 'NOT_READY' })
+    $rec.finishedUtc = [datetime]::UtcNow.ToString('o')
+    try {
+        $fs = [System.IO.File]::Open($rp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $b = [System.Text.Encoding]::UTF8.GetBytes(($rec | ConvertTo-Json -Depth 8)); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
+    } catch {
+        $rec.recordPath = $null
+        $rec.reasons = @($rec.reasons) + "recovery record could not be written to ${rp}: $($_.Exception.Message)"
+        $rec.decision = 'NOT_READY'
+    }
+    if ($EvidenceDir) { ($rec | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'recovery.json') -Encoding UTF8 }
+    return $rec
 }
 
 function Invoke-AvbCiDriverDeployment {
