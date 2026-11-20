@@ -434,6 +434,8 @@ tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held'
 #      since #458 round 2: 484 s standalone + 48 %)
 #      is selected for this entry only - every other Unit entry keeps the suite timeout and the global Unit default
 #      stays 60 s.  Offline: the runner's table and its Get-AvbTestTimeoutSeconds, from its syntax tree.
+#      Q 2026-11-20 (#493 / PR #494): test_ci_driver_deploy.ps1 receives 180 s; a larger suite timeout is never lowered;
+#      every other table entry keeps its budget (explicit snapshot).
 $toBad = @()
 $toAsg = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilTestTimeoutSeconds' }, $true) | Select-Object -First 1
 $toFn  = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbTestTimeoutSeconds' }, $true)
@@ -443,10 +445,41 @@ else {
     $toCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" +
         '$HilTestTimeoutPerAdapter = ' + $paAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1" -SuiteSeconds 60' + "`n" +
-        'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_artifact_completeness.ps1" -SuiteSeconds 60'))
+        'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_artifact_completeness.ps1" -SuiteSeconds 60' + "`n" +
+        # #493 / PR #494: the deployment-orchestration test's own measured budget, and a larger suite timeout never lowered.
+        'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_ci_driver_deploy.ps1" -SuiteSeconds 60' + "`n" +
+        'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_ci_driver_deploy.ps1" -SuiteSeconds 300' + "`n" +
+        'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1" -SuiteSeconds 900'))
     $toVals = @(& $toCheck)
-    if ($toVals.Count -ne 2 -or [int]$toVals[0] -ne 750) { $toBad += "test_hil_safety_gate.ps1 selects $($toVals[0]) s, expected 750 s" }
-    if ($toVals.Count -ne 2 -or [int]$toVals[1] -ne 60) { $toBad += "another Unit entry selects $($toVals[1]) s, expected the 60 s suite timeout" }
+    if ($toVals.Count -ne 5 -or [int]$toVals[0] -ne 750) { $toBad += "test_hil_safety_gate.ps1 selects $($toVals[0]) s, expected 750 s" }
+    if ($toVals.Count -ne 5 -or [int]$toVals[1] -ne 60) { $toBad += "another Unit entry selects $($toVals[1]) s, expected the 60 s suite timeout" }
+    if ($toVals.Count -ne 5 -or [int]$toVals[2] -ne 180) { $toBad += "test_ci_driver_deploy.ps1 selects $($toVals[2]) s with the 60 s Unit default, expected 180 s" }
+    if ($toVals.Count -ne 5 -or [int]$toVals[3] -ne 300) { $toBad += "a 300 s suite timeout was lowered to $($toVals[3]) s for test_ci_driver_deploy.ps1" }
+    if ($toVals.Count -ne 5 -or [int]$toVals[4] -ne 900) { $toBad += "a 900 s suite timeout was lowered to $($toVals[4]) s for test_hil_safety_gate.ps1" }
+    # Every other budget is unchanged and nothing is added or removed silently: snapshots of BOTH tables
+    # (integration inventory of feat/357-tas-activate-master b56d943 plus the #494 entry).
+    $toWant = [ordered]@{
+        'test_tas_isolated_arm' = 480; 'test_tas_isolated_arm --armed-period-ms 200' = 480; 'test_tas_isolated_arm --stall-probe 64' = 480
+        'test_tas_isolated_arm --stall-probe 512' = 480; 'test_tas_isolated_arm --stall-probe 1400' = 480; 'test_atdecc_aen_protocol' = 420
+        'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 750; 'ps1:tests/unit/ci/test_ci_driver_deploy.ps1' = 180
+    }
+    $toHave = [ordered]@{}
+    foreach ($kv in @($toAsg.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs)) { $toHave[[string]$kv.Item1.Value] = $kv.Item2.Extent.Text }
+    foreach ($k in $toWant.Keys) { if (-not $toHave.Contains($k)) { $toBad += "table entry '$k' missing" } elseif ([string]$toHave[$k] -ne [string]$toWant[$k]) { $toBad += "table entry '$k' = $($toHave[$k]) s, expected $($toWant[$k]) s" } }
+    foreach ($k in $toHave.Keys) { if (-not $toWant.Contains($k)) { $toBad += "unexpected table entry '$k' = $($toHave[$k]) s" } }
+    $paWant = [ordered]@{
+        'test_tas_activate --hold' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'; 'test_tas_activate --pass' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'
+        'test_tas_activate --fault' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'; 'test_tas_activate --fault-versioned' = '@{ Seconds = 1960; PerOtherAdapterSeconds = 10 }'
+        'test_tas_query_clean' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --hw-verified' = '@{ Seconds = 560; MaxAdapters = 8 }'
+        'test_tas_query_clean --tiers-unbound' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --invalid' = '@{ Seconds = 935; PerOtherAdapterSeconds = 335 }'
+        'test_tas_query_clean --restore' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --link-speed' = '@{ Seconds = 560 }'
+        'test_dev_lifecycle --init-retry-fault' = '@{ Seconds = 1220 }'; 'test_dev_lifecycle --init-concurrent' = '@{ Seconds = 1130 }'
+    }
+    $paHave = [ordered]@{}
+    $paTop = $paAsg.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    foreach ($kv in @($paTop.KeyValuePairs)) { $paHave[[string]$kv.Item1.Value] = (($kv.Item2.Extent.Text -replace '\s+', ' ').Trim()) }
+    foreach ($k in $paWant.Keys) { if (-not $paHave.Contains($k)) { $toBad += "per-adapter entry '$k' missing" } elseif ([string]$paHave[$k] -ne [string]$paWant[$k]) { $toBad += "per-adapter entry '$k' = $($paHave[$k]), expected $($paWant[$k])" } }
+    foreach ($k in $paHave.Keys) { if (-not $paWant.Contains($k)) { $toBad += "unexpected per-adapter entry '$k' = $($paHave[$k])" } }
 }
 $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestTimeoutSeconds -eq 0' }, $true)
 if (-not $toDef -or $toDef.Extent.Text -notmatch '"Unit"\s*\{\s*60\s*\}') { $toBad += 'global Unit default is no longer 60 s' }
