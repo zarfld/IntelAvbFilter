@@ -1,7 +1,7 @@
 # LocalSuites.ps1 - operator-driven local pre-commit HIL run, Debug and Release.
 #
 # Usage (elevated PowerShell, repository root; no GitHub variables, artifacts, SHA input, prior CI or push needed):
-#   .\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\FullSuite_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+#   .\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\LocalSuites$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 #
 # Per configuration, strictly sequential (the next configuration is installed only after this one is finished):
 #   1. build the driver            tools\build\Build-Driver.ps1
@@ -18,15 +18,17 @@
 #      per item a 30 s window (N declines, default yes; noninteractive: yes at once); -NoReproduce disables it
 #   8. combined report (JSON + text) in -ReportDir
 #
-# The suite matrix is always attempted completely (Q 2026-10-22): a missing or inconsistent results document is one
-# RESULTS_UNTRUSTED failure row and the next suite runs; a driver/device infrastructure failure is recorded per suite
-# (suites[].infrastructure) and the next suite runs [open question to Q: TEST-LOCALSUITES-006 / Q 2026-10-21 said
-# infrastructure loss stops the run]; after a suite with failures a 30 s window lets the operator stop (default
-# continue).  Stops (no next configuration) after any build/install/verify failure or that explicit operator stop.
-# A safety halt (loss of controlled execution: a timeout
-# whose process tree did not terminate, a lost machine lock, a state-integrity halt) does NOT stop it: every later suite
-# and configuration of this run gets -PriorResultsDir <ReportDir>, so Init/Mutating tests stay BLOCKED and ReadOnly tests
-# continue; the run is nonpassing.  Cleanup outcomes (FAILED / NOT_VERIFIED) are reported per suite and never halt.
+# The suite matrix is always attempted completely (Q 2026-10-22; #458 comment 7008463710, 2026-11-19): earlier results
+# never stop later suites or configurations.  A missing or inconsistent results document is one RESULTS_UNTRUSTED failure
+# row and the next suite runs; a driver/device infrastructure failure is recorded per suite (suites[].infrastructure) and
+# the next suite runs.  A configuration whose driver build, installation or pre-flight failed records its hardware suites
+# NOT_EXECUTED with that reason (they need this configuration's own built and installed driver, an essential input) and
+# the NEXT configuration runs; a missing test build manifest is a recorded build failure and the suites still run (the
+# runner reports each missing binary).  Only an explicit operator stop in the bounded window (default continue) ends the
+# run early.  A loss of controlled execution in a suite (a timeout whose process tree did not terminate, a lost machine
+# lock, a state halt) is kept as evidence; later suites get -PriorResultsDir <ReportDir>, where the runner reports it and
+# treats only a process still running NOW as a conflict.  The run stays nonpassing.  Cleanup outcomes (FAILED /
+# NOT_VERIFIED) are reported per suite and never halt.
 # Never reboots, never retries an installation, never repairs adapters.
 #
 # Evidence class: LOCAL_DIAGNOSTIC (Run-Tests-CI -LocalDiagnostic: build provenance reported per item, never enforced;
@@ -158,6 +160,17 @@ function New-AvbUntrustedSuiteRow {
     }
 }
 
+# A suite of a configuration whose own driver was not built, installed or verified (#458): one Failure row per suite with
+# the reason - never silently absent, never executed against a driver that is not this configuration's.
+function New-AvbNotExecutedSuiteRow {
+    param([string]$Configuration, [string]$Suite, [string]$Why)
+    return [pscustomobject]@{
+        Configuration = $Configuration; Suite = $Suite; Name = "$Suite (not executed)"; Entry = ''; Arguments = ''
+        Verdict = 'NOT_EXECUTED'; Category = 'Failure'; Executed = $false; Check = $false; ExitCode = $null
+        SafetyClass = ''; TargetDid = ''; Testcases = ''; Reason = $Why; LogPath = ''; Incidents = ''
+    }
+}
+
 # Bounded operator choice (intent Q 2026-10-22: the run never waits indefinitely for an operator).  Returns the value
 # of the first key of -Keys pressed within -Seconds, else -Default.  Noninteractive (redirected input, no user session,
 # GitHub Actions): -Default at once; the console key buffer is never touched ([Console]::KeyAvailable throws there).
@@ -215,7 +228,18 @@ $Report = [ordered]@{
 }
 $AllInventory = @()
 $Stop = ''
-$SafetyHalt = ''   # first safety halt of this run; carried to every later suite/configuration through -PriorResultsDir
+$SafetyHalt = ''   # first loss-of-control evidence of this run (reported; the run is nonpassing; never a veto, #458)
+$NotExecuted = @()   # configurations whose hardware suites could not run against their own driver (reported, nonpassing)
+function Skip-AvbConfiguration {
+    param($Cfg, [string]$Why)
+    foreach ($s in $Suites) {
+        $Cfg.suites += [ordered]@{ suite = $s; exitCode = $null; resultsJson = $null; console = $null; durationSeconds = 0; overall = 'NOT_EXECUTED'
+                                   executed = 0; counts = $null; error = $Why }
+        $script:AllInventory += @(New-AvbNotExecutedSuiteRow -Configuration $Cfg.configuration -Suite $s -Why $Why)
+    }
+    $script:NotExecuted += "$($Cfg.configuration): $Why"
+    Write-Host "[NOT_EXECUTED] $($Cfg.configuration) hardware suites: $Why --- they need this configuration's own built and installed driver; recorded, the next configuration runs (#458)" -ForegroundColor Red
+}
 $BuildFailures = @()   # failed test builds: never a stop (the runner BLOCKs those entries by provenance), always nonpassing
 
 function Invoke-AvbStep {
@@ -254,10 +278,11 @@ try {
         $cfg.head = ([string](& git -C $RepoRoot rev-parse HEAD)).Trim()
 
         # 1-2. Build (artifacts are verified independently of the exit code)
-        if (-not (Test-AvbExitSuccess (Invoke-AvbStep "Build-Driver $Configuration" { & $BuildDriver -Configuration $Configuration }))) { $Stop = "driver build failed ($Configuration)"; break }
+        $driverBuild = Invoke-AvbStep "Build-Driver $Configuration" { & $BuildDriver -Configuration $Configuration }
         $sys = Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter.sys"
-        if (-not (Test-Path -LiteralPath $sys)) { $Stop = "driver build reported success but '$sys' is missing ($Configuration)"; break }
-        $cfg.builtDriverSha256 = (Get-FileHash -LiteralPath $sys -Algorithm SHA256).Hash
+        $driverWhy = if (-not (Test-AvbExitSuccess $driverBuild)) { "driver build failed (exit $(Format-AvbExitCode $driverBuild))" }
+                     elseif (-not (Test-Path -LiteralPath $sys)) { "driver build reported success but '$sys' is missing" } else { '' }
+        if (-not $driverWhy) { $cfg.builtDriverSha256 = (Get-FileHash -LiteralPath $sys -Algorithm SHA256).Hash }
 
         # A failed individual test build does not stop the matrix (LocalSuites_20261024_133502: one LNK1168 skipped all of
         # Release).  Build-Tests builds every other entry and records the failure in the manifest.  This is a manual local
@@ -265,8 +290,13 @@ try {
         # its record says provenance NOT verified.  The build failure keeps the run nonpassing.
         $cfg.testBuild = Invoke-AvbStep "Build-Tests $Configuration" { & $BuildTests -Configuration $Configuration }
         $manPath = Join-Path $RepoRoot "build\tools\avb_test\x64\$Configuration\test-build-manifest.json"
-        if (-not (Test-Path -LiteralPath $manPath)) { $Stop = "test build manifest missing: $manPath"; break }
-        $man = Get-Content -LiteralPath $manPath -Raw | ConvertFrom-Json
+        $man = if (Test-Path -LiteralPath $manPath) { Get-Content -LiteralPath $manPath -Raw | ConvertFrom-Json } else { $null }
+        if ($null -eq $man) {
+            # Recorded, never a stop (#458): the suites still run; the runner reports each binary it cannot find.
+            $BuildFailures += "$Configuration test build manifest missing: $manPath"
+            Write-Host "[BUILD FAILED] $Configuration test build manifest missing: $manPath --- recorded; the suites still run and report each missing binary" -ForegroundColor Red
+            $man = [pscustomobject]@{ provenanceMode = 'missing'; sourceDigest = $null; entries = @() }
+        }
         $cfg.testBuildFailed = @(Get-AvbTestBuildFailures $cfg.testBuild $man)
         if ($cfg.testBuildFailed.Count -gt 0) {
             $BuildFailures += "$Configuration test build exit $(Format-AvbExitCode $cfg.testBuild): $(@($cfg.testBuildFailed).Count) failed entr(y/ies)"
@@ -278,13 +308,16 @@ try {
             Write-Host "[LOCAL_DIAGNOSTIC] test build is not attributable (provenanceMode '$($man.provenanceMode)') --- tests still run; their provenance is reported NOT verified" -ForegroundColor Yellow
         }
 
+        # The hardware suites of this configuration need ITS driver: without a build there is nothing to install or test.
+        if ($driverWhy) { Skip-AvbConfiguration -Cfg $cfg -Why $driverWhy; continue }
+
         # 3. Install (existing operator script; UAC prompt)
         $cfg.install = Invoke-AvbStep "Install-Driver-Elevated $Configuration -Action Reinstall" { & $InstallDriver -Configuration $Configuration -Action Reinstall -CaptureDbgView }
-        if (-not (Test-AvbExitSuccess $cfg.install)) { $Stop = "driver installation failed ($Configuration); no test executed against this configuration"; break }
+        if (-not (Test-AvbExitSuccess $cfg.install)) { Skip-AvbConfiguration -Cfg $cfg -Why "driver installation failed (exit $(Format-AvbExitCode $cfg.install)); no test executed against a driver that is not this configuration's"; continue }
 
         # 4. Verify the installed driver is the one built in step 1
         $cfg.preflight = Invoke-AvbPreFlight $cfg.builtDriverSha256
-        if (-not (Test-AvbExitSuccess $cfg.preflight)) { $Stop = "pre-flight failed ($Configuration): installed driver is not the locally built $($cfg.builtDriverSha256), or service/device node unhealthy"; break }
+        if (-not (Test-AvbExitSuccess $cfg.preflight)) { Skip-AvbConfiguration -Cfg $cfg -Why "pre-flight failed (exit $(Format-AvbExitCode $cfg.preflight)): installed driver is not the locally built $($cfg.builtDriverSha256), or service/device node unhealthy"; continue }
         Write-Host "[INFO] Installed driver file == locally built driver (on-disk SHA256 $($cfg.builtDriverSha256)). The loaded image is not hashed; after a reinstall without reboot it is UNPROVEN that the running image is this file." -ForegroundColor Yellow
 
         # 5-6. Suites
@@ -324,7 +357,7 @@ try {
                 }
                 $h = Get-AvbSafetyHalt $res.Doc
                 if ($h) {
-                    Write-Host "[HALT] $Configuration/${Suite}: $h --- later Init/Mutating tests BLOCKED (also in later suites and configurations of this run); ReadOnly tests continue" -ForegroundColor Red
+                    Write-Host "[EVIDENCE] $Configuration/${Suite}: $h --- kept; later suites and configurations still run, and the runner treats only a process still running NOW as a conflict (#458)" -ForegroundColor Red
                     if (-not $SafetyHalt) { $SafetyHalt = "$Configuration/${Suite}: $h" }
                 }
                 # Infrastructure loss is recorded, not a stop (861e318: only an explicit operator stop ends the matrix).
@@ -343,14 +376,20 @@ try {
                 Write-Host "`n$Configuration / $($item.Suite) / $($item.Entry) $($item.Arguments)  [$($item.Verdict)] $($item.Testcases)"
                 if ((Read-AvbTimedChoice -Prompt "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n, 3 s, default Y):" -Seconds 3 -Default 'y' -Keys @{ Y = 'y'; Enter = 'y'; N = 'n' }) -ne 'y') { continue }
 
-                if (-not (Test-AvbExitSuccess (Invoke-AvbPreFlight $cfg.builtDriverSha256))) { $Stop = "pre-flight failed before reproduction ($Configuration)"; break }
+                if (-not (Test-AvbExitSuccess (Invoke-AvbPreFlight $cfg.builtDriverSha256))) {
+                    # Recorded; the remaining reproductions of THIS configuration need its verified driver, the next
+                    # configuration still runs (#458; was: the whole run stopped).
+                    $cfg.reproductionsNotExecuted = "pre-flight failed before reproduction ($Configuration)"
+                    $NotExecuted += "$Configuration reproductions: pre-flight failed before reproduction"
+                    Write-Host "[NOT_EXECUTED] $Configuration reproductions: pre-flight failed --- recorded; the next configuration runs" -ForegroundColor Red
+                    break
+                }
                 $repJson = Join-Path $ReportDir ("repro-{0}-{1}-{2}.json" -f $Configuration, ($item.Entry -replace '[^\w.-]', '_'), (Get-Date -Format 'HHmmss'))
                 $rrc = Invoke-AvbStep "reproduce $($item.Entry)" {
                     & $RunElevated -TestName $item.Entry -Suite $item.Suite -Configuration $Configuration -CaptureDbgView -ResultsJson $repJson }
                 $cfg.reproductions += [ordered]@{ suite = $item.Suite; entry = $item.Entry; arguments = $item.Arguments; originalVerdict = $item.Verdict
                                                   exitCode = $rrc; resultsJson = $repJson }
             }
-            if ($Stop) { break }
         }
     }
 } finally {
@@ -384,11 +423,12 @@ try {
     Write-Host "Required but NOT executed - coverage gaps, run is INCOMPLETE ($($gap.Count)):"
     $gap | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Reason -AutoSize | Out-String -Width 250 | Write-Host
     foreach ($b in $BuildFailures) { Write-Host "[BUILD FAILED] $b --- the run is nonpassing" -ForegroundColor Red }
-    if ($SafetyHalt) { Write-Host "[HALT] $SafetyHalt --- Init/Mutating tests after it were BLOCKED; the run is nonpassing" -ForegroundColor Red }
+    if ($SafetyHalt) { Write-Host "[EVIDENCE] $SafetyHalt --- loss of controlled execution in that suite; later tests still ran; the run is nonpassing" -ForegroundColor Red }
+    foreach ($n in $NotExecuted) { Write-Host "[NOT_EXECUTED] $n --- the run is nonpassing" -ForegroundColor Red }
     if ($Stop) { Write-Host "[STOPPED] $Stop" -ForegroundColor Red }
     Write-Host "Report: $(Join-Path $ReportDir 'local-suites-report.json')"
 }
 
 $executed = @($AllInventory | Where-Object { $_.Executed }).Count
-if ($Stop -or $SafetyHalt -or $BuildFailures.Count -gt 0 -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
+if ($Stop -or $SafetyHalt -or $NotExecuted.Count -gt 0 -or $BuildFailures.Count -gt 0 -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
 exit 0

@@ -362,27 +362,22 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
     intel_device_type_t device_type;
     const intel_device_ops_t *ops;
     int result;
-    
-    DEBUGP(DL_TRACE, "==>intel_setup_time_aware_shaper (clean HAL dispatch)\n");
-    
+
+    /* Called with the adapter's TAS register lock held (IOCTL_AVB_SETUP_TAS, #350): no logging here. The caller logs the
+     * result after the release (-ENOTSUP: the device has no setup_tas) */
     if (config == NULL) {
         return -1;
     }
-    
+
     result = get_device_context(dev, &context, &device_type);
     if (result != 0) {
-        DEBUGP(DL_ERROR, "intel_setup_time_aware_shaper: Invalid device context\n");
-        return result;
+        return result;   /* invalid device context */
     }
-    
+
     ops = intel_get_device_ops(device_type);
     if (ops && ops->setup_tas) {
-        result = ops->setup_tas(dev, config);
-        DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: device-specific result=%d\n", result);
-        return result;
+        return ops->setup_tas(dev, config);
     }
-    
-    DEBUGP(DL_ERROR, "TAS not supported on device type %d\n", device_type);
     return -ENOTSUP;
 }
 

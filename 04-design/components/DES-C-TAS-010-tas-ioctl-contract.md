@@ -3,13 +3,15 @@ specType: component-design
 standard: IEEE 1016-2009
 component: TAS lifecycle IOCTL contract (proposed)
 phase: 04-design
-version: 0.5.0
+version: 0.6.0
 author: Claude Code, for Q
-date: "2026-11-05"
-status: DRAFT, derived artifact. Review baseline only, see #365. Requirements and ADRs are filed, not accepted. Not implemented, not hardware verified
+date: "2026-11-15"
+status: DRAFT, derived artifact. Review baseline only, see #365. ADR-TSN-002 (#362) accepted 2026-11-14; requirements filed, not accepted; ADR-TSN-003 (#363) Proposed. Query code allocated (#434); query handler not implemented; nothing hardware verified
 review: 04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md
 traceability:
   design_issue: "#365 (DES-C-TAS-010), body status: review baseline, not approved"
+  implementation:
+    - "#434 (IOCTL_AVB_TAS_QUERY_HW code and TC-ABI-025, merged into feat/357-tas-activate-master as f108ee8; Implements #350)"
   architecture:
     - "#142 (ARC-C-IOCTL-005: IOCTL Dispatcher)"
     - "#100 (ARC-C-I225-008: Intel i225/i226 Device Implementation)"
@@ -18,7 +20,7 @@ traceability:
     - "#92 (ADR-ARCH-003: Strategy Pattern)"
     - "#122 (ADR-SEC-001: Debug vs Release boundaries)"
     - "#133 (ADR-TSN-001: TSN Feature Prioritization)"
-    - "#362 (ADR-TSN-002), Proposed"
+    - "#362 (ADR-TSN-002), Accepted 2026-11-14 (revision v7, decisions 1 to 6). Not accepted with it: the provisional structure sizes, #363, the #352 amendment, #357's implementation and evidence"
     - "#363 (ADR-TSN-003), Proposed"
   requirements:
     - "#50 (REQ-F-TAS-001: Time-Aware Shaper Configuration), open"
@@ -26,6 +28,7 @@ traceability:
     - "#64 (REQ-F-IOCTL-VERSIONING-001)"
     - "#45, #52 (register and device-op locking)"
     - "#113 (QA-SC-PERF-002)"
+    - "#392 (QA-SC-TAS-001), status:in-progress"
     - "#350 (REQ-F-TAS-STATE-001), status:backlog"
     - "#351 (REQ-F-TAS-VALIDATE-001), status:backlog"
     - "#352 (REQ-F-TAS-ERROR-001), status:backlog"
@@ -51,24 +54,26 @@ traceability:
 
 **Design only.** This document changes no driver code, test, runner entry, existing IOCTL or governance file.
 
-**GitHub Issues are authoritative.** This file is derived from them. It defines no requirement and takes no architecture decision. Everything here that would bind implementation is a proposal until the governing issues are accepted. They were filed on 2026-11-05; `04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md` records the review and its filing. `TAS-DR-nn` are design rules, not requirements. IOCTL codes are candidates, not reservations.
+**GitHub Issues are authoritative.** This file is derived from them. It defines no requirement and takes no architecture decision. Everything here that would bind implementation is a proposal until the governing issues are accepted. They were filed on 2026-11-05; `04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md` records the review and its filing. `TAS-DR-nn` are design rules, not requirements. IOCTL codes are allocated only by #362 decision 1 (section 3.2); every other code named here is a candidate, not a reservation.
 
-Implementation stays blocked until the governing requirements and ADRs are accepted (#365).
+#362 is accepted, and its decision 1 allocates the query code, which is merged (#434). The governing requirements (#350 to #361) are still filed, not accepted. Each requirement's acceptance still needs its own hardware evidence, in Debug and Release (#362 decision 6).
 
-| Stage | State on 2026-11-05 |
+| Stage | State on 2026-11-15 |
 |---|---|
-| Proposed | #350 to #361 (`status:backlog`), #362 and #363 (Decision Status: Proposed), #365 (review baseline, not approved) |
-| Accepted | None |
-| Implemented | None |
+| Proposed | #350 to #361 (`status:backlog`), #363 (`status:backlog`, Proposed), #365 (review baseline, not approved). The v1 query layout of section 12 (536 bytes, provisional per #362 decision 1) |
+| Accepted | #362 ADR-TSN-002, decisions 1 to 6 (2026-11-14). It does not accept the provisional structure sizes, #363, the #352 amendment, or #357's implementation and evidence |
+| Implemented | `IOCTL_AVB_TAS_QUERY_HW` = 0x0017602C, the code only, with its ABI pin TC-ABI-025 (#434, f108ee8). The driver does not serve it: it still completes with `STATUS_INVALID_DEVICE_REQUEST`. `IOCTL_AVB_TAS_ACTIVATE` exists on the #357 integration branch as function 71 with the 80-byte request (#362, implementation status) |
 | Hardware Verified | None. #366 to #384 record Hardware RED and GREEN as not verified |
 
 #365 carries the label `status:completed`, set by automation. That label is not acceptance: DES-REVIEW-002, D1.
 
 | Tag | Meaning |
 |---|---|
-| **HW** | Observed on hardware, with run count |
+| **HW** | Observed on hardware, with run count, under the conditions recorded in section 1 |
 | **DOC** | Intel I225/I226 software manual, paraphrased |
 | **LINUX** | Linux `igc` behaviour. A reference, not a requirement |
+| **SOURCE** | What the source code at a named revision does, for example which register it writes. Not evidence of what the hardware retains |
+| **STATIC** | Compile-time layout check. Proves sizes and offsets on the compilers used; proves no behaviour |
 | **INFERENCE** | Reasoned from evidence, not directly measured |
 | **UNVERIFIED** | No evidence yet |
 
@@ -111,6 +116,20 @@ Logs are in `C:\Users\User\cqv\i328\evidence\tasarm-20261105`, with full hashes 
 
 **The #328 unload hang remains unexplained.** Nothing here shows a link to it.
 
+### 1.1 Observations used by the query contract (2026-11-15)
+
+Each row holds only under its recorded conditions. None is a reply of the query, and none is hardware GREEN for #350: the query has never run.
+
+| ID | Observation | Conditions and artifact | Class |
+|---|---|---|---|
+| E17 | `DTXMXPKTSZ` (0x0355C) read `0x00000098` in the identified Debug captures | Section 1 setup, Debug register reads. `test_tas_isolated_arm.exe_20261105_063525.log` lines 10 and 90 (SHA256 `56c8447cfb08333f841d9f78e089dc69a5d171e6b09eaa93f5ec45a9eee15221`), `ssot_register_validation_test.exe_20261105_063510.log` line 106 (SHA256 `0cf4a20dc18c574a2c76d8b7388023608e2711eafd0bb5d705ca2526911a73bc`), both in `tasarm-20261105` | **HW**, raw value only; these citations are not a count of independent runs. Decoded with the SSOT mask (9 bits) and `_SCALE` 64 it would be 152 × 64 = 9728 bytes: **INFERENCE** from the SSOT definition, not a query reply |
+| E18 | `ENDQT` read 0 at the baseline, where **DOC** lists a 1 s default | Recovery record 2026-11-05 (E14 evidence `c9f1d2f7`) | **HW**. The SSOT records it as the observed baseline (section 8) |
+| E19 | In the E14 surviving-schedule capture: `QBVCYCLET_S` and `QBVCYCLET` both `0x3B9ACA00`, windows non-baseline, `TQAVCTRL` `0x00000009`, `tasArmed=0` | `tasarm-20261105/tsnreg-after-matrix-20261105_134715.log` lines 103–121, SHA256 `558451d5c56c0960a0801c292bf9f14af6c9701f2f94717ab2862eeb93189002`; investigation `issue-328-tas-isolated-arm-20261104.md`, E14 case | **HW**, 1 capture of the E14 case, not an independent experiment. These register readings do not independently prove a running or active schedule |
+| E20 | `QBVCYCLET_S` read 0 in the identified baseline/post-cycle captures; the same isolated-arm log also reports shadow 0 during its `SETUP_TAS` sequence | `test_tas_isolated_arm.exe_20261105_063525.log` lines 17, 63–71 and 97; `ssot_register_validation_test.exe_20261105_063510.log` line 113; hashes as E17 | **HW**, scoped to these captures. Other captures, including E19, have a non-zero shadow. **SOURCE:** `SETUP_TAS` does not write the shadow (section 3.6); this does not establish its general retention or progression |
+| E21 | `IOCTL_AVB_TAS_ACTIVATE` (function 71, 80-byte request): commit, refusal of a second activation, refusal on a read-only handle, and wire gating seen by an independent I210 capture. Restoration inconclusive, because no register query existed | 2026-11-10 and 2026-11-11, revision 860afa7, Debug driver `734A677F…`, Release driver `98F5ADEE…`, I226-LM 0x125B REV_04 (#362, implementation status) | **HW**, `LOCAL_DIAGNOSTIC`, not acceptance evidence. Void as merge evidence after the move to 0x80C (#362) |
+
+The paired non-zero cycle/shadow readout is identified in E19. It belongs to the existing E14 surviving-schedule case and is not independent proof of a running schedule or of retention after an initial activation. The query contract does not depend on either inference (section 12.4).
+
 **Strict_End evidence sits outside the manual's window rule.** **DOC** 8.12.12 sets a minimum window. The 400 ns run and 5 µs large-frame stages were below it. They remain valid observations of hardware behaviour but are not a supported configuration (TAS-DR-05).
 
 ## 2. Conflicts that bind this design
@@ -119,7 +138,7 @@ The full report is in `DES-REVIEW-002`. Four conflicts directly constrain the de
 
 | Issue | Says | Effect here |
 |---|---|---|
-| `#91` ADR-PERF-002, accepted | Conflict with the miniport is mitigated by restricting the filter to PTP registers `0x0B600-0x0B700` | **All TAS registers lie outside that range.** Filter-side TSN programming needs an explicit decision: #362 ADR-TSN-002, Proposed, extends `#91` and does not supersede it |
+| `#91` ADR-PERF-002, accepted | Conflict with the miniport is mitigated by restricting the filter to PTP registers `0x0B600-0x0B700` | **All TAS registers lie outside that range.** Filter-side TSN programming needed an explicit decision: #362 ADR-TSN-002, **accepted 2026-11-14**, extends `#91` with one named exception for the TSN schedule registers and does not supersede it |
 | `#50` | 256 gate entries, 1 ms margin, disable before reconfiguring, atomic spin-lock commit | Differs from evidence; amended by the `#50` Amendment Record and #350 to #361, not here |
 | `#9` | Up to 64 entries, cycle 1 µs to 1 s | Differs from `#50` and **DOC** |
 | `#45`, `#52` | All device ops inside spin locks | Section 9.4 |
@@ -140,20 +159,30 @@ The full report is in `DES-REVIEW-002`. Four conflicts directly constrain the de
 
 `#64` requires an API version in IOCTL structures. Codes 26, 65 and 66 predate that and have none.
 
-### 3.2 Candidate operations
+### 3.2 Operations and code allocation
 
-Candidate codes 71 to 74 are free today. **They are not finalized:** a code is reserved only when the ADR and REQ issues are accepted.
+**Allocated by #362 decision 1 (accepted).** New functions are allocated in the vendor range 0x800 to 0xFFF, under `FILE_DEVICE_PHYSICAL_NETCARD` and `METHOD_BUFFERED`. No new code is allocated below 0x800. The function allocations and access bits are accepted; the request layouts stay provisional.
 
-| Candidate | Why it is needed | Could it merge? |
+| Operation | Code | State |
 |---|---|---|
-| `TAS_QUERY` (74) | Read-only state in Debug and Release. Must be separable from mutation | **No.** A read-only operation should stay distinct from mutating ones |
-| `TAS_ACTIVATE` (71) | Needs a clean adapter, sets TSN mode, takes `pre_activation` | With REPLACE, technically yes |
-| `TAS_REPLACE` (72) | Needs a running schedule, never changes mode, requires a future grid-aligned target | With ACTIVATE, technically yes |
-| `TAS_DISABLE_TO_LEGACY` (73) | Leaves TSN mode. Different struct, leaves residue | Depends on ADR-TSN-002. **If it is not accepted, this operation is dropped** |
+| `IOCTL_AVB_TAS_QUERY_HW` | `CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS)` = `0x0017602C` | Defined in `include/avb_ioctl.h` and pinned by TC-ABI-025, with TC-ABI-001 uniqueness (#434, f108ee8). **No handler:** the driver completes it with `STATUS_INVALID_DEVICE_REQUEST`. Layout: section 12, provisional |
+| `IOCTL_AVB_TAS_ACTIVATE` | `CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS)` = `0x0017A030` | Not released. Exists on the #357 integration branch as function 71 (`0x0017811C`) with the 80-byte request. Moves to 0x80C in one coordinated #357 change, together with the versioned request and the #352 completion model; 0x80C is never released with the 80-byte request (#362) |
+| `TAS_REPLACE`, `TAS_DISABLE_TO_LEGACY` | None | Not allocated: #362 decides no other new code. Return to legacy is not part of the initial implementation (#362 decision 2; #360 decided separately) |
+
+Functions 39 and 43 are not reused (#362). The candidate numbers 71 to 74 of version 0.5.0 are withdrawn.
+
+Why the operations are separate (unchanged rationale):
+
+| Operation | Why it is needed | Could it merge? |
+|---|---|---|
+| Query | Read-only state in Debug and Release. Must be separable from mutation | **No.** A read-only operation stays distinct from mutating ones, and its access bit states that (#362 decision 3) |
+| Activate | Needs a clean adapter, sets TSN mode, takes `pre_activation` | With REPLACE, technically yes |
+| Replace | Needs a running schedule, never changes mode, requires a future grid-aligned target | With ACTIVATE, technically yes |
+| Disable to legacy | Leaves TSN mode. Different struct, leaves residue | Not in the initial implementation (#362 decision 2) |
 
 | Alternative | For | Against | Assessment |
 |---|---|---|---|
-| Four codes | One code per operation is the repo pattern; each maps to one requirement and RED/GREEN test; a wrong-state call cannot silently take the other path | More dispatcher entries | **Recommended, for ADR review** |
+| Four codes | One code per operation is the repo pattern; each maps to one requirement and RED/GREEN test; a wrong-state call cannot silently take the other path | More dispatcher entries | Recommended in 0.5.0. #362 allocated separate query and activation codes; the others are not allocated |
 | One `TAS_APPLY` with an `operation` field, plus `TAS_QUERY` | Fewer codes, one struct | Precedent is weak (only PFC aliases a code); per-operation access control is impossible | Viable. Not required by anything found |
 | Change 26, 65, 66 | No new codes | Breaks existing clients and tests | **Rejected** |
 
@@ -170,8 +199,8 @@ Candidate codes 71 to 74 are free today. **They are not finalized:** a code is r
 | `SETUP_TAS` while a schedule is managed or present | Refused, section 3.6. ABI unchanged; behaviour differs only in states a legacy-only client cannot reach |
 | `GET_TAS_STATE` during a contract schedule | `armed` is derived, section 4.5 |
 | `DISARM_TAS` during a contract schedule | Unchanged: `STATUS_NOT_SUPPORTED` on I226, writes nothing |
-| Dispatcher | `src/device.c` allowlist and `test_ioctl_abi.c` code list gain entries at implementation |
-| Access | `_NDIS_CONTROL_CODE` fixes `FILE_ANY_ACCESS`, while `#50` specifies `FILE_WRITE_ACCESS`. Mutating codes should require write access. The device ACL needs review first (EG-17) |
+| Dispatcher | `src/device.c` allowlist gains entries at implementation. `test_ioctl_abi.c` already lists `IOCTL_AVB_TAS_QUERY_HW` (TC-ABI-001, TC-ABI-025) |
+| Access | Decided for the new codes by #362 decision 3: 0x80B carries `FILE_READ_ACCESS`, 0x80C `FILE_WRITE_ACCESS`; both use `CTL_CODE`, not `_NDIS_CONTROL_CODE`. Enforcement for the released codes 26 and 66 and the control device's access policy are tracked separately (#362, #73) |
 
 ### 3.4 Structure versioning
 
@@ -189,6 +218,11 @@ The rule follows `AVB_HW_SNAPSHOT_REQUEST`, `AVB_OPEN_BY_LUID_REQUEST` and `#64`
 ### 3.5 Proposed structures
 
 For review only; not added to `include/avb_ioctl.h`. Times are PHC nanoseconds. Register access is SSOT-derived at implementation.
+
+**Status of this block (2026-11-15):**
+
+- The query structures of version 0.5.0 (`AVB_TAS_REGS` 112 bytes, `AVB_TAS_LIMITS` 56, `AVB_TAS_OP_RECORD` 48, `AVB_TAS_QUERY_REQUEST` 496) are replaced by the v1 query layout in section 12.2: 536 bytes. `AVB_TAS_QUEUE_WINDOW` and `AVB_TAS_SCHEDULE` are unchanged and shared.
+- `AVB_TAS_OP_REQUEST` and `AVB_TAS_DISABLE_REQUEST` below are the 0.5.0 drafts. #362 records the current proposal as an operation request of 144 bytes and an operation record of 72 bytes, both provisional. They are settled in the coordinated #357 change that follows #352, not here. The activation request is published provisionally in section 13 (#365 section 13, 2026-11-18). Disable is not part of the initial implementation (#362 decision 2).
 
 ```c
 #define AVB_TAS_QUEUES 4u
@@ -228,49 +262,12 @@ typedef struct AVB_TAS_DISABLE_REQUEST {
     avb_u32 result, restoration; /* out */
 } AVB_TAS_DISABLE_REQUEST;                                  /* 72 bytes */
 
-typedef struct AVB_TAS_REGS {
-    avb_u32 tqavctrl, baset_l, baset_h, qbvcyclet, qbvcyclet_s;
-    avb_u32 stqt[4], endqt[4], txqctl[4];
-    avb_u32 tdh[4], tdt[4];
-    avb_u32 txpbsize, dtxmxpktsz;
-    avb_u32 read_failed_mask;    /* non-zero: the block is not trustworthy */
-} AVB_TAS_REGS;                                             /* 112 bytes */
-
-typedef struct AVB_TAS_LIMITS {
-    avb_u32 queues, windows_per_queue;
-    avb_u32 hw_cycle_min_ns, hw_cycle_max_ns;   /* hardware capability, not the tested set */
-    avb_u64 min_margin_ns;
-    avb_u32 tier_strict_end, tier_strict_cycle, tier_per_queue, tier_pass_ungated;
-    avb_u32 verified_cycle_count;
-    avb_u32 verified_cycle_ns[3];
-} AVB_TAS_LIMITS;                                           /* 56 bytes */
-
-typedef struct AVB_TAS_OP_RECORD {
-    avb_u64 client_op_id, driver_op_seq, generation_after, phc_ns;
-    avb_u32 operation, result, ntstatus, stage;
-} AVB_TAS_OP_RECORD;                                        /* 48 bytes */
-
-typedef struct AVB_TAS_QUERY_REQUEST {
-    avb_u32 version, size;
-    avb_u64 lookup_client_op_id;   /* in: 0 for none */
-    avb_u64 net_luid;              /* out */
-    avb_u16 vendor_id, device_id, revision_id, reserved0;
-    avb_u32 capabilities, hw_mode, origin, gate_policy;
-    avb_u32 current_status, next_status, inconsistency, restoration;
-    avb_u32 flags, lookup_result, link_speed_mbps, legacy_conflicts;
-    avb_u32 lifecycle, reserved1;  /* lifecycle: section 4.4 summary */
-    avb_u64 context_epoch, generation;
-    avb_u64 phc_before_ns, phc_after_ns;   /* bracket the register reads */
-    AVB_TAS_LIMITS limits;
-    AVB_TAS_SCHEDULE current, next;
-    AVB_TAS_REGS regs;
-    AVB_TAS_OP_RECORD lookup;
-} AVB_TAS_QUERY_REQUEST;                                    /* 496 bytes */
+/* AVB_TAS_REGS, AVB_TAS_LIMITS, AVB_TAS_OP_RECORD and the query request: see section 12.2 (v1, 536 bytes) */
 ```
 
 ### 3.6 Legacy `SETUP_TAS` interoperability
 
-`SETUP_TAS` writes `TQAVCTRL` and `QBVCYCLET`, so left alone it could change the cycle of a live schedule, or resume a dormant one (E9). The ABI stays; a new check runs before any write. **This is a design proposal, governed by REQ-F-TAS-LEGACY-001: code 26 does not change until that requirement and ADR-TSN-002 are accepted.**
+`SETUP_TAS` writes `TQAVCTRL` and `QBVCYCLET`, so left alone it could change the cycle of a live schedule, or resume a dormant one (E9). The ABI stays; a new check runs before any write. **This is a design proposal, governed by REQ-F-TAS-LEGACY-001: code 26 does not change until that requirement is accepted.** Accepted #362 keeps released codes' values and meanings and lists a refusal by `SETUP_TAS` on a record that is not clean as an alternative that "needs its own decision"; it records the remaining overwrite case as an accepted risk.
 
 **`BaseT` is not a decision input.** It advances on its own and stays non-zero after an in-place disarm (E10), so it cannot show that a contract schedule exists. It is reported only.
 
@@ -324,6 +321,8 @@ Family baseline for windows accepts `STQT = 0` with `ENDQT` at 0 (seen on hardwa
 ## 4. State model
 
 The driver reports facts and activation status separately. They are read fresh from hardware on every `TAS_QUERY` and at the start of every mutating operation, and compared with the driver's record. No status comes from the record alone.
+
+The v1 query encodes this model as section 12 states: numeric values in 12.2, status precedence and current/next attribution in 12.4. Where 12.4 is narrower than this section (for example, v1 never returns `INFERRED_ACTIVE` while link events are unobserved), 12.4 states what v1 does. This section is not changed by it.
 
 ### 4.1 Activation status
 
@@ -529,6 +528,8 @@ During `next = PENDING`, `regs` shows the new windows while `current` holds the 
 
 `min_margin_ns` is a reported limit, not a constant in callers. **Provisional value: 1 s** (UNVERIFIED below the lowest observed 0.935 s), and at least two running cycles. `#50`'s 1 ms has no supporting evidence. The 34 ms seen for one `BaseT` write came from user-mode diagnostics making separate IOCTLs with logging on, so it does not size an in-kernel commit. EG-01 measures that.
 
+State on 2026-11-15: the #357 integration branch enforces `AVB_TAS_MIN_LEAD_NS` = 100 ms (`include/avb_ioctl.h`, **SOURCE**). #362 lists 1.5 s as proposed and not established by measurement, and leaves the lead time open. The v1 query reports the lead the driver enforces, with `min_margin_state` `NOT_ESTABLISHED` (section 12.2). No value is decided here.
+
 ### 7.3 Commit classification
 
 The driver reads the PHC immediately before (`t0`) and after (`t1`) the `BASET_L` write:
@@ -561,9 +562,16 @@ Three different things must stay distinct:
 | `restoration` | `PARTIAL_OPEN_ALL` | `PARTIAL_RESIDUE` | `COMPLETE` **only after registers are read** |
 | Is it restoration? | **No.** Every gate open is not restored hardware | **No.** Partial | Only if verified |
 
-`DISABLE_TO_LEGACY` conflicts with guidance. **DOC** 7.5.2.1 says the mode is set at initialisation and not during operation, **LINUX** resets the adapter here, and the `disable_tas` source comment notes that the miniport owns `TQAVCTRL`. It therefore stays `NOT_IMPLEMENTED` unless ADR-TSN-002 accepts it. In legacy mode the windows are ignored, yet a later `TQAVCTRL` write resumes the same schedule (E9), so leaving TSN mode does not erase it. Until EG-14, `ACTIVATE` after it is refused.
+`DISABLE_TO_LEGACY` conflicts with guidance. **DOC** 7.5.2.1 says the mode is set at initialisation and not during operation, **LINUX** resets the adapter here, and the `disable_tas` source comment notes that the miniport owns `TQAVCTRL`. It therefore stays `NOT_IMPLEMENTED`: accepted #362 (decision 2) leaves it out of the initial implementation, and #360 is decided separately. In legacy mode the windows are ignored, yet a later `TQAVCTRL` write resumes the same schedule (E9), so leaving TSN mode does not erase it. Until EG-14, `ACTIVATE` after it is refused.
 
 **Baseline** is a family constant from the SSOT, not a value captured at attach, because E14 shows attach can see a dirty adapter. **HW** read `ENDQT` as 0 at baseline where **DOC** lists a 1 s default, so the table must reflect hardware, and that difference is recorded.
+
+The SSOT now generates these as **observed baselines** (intel-ethernet-regs 21fa1bc, consumed since #431): `I226_{TQAVCTRL,BASET_L,BASET_H,QBVCYCLET,QBVCYCLET_S,STQT,ENDQT,TXQCTL}_BASELINE`, with `QBVCYCLET` `0x3B9ACA00` and all others 0, `ENDQT` included (E18).
+
+- They are observed values, not reset values.
+- `I226_ENDQT_BASELINE_ALT` (`0x3B9ACA00`) is the documented value. It was not observed on this I226 and applies only under the windows-baseline rule of section 3.6.
+- `DTXMXPKTSZ` has no baseline. It is always read and decoded, never substituted.
+- A register that matches its baseline never proves a clean adapter, restoration or working TX. Those come from the test's own captures (#361).
 
 PHC reset is reported separately from register restoration, so "registers restored, PHC reset" stays visible.
 
@@ -593,7 +601,7 @@ An error completion does not return the output buffer (`docs/testing/test-verdic
 1. The client puts a non-zero `client_op_id` in the request.
 2. The driver records it on entry, with `result = IN_PROGRESS`.
 3. On any `DeviceIoControl` failure, the client captures the raw NTSTATUS, then calls `TAS_QUERY` on **the same handle** with `lookup_client_op_id`.
-4. `lookup_result` is `FOUND` with the record, `NOT_FOUND`, or `NOT_REQUESTED`.
+4. `lookup_result` is `FOUND` with the record, `NOT_FOUND`, or `NOT_REQUESTED`. Until the #352 store exists, the v1 query answers a non-zero id with `NOT_IMPLEMENTED`, never `NOT_FOUND` (section 12.2).
 
 | Situation | What the client has |
 |---|---|
@@ -679,7 +687,9 @@ All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGI
 
 ### 11.1 Evidence status
 
-**All 19 tests are design artifacts. None exists as code, and none has run.** A `LOCAL_DIAGNOSTIC` characterisation is not RED: it used Debug register tools and not the dedicated IOCTL under test. These stages describe evidence. They are not runner verdicts and replace none.
+**All 19 tests are design artifacts, and none has a recorded Hardware RED or GREEN.** A `LOCAL_DIAGNOSTIC` characterisation is not RED: it used Debug register tools and not the dedicated IOCTL under test. These stages describe evidence. They are not runner verdicts and replace none.
+
+State on 2026-11-15: `tests/hardware/test_tas_activate.c` on the #357 integration branch carries case TC-TASAPI-004 (`--hold`, #369) and TC-TASAPI-005 (`--pass`, #370) for function 71. Its status assertion depends on this query and is not implemented. No testcase of #366, #367, #368 or #381 exists as code. They are implemented on their own branches, one at a time (section 12.7).
 
 | Stage | Meaning | State of all 19 today |
 |---|---|---|
@@ -689,13 +699,13 @@ All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGI
 | GREEN pending | Implementation or passing run outstanding | **Yes** |
 | Hardware GREEN verified | Test passed on real hardware, Debug and Release, with installed SHA256 | **No** |
 
-Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011 on ADR-TSN-002, and TC-TASAPI-019 on the EG-18 findings (#364).
+Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011 on the separate #360 decision (#362 decision 2), and TC-TASAPI-019 on the EG-18 findings (#364).
 
 ### 11.2 Matrix
 
-| Requirement, filed, not accepted | ADR, Proposed | Design | Operation | TEST issue and case | Hardware behaviour to prove | Prior characterisation, not RED |
+| Requirement, filed, not accepted | ADR (#362 accepted, #363 Proposed) | Design | Operation | TEST issue and case | Hardware behaviour to prove | Prior characterisation, not RED |
 |---|---|---|---|---|---|---|
-| #350 REQ-F-TAS-STATE-001 | #362 | 4, 12 | `TAS_QUERY` | #366 TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, `COMPLETE`; read-only | None |
+| #350 REQ-F-TAS-STATE-001 | #362 | 4, 12 | `TAS_QUERY` | #366 TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, advisory `restoration` `COMPLETE`; read-only. The test compares its own captures; the advisory value is not proof of a clean adapter (12.5) | None |
 | #351 REQ-F-TAS-VALIDATE-001 | #362 | 5 | All | #367 TC-TASAPI-002 | Non-TAS adapter `SKIP_UNSUPPORTED`; unbound handle refused; tiers reported | None |
 | #351 REQ-F-TAS-VALIDATE-001 | #362 | 5.2 | ACTIVATE, REPLACE | #368 TC-TASAPI-003 | Each invalid request refused, `TAS_QUERY` and TX unchanged | None |
 | #357 REQ-F-TAS-ACTIVATE-001 | #362, #363 | 6 | ACTIVATE, hold | #369 TC-TASAPI-004 | Frames held to first window after `BaseT`, then gated; `PENDING` then `INFERRED_ACTIVE` | E6, EG-02 |
@@ -705,7 +715,7 @@ Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011
 | #358 REQ-F-TAS-REPLACE-001 | #362 | 7.3 | REPLACE, too near | #373 TC-TASAPI-008 | Refused, schedule unchanged on the wire | E4 |
 | #351 REQ-F-TAS-VALIDATE-001 | #362 | 5 | ACTIVATE, Strict_End | #374 TC-TASAPI-009 | Fitting frame passes; frame above declared size held, released on a wider window | E8 |
 | #359 REQ-F-TAS-OPENALL-001 | #362 | 8 | REPLACE, `OPEN_ALL` | #375 TC-TASAPI-010 | Flat arrivals, no PHC step, `OPEN_ALL` and TSN mode reported, later REPLACE re-gates | E15 |
-| #360 REQ-F-TAS-DISABLE-001 | #362 | 8 | `TAS_DISABLE_TO_LEGACY` | #376 TC-TASAPI-011 | Frames pass at once, PHC continuous, `RESIDUE`. **After ADR-TSN-002 only** | E10 |
+| #360 REQ-F-TAS-DISABLE-001 | #362 | 8 | `TAS_DISABLE_TO_LEGACY` | #376 TC-TASAPI-011 | Frames pass at once, PHC continuous, `RESIDUE`. **Only after #360 is decided** (#362 decision 2) | E10 |
 | #361 REQ-F-TAS-RESTORE-001 | #362 | 8 | Restoration | #377 TC-TASAPI-012 | After NIC cycle: `COMPLETE`, TX on the wire, PHC reset reported | E13 |
 | #355 REQ-F-TAS-LEGACY-001 | #362 | 3.6 | Interplay | #378 TC-TASAPI-013 | After `SETUP_TAS`: `LEGACY_ARMED`, contract operations refused | None |
 | #355 REQ-F-TAS-LEGACY-001 | #362 | 3.6 | `SETUP_TAS` decision table | #382 TC-TASAPI-017 | Rows 1, 2, 6, 7, 8: refused with exact NTSTATUS while managed, wire unchanged, `legacy_conflicts` up, generation unchanged. Clean and residue cases behave as today | E9, E10 |
@@ -714,7 +724,7 @@ Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011
 | #352 REQ-F-TAS-ERROR-001 | #362 | 9.3 | Concurrency | #380 TC-TASAPI-015 | Two threads race REPLACE: one wins, the other `BUSY` or `STATE_CONFLICT`, wire shows one schedule | None |
 | #350 REQ-F-TAS-STATE-001 | #362 | 4.1 | All | #381 TC-TASAPI-016 | `HARDWARE_VERIFIED` never returned in any test, with PHC past `BaseT` | None |
 | #356 REQ-F-TAS-NDIS-001 | #362 | 8.1 | Pause, Restart | #384 TC-TASAPI-019 | Mutating refused while Paused, no MMIO in `TAS_QUERY`, reconcile after Restart reports what hardware shows | None. Depends on EG-18 |
-| #353 REQ-NF-TAS-OBSERVE-001 | #362 | 12 | `TAS_QUERY` | #366 TC-TASAPI-001; TC-TASAPI-004, 006 in Release, not linked to #353 on GitHub (DES-REVIEW-002, D6) | Same results, Release driver SHA256 recorded | None |
+| #353 REQ-NF-TAS-OBSERVE-001 | #362 | 12 | `TAS_QUERY` | #366 TC-TASAPI-001; TC-TASAPI-004, 006 in Release, not linked to #353 on GitHub (DES-REVIEW-002, D6) | Same results, Release driver SHA256 recorded. **Ring pointers are not in v1** (12.6): #353 and #392 stay open for them | None |
 | #354 REQ-NF-TAS-BUFFER-001 | #362 | EG-03 | Buffer configuration | No TEST issue. To be defined after EG-03 | Buffer values reported, behaviour at sustained load | EG-03 |
 
 **Mock-only paths stay UNVERIFIED.** These cannot be driven on hardware by dedicated IOCTLs today: `READBACK_MISMATCH`, `MMIO_FAILED`, `ROLLBACK_*`, the race in `ACTIVATION_AMBIGUOUS`, `HW_ARMED_NO_RECORD`, `BASE_FAR_AHEAD`, and rows 3, 4 and 5 of the `SETUP_TAS` table. Their mocks must reproduce E14's recorded register values, cannot establish HIL GREEN, and must be labelled UNVERIFIED in test output and in the issue. `HW_ARMED_NO_RECORD` gains HIL evidence only if EG-04 finds a trigger.
@@ -729,23 +739,533 @@ Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011
 | New snapshot version | **Rejected.** Same callers, and every test would interpret state itself |
 | Extend `GET_TAS_STATE` | **Rejected.** Changes an existing ABI, and it is documented as driver-level only |
 | `READ_REGISTER` in Release | **Rejected.** `#122` removes it from Release. Generic `WRITE_REGISTER` stays Debug-only |
-| **`TAS_QUERY`** | **Proposed.** One purpose, fixed register set, no caller-supplied offsets, read-only, bound handles only |
+| **`TAS_QUERY`** | **Chosen.** Allocated as `IOCTL_AVB_TAS_QUERY_HW` by #362 decision 1 (accepted). One purpose, fixed register set, no caller-supplied offsets, read-only, bound handles only. Layout: 12.2, provisional |
 
 Register offsets come from `intel-ethernet-regs` through a new device op, per `#92`, not literals. Nothing in the set has a read side effect; `TXSTMP` registers are excluded because reading them changes state. `revision_id` needs to reach `TAS_QUERY`, and implementation must confirm how the driver obtains it. Already available in Release: `GET_STATISTICS` (outstanding sends), `GET_CLOCK_CONFIG` (PHC), the I210 observer.
 
-## 13. Open decisions
+### 12.0 Status of the v1 query contract
+
+**Source of truth:** the "Query v1 contract" section of #365. Sections 12.0 to 12.10 mirror it; where they differ, #365 governs.
+
+This is the frozen v1 contract of 2026-11-15. It completes the r5 proposal of 2026-11-11 for the query only, and keeps r5's layout and offsets.
+
+**Amendment 1 (2026-11-17, 12.10):**
+- `PARTIAL` is an incomplete hardware observation.
+- The register-lock case is defined.
+- `AVB_TAS_QUERY_VERSION` is 2.
+
+The layout, the 536-byte size, the offsets and every numeric enum value are unchanged. In this section "v1" names this contract generation and its register set (3C); it is not the value of the `version` field.
+
+| Part | State |
+|---|---|
+| Code, access, `METHOD_BUFFERED`, versioned, read-only, includes `DTXMXPKTSZ` | **Accepted** (#362 decision 1) |
+| Layout, 536 bytes, and every value below | **Proposed.** #362 keeps the size provisional until this contract is accepted under #365 |
+| Sizes and offsets | **STATIC** verified on x86 and x64 (12.8) |
+| Behaviour on hardware | **UNVERIFIED.** No handler exists and the query has never run (12.7) |
+
+Q's decisions of 2026-11-11 are cited as:
+
+- **3A:** snapshot rules;
+- **3B:** advisory restoration;
+- **3C:** the v1 register set.
+
+Two acquisition paths are cited as dependencies:
+
+- **K8:** link events and link speed;
+- **K9:** the PCI revision.
+
+**C6** is the per-adapter retention of commit timing, independent of the #352 store.
+
+### 12.1 Request and validation
+
+Inputs are only `version`, `size` and `lookup_client_op_id`. Every other byte is output and is overwritten. The checks run in this order. On any error, `IoStatus.Information` is 0 and nothing is written.
+
+| # | Condition | Raw NTSTATUS | Basis |
+|---|---|---|---|
+| 0 | Handle opened without read access | `STATUS_ACCESS_DENIED`, from the I/O manager | #362 decision 3 |
+| 0 | Driver without a handler for the code (today) | `STATUS_INVALID_DEVICE_REQUEST` | `src/device.c` default |
+| 1 | Open instance not bound by `OPEN_ADAPTER` or `OPEN_ADAPTER_BY_LUID`. Refused in `src/device.c` before the fallback adapter search, lazy initialization, context use or MMIO | `STATUS_INVALID_DEVICE_STATE` | #353 ("the query is refused"), #367 ("exact NTSTATUS"); same gate as code 70 (`src/device.c`) |
+| 2 | System buffer missing, or input or output length below 536 | `STATUS_BUFFER_TOO_SMALL` | 3.4 |
+| 3 | `version` not 2 (Amendment 1, 12.10). Version 1 is not served | `STATUS_REVISION_MISMATCH` | 3.4 |
+| 4 | `size` not 536 | `STATUS_INVALID_PARAMETER` | 3.4 |
+| 5 | The bound adapter's discovered capabilities lack `INTEL_CAP_TSN_TAS` | `STATUS_NOT_SUPPORTED` | 5.1, 9.5 ("only if the capability is known absent") |
+| 5 | Capability present, but the family's device ops provide no query register map. Today that is the I225: `i225_ops` is not registered (`devices/intel_device_registry.c`), and `gen/i225_regs.h` defines no v1 register. This follows from the implementation state, not from the I225 activation restriction | `STATUS_NOT_IMPLEMENTED` | 5.1 `NOT_IMPLEMENTED` |
+| 5 | Map present but missing a v1 register | Served. That register is invalid with `SNAP_RSN_REG_UNMAPPED` | |
+| 6 | Otherwise | `STATUS_SUCCESS`, `Information` 536 | |
+
+- **No `STATUS_DEVICE_NOT_READY`:** the query joins the dispatch prologue's observation allow-list, as `GET_HW_STATE` does (`src/avb_integration_fixed.c`). It never initializes the adapter.
+- **No `ProbeForWrite`** on the system buffer.
+- **Never blocking:** while a mutating operation holds the per-adapter claim, `flags` carries `OP_IN_PROGRESS` and the slots are not advanced from a mid-sequence read (#362 concurrency). While a mutating operation holds the adapter's TAS register lock (#45, #52), the query does not wait for it and reads no register: it returns the incomplete observation of 12.3 "Register lock held" (Amendment 1, 12.10).
+- **Classification:** clients classify by the raw NTSTATUS. `STATUS_NOT_IMPLEMENTED` and `STATUS_INVALID_DEVICE_REQUEST` both map to Win32 1.
+- **Support** is decided from discovered state, never from the device model. Tests discover it from the reply and the `GET_HW_STATE` capabilities.
+
+### 12.2 Layout and values
+
+Universal rules:
+
+| Rule | Statement |
+|---|---|
+| U1 | Every enumerated out field uses 0 = not reported. A successful reply never carries 0 in `hw_read`, `hw_mode`, `current_status`, `next_status`, `restoration`, `lookup_result` or `dtx_max_frame_state` |
+| U2 | A numeric field where 0 is meaningful is valid only when its validity indicator says so |
+| U3 | No hardware field is filled from the driver record, and no record field from hardware (#362 state authority) |
+| U4 | Times are PHC nanoseconds. Explicit padding only; the x86 and x64 layouts are identical |
+
+```c
+typedef struct AVB_TAS_REGS {                  /* hardware, decision 3C */
+    avb_u32 tqavctrl, baset_l, baset_h, qbvcyclet, qbvcyclet_s;   /* read_failed bits 0-4 */
+    avb_u32 stqt[4], endqt[4], txqctl[4];                         /* bits 5-8, 9-12, 13-16 */
+    avb_u32 dtxmxpktsz;                                           /* bit 17 */
+    avb_u32 read_failed;  /* bit set = value invalid (read failed or not attempted), value then 0 */
+    avb_u32 consistency;  /* AVB_TAS_CONS_BASET_TORN 0x1 */
+} AVB_TAS_REGS;                                                   /* 80 */
+typedef struct AVB_TAS_LIMITS {
+    avb_u32 queues, windows_per_queue, hw_cycle_min_ns, hw_cycle_max_ns;
+    avb_u64 min_margin_ns;
+    avb_u32 min_margin_state, tier_hold, tier_pass, tier_strict_end, tier_strict_cycle, tier_per_queue;
+} AVB_TAS_LIMITS;                                                 /* 48 */
+typedef struct AVB_TAS_OP_RECORD {             /* #352 record wire format; production and storage are #352's */
+    avb_u64 client_op_id, net_luid, context_epoch, generation_after, phc_before_commit_ns, phc_after_commit_ns;
+    avb_u32 operation, result, ntstatus, stage, hw_effect, op_flags;
+} AVB_TAS_OP_RECORD;                                              /* 72 */
+typedef struct AVB_TAS_COMMIT_INFO {           /* C6 */
+    avb_u64 phc_before_commit_ns, phc_after_commit_ns; avb_u32 state, reserved;
+} AVB_TAS_COMMIT_INFO;                                            /* 24 */
+
+typedef struct AVB_TAS_QUERY_HW_REQUEST {
+    avb_u32 version;              /*   0 in  2 */
+    avb_u32 size;                 /*   4 in  536 */
+    avb_u64 lookup_client_op_id;  /*   8 in  0 = no lookup */
+    avb_u64 net_luid;             /*  16 out */
+    avb_u16 vendor_id, device_id; /*  24 out */
+    avb_u16 revision_id;          /*  28 out */
+    avb_u16 revision_state;       /*  30 out */
+    avb_u32 hw_read, hw_mode, origin, gate_policy;               /*  32 out */
+    avb_u32 current_status, current_reasons;                     /*  48 out */
+    avb_u32 next_status, next_reasons;                           /*  56 out */
+    avb_u32 snapshot_reasons, restoration, flags, lookup_result; /*  64 out */
+    avb_u32 link_speed_mbps, legacy_conflicts;                   /*  80 out */
+    avb_u64 context_epoch, generation;                           /*  88 out */
+    avb_u64 phc_before_ns, phc_after_ns;                         /* 104 out */
+    avb_u32 dtx_max_frame_bytes, dtx_max_frame_state;            /* 120 out */
+    AVB_TAS_LIMITS limits;                                       /* 128 out */
+    AVB_TAS_SCHEDULE current;                                    /* 176 out, record */
+    AVB_TAS_SCHEDULE next;                                       /* 256 out, record */
+    AVB_TAS_REGS regs;                                           /* 336 out, hardware */
+    AVB_TAS_OP_RECORD lookup;                                    /* 416 out */
+    AVB_TAS_COMMIT_INFO current_commit;                          /* 488 out */
+    AVB_TAS_COMMIT_INFO next_commit;                             /* 512 out */
+} AVB_TAS_QUERY_HW_REQUEST;                                      /* 536 */
+```
+
+Every out field is valid only on `STATUS_SUCCESS`.
+
+| Off | Field | Meaning | Valid when | Not reported or unavailable | Source or dependency |
+|---|---|---|---|---|---|
+| 0 | `version`, `size` | Echo: 2, 536 (Amendment 1) | Always | | #350 |
+| 16 | `net_luid` | Bound adapter | Always, never 0 | | Context |
+| 24 | `vendor_id`, `device_id` | Identity, for corroboration only | Always | | Context |
+| 28 | `revision_id` | PCI revision | `revision_state` = `VALID` (1) | 0, with `revision_state` 0 | **K9**: the acquisition path is designed only after a hardware observation |
+| 32 | `hw_read` | `READ` 1: complete observation, every v1 register and both PHC values valid. `NOT_RUNNING` 2. `PARTIAL` 3: incomplete hardware observation, at least one v1 register or PHC value invalid because its read failed or was not attempted (12.3); it does not state that any MMIO occurred (Amendment 1). `NO_MMIO` 4 | Always | | #350, 3A |
+| 36 | `hw_mode` | From `TQAVCTRL.TRANSMIT_MODE`: `OFF` 1, `TSN` 2, `UNREADABLE` 3 | Always | `UNREADABLE` when `TQAVCTRL` is invalid | #350 |
+| 40 | `origin` | Record: `NONE` 1, `SETUP_TAS` 2, `CONTRACT` 3, `FOUND_AT_ATTACH` 4 | Not 0 | 0 until the record tracks origin; today `tas_armed` does not separate code 26 from the activation | Per-adapter record; `FOUND_AT_ATTACH` needs the attach-time read (#362) |
+| 44 | `gate_policy` | Record: `NONE` 1, `SCHEDULED` 2, `OPEN_ALL` 3 | Not 0 | 0, as for `origin` | `OPEN_ALL` only through #359 |
+| 48 | `current_status`, `current_reasons` | 4.1 status: `NONE` 1, `PROGRAMMED` 2, `PENDING` 3, `INFERRED_ACTIVE` 4, `HARDWARE_VERIFIED` 5 (never returned), `INCONSISTENT` 6, `UNKNOWN` 7; slot reasons below | Always | `UNKNOWN` with its reason (12.4) | #350, C6 |
+| 56 | `next_status`, `next_reasons` | As above, by 12.4 | Always | Never `NONE` without observed hardware. v1 has no next record (#358) | #350; #358 for a next record |
+| 64 | `snapshot_reasons` | Bits below | Always | | #350 |
+| 68 | `restoration` | Advisory, 12.5 | Always | `NO_SSOT_BASELINE`, `UNKNOWN` | SSOT observed baselines |
+| 72 | `flags` | `OP_IN_PROGRESS` 0x1; `UNVERIFIED_CONFIG_ACTIVE` 0x2, never set in v1 (no opt-in exists); `PHC_RESET_SEEN` 0x4, sticky in the context | Always | | Claim; PHC tracking |
+| 76 | `lookup_result` | `NOT_REQUESTED` 1, `FOUND` 2, `NOT_FOUND` 3, `NOT_IMPLEMENTED` 4 | Always | v1: id 0 gives 1; a non-zero id gives 4, never 3 | #352 store |
+| 80 | `link_speed_mbps` | Speed used for the window minimum | Not 0 | 0 = unknown | **K8** (#351) |
+| 84 | `legacy_conflicts` | Refused `SETUP_TAS` count | Not `0xFFFFFFFF` | `0xFFFFFFFF` until #355 | #355 |
+| 88 | `context_epoch`, `generation` | #352 | Not 0 | 0 = not reported | #352 |
+| 104 | `phc_before_ns`, `phc_after_ns` | Bracket around the register block | The matching `PHC_*_INVALID` bit clear | 0, with the bit set | #350, 3A |
+| 120 | `dtx_max_frame_bytes`, `dtx_max_frame_state` | `DTXMXPKTSZ` decoded with the SSOT mask and `_SCALE` (64); the raw value stays in `regs`. State: `DECODED` 1, `READ_FAILED` 2, `NO_SSOT_SCALE` 3, `NOT_READ` 4 | Bytes valid only when `DECODED` (0 is then a decoded value) | Bytes 0 | #350, #362 decision 1 |
+| 128 | `limits.queues`, `windows_per_queue` | 4; 1 (TAS-DR-03) | Not 0 | | Constants |
+| 136 | `limits.hw_cycle_min_ns`, `hw_cycle_max_ns` | From SSOT field definitions only | Not 0 | 0: the SSOT cycle field carries no units | SSOT |
+| 144 | `limits.min_margin_ns`, `min_margin_state` | The lead the driver enforces now (100 ms); state `NOT_ESTABLISHED` 1 (`ESTABLISHED` 2 not used) | State not 0 | | 7.2 |
+| 156 | `limits.tier_*` | Tier values of 5.1: `HW_UNSUPPORTED` 1, `NOT_IMPLEMENTED` 2, `IMPLEMENTED_UNVERIFIED` 3, `IMPLEMENTED_VERIFIED` 4 | Not 0 | 0 until the #351 table exists. `tier_pass` = 2 under #363 option C | **#351** |
+| 176 | `current` | Record of the committed schedule | `current_commit.state` is `RETAINED`, `PHC_DISCONTINUOUS` or `HW_MISMATCH` | All 0 | C6, fed by the activation (#357) |
+| 256 | `next` | As above, with `next_commit` | Same | v1: all 0 | #358 |
+| 336 | `regs` | Raw v1 register set (12.3) | Per `read_failed` bit | Bits set; values 0. `NOT_RUNNING`, `NO_MMIO` and "Register lock held" (12.3) set bits 0-17 | #350, 3A |
+| 416 | `lookup` | #352 record | `lookup_result` = `FOUND` | All 0. v1 is never `FOUND` | Production and storage are #352's |
+| 488 | `current_commit` | Commit bracket and state: `NONE` 1, `RETAINED` 2, `PHC_DISCONTINUOUS` 3, `HW_MISMATCH` 4, `LOST` 5 | State not 0 | Bracket 0 when `NONE` or `LOST` | C6 storage under #350, fed by #357 |
+| 512 | `next_commit` | As above | | v1: `NONE` | #358 |
+
+| Snapshot reason | Bit | Slot reason | Bit |
+|---|---|---|---|
+| `NOT_RUNNING` | 0x001 | `HW_ARMED_NO_RECORD` | 0x0001 |
+| reserved, never set | 0x002 | `DRIVER_ARMED_HW_OFF` | 0x0002 |
+| `READ_FAILED` | 0x004 | `BASE_FAR_AHEAD` | 0x0004 |
+| `READ_INCONSISTENT` | 0x008 | `WINDOW_MISMATCH` | 0x0008 |
+| `PHC_DISCONTINUITY` (backward move in this context; forward jumps undetected, #348) | 0x010 | `CYCLE_MISMATCH` | 0x0010 |
+| `EVENT_UNRECONCILED` | 0x020 | `TXQCTL_MISMATCH` | 0x0020 |
+| `NO_MMIO` | 0x040 | `LINK_SPEED_CHANGED` | 0x0040 |
+| `PHC_BEFORE_INVALID` | 0x080 | `PHC_RESET_SINCE_COMMIT` | 0x0080 |
+| `PHC_AFTER_INVALID` | 0x100 | `ACTIVATION_AMBIGUOUS` | 0x0100 |
+| `REG_UNMAPPED` | 0x200 | `COMMIT_INFO_LOST` | 0x0200 |
+| | | `TRANSITION_DURING_SNAPSHOT` | 0x0400 |
+| | | `LINK_EVENTS_UNOBSERVED` | 0x0800 |
+| | | `SLOT_UNATTRIBUTED` | 0x1000 |
+
+A semantic change to any field raises `AVB_TAS_QUERY_VERSION` (3.4).
+
+### 12.3 Snapshot rules and register set (decisions 3A, 3C)
+
+| Rule | Statement |
+|---|---|
+| Offsets | From `intel-ethernet-regs/gen/i226_regs.h` only, decoded through the generated helpers. No `READ_REGISTER`, no driver constants |
+| Pass | One bounded pass: `phc_before_ns`, the register block in a fixed order, `phc_after_ns`. The block is a sequence of reads inside that bracket, never an atomic state. Temporal progression compares the retained target `current.base_time_ns` with the bracket, never with one PHC value or the live `regs.baset_*` readback |
+| Tear check | Only `BASET` can tear. It is read H, L, H; a difference is repeated once. If it persists: `BASET_TORN` and `READ_INCONSISTENT` |
+| Read failure | The register's `read_failed` bit is set and its value is 0, with `hw_read` `PARTIAL`. Never filled from the record |
+| Not Running | No MMIO: `hw_read` `NOT_RUNNING`, hardware fields 0, `hw_mode` `UNREADABLE`, slots `UNKNOWN`. Record fields are still reported as record |
+| No MMIO access | BAR not mapped or `INTEL_CAP_MMIO` clear: `hw_read` `NO_MMIO`. Nothing is read and no initialization is started |
+| Register lock held | Running with MMIO access, but a mutating TAS operation holds the adapter's TAS register lock (#45, #52), or waits for it. The query does not wait and reads no register and no PHC value: the reply of 12.10 (`hw_read` `PARTIAL`, `OP_IN_PROGRESS`). Amendment 1 |
+| Writes | None. No claim is taken, and the query never blocks |
+| v1 set | `TQAVCTRL`, `BASET_L`, `BASET_H`, `QBVCYCLET`, `QBVCYCLET_S`, `STQT0-3`, `ENDQT0-3`, `TXQCTL0-3`, `DTXMXPKTSZ` |
+| Excluded from v1 | `TDH`, `TDT`, `TXPBSIZE`, `TCTL`. They go to a separately versioned diagnostic extension (12.6) |
+
+### 12.4 Status precedence and current/next attribution
+
+Both slots use the same precedence. The first match wins, and the reasons masks carry every applicable bit.
+
+| Step | Condition | Status |
+|---|---|---|
+| S1 | The slot's inputs are not observable: `hw_read` `NOT_RUNNING` or `NO_MMIO`; an input register invalid (`read_failed`, `REG_UNMAPPED`); `READ_INCONSISTENT`; `PHC_BEFORE_INVALID` or `PHC_AFTER_INVALID`; `EVENT_UNRECONCILED`; `OP_IN_PROGRESS` | `UNKNOWN` |
+| S2 | Any `INCONSISTENT` slot reason, including `PHC_RESET_SINCE_COMMIT` | `INCONSISTENT` |
+| S3 | Any `UNKNOWN` slot reason: `COMMIT_INFO_LOST`, `ACTIVATION_AMBIGUOUS`, `TRANSITION_DURING_SNAPSHOT`, `LINK_EVENTS_UNOBSERVED` | `UNKNOWN` |
+| S4 | 4.1 progression | `NONE`, `PROGRAMMED`, `PENDING`, `INFERRED_ACTIVE` |
+
+`NONE` exists only in S4, so it always rests on observed hardware.
+
+**Current versus next.** Attribution comes from the record, the retained commit timing and the field-specific reconciliation in the table below.
+
+- It never rests on one register, and never on a comparison of every register.
+- Only fields with a contract-defined expected value are compared, through their SSOT masks.
+- Raw values always stay in `regs`, and S1 applies first.
+- Information that cannot be established gives `UNKNOWN` with its reason. `INCONSISTENT` is used only for a contradiction the table defines.
+
+| Group | Compared field | Expected value from | A contradiction gives | Untouched bits, autonomous change |
+|---|---|---|---|---|
+| `TQAVCTRL` | `TRANSMIT_MODE` only (`FUTSCDDIS` only for a PASS record; none in v1) | Record (6.1; mode bits only, #362 decision 4). No record: `OFF` (3.6, "names the class") | Record and mode off: `DRIVER_ARMED_HW_OFF`. No record and TSN on: `HW_ARMED_NO_RECORD` | Other bits are not compared, because no operation contract defines their expected value. That includes `ENHANCED_QAV`, which the activation source sets. Their relevance and retention are UNVERIFIED; they are reported raw |
+| `STQT0-3`, `ENDQT0-3` | `START_TIME`, `END_TIME` | Record windows. No record: the family baseline (`STQT` 0; `ENDQT` 0, or `_ALT` only under 3.6) | `WINDOW_MISMATCH`; with no record, `HW_ARMED_NO_RECORD` | Retention after the write is UNVERIFIED |
+| `QBVCYCLET` | `QBV_CYCLE_TIME`, with a record only | Record cycle. No record: not an input (3.6). The observed baseline is not used here | `CYCLE_MISMATCH`, including a `SETUP_TAS` overwrite (4.3) | |
+| `QBVCYCLET_S` | `SHADOW_QBVCYCLE`, **without a record only** | No record: the observed baseline 0 (3.6, "shadow non-zero") | No record: `HW_ARMED_NO_RECORD` | **Not compared under a record:** retention after the commit is not established for every device |
+| `BASET_L`, `BASET_H` | None | None: reported only (3.6) | | Advances on its own (E3, E10) and shows the old value on a running schedule (E5). Used only for `BASE_FAR_AHEAD` against the PHC bracket (4.3) and for `BASET_TORN`. Never compared with the target |
+| `TXQCTL0-3` | Strict fields, only if the record carries them | The v1 activation request carries none, so nothing is compared | `TXQCTL_MISMATCH`, only then | A field with no expected value is not a disagreement |
+| `DTXMXPKTSZ` | None | None | | Read and decoded only. No baseline, never substituted |
+
+| Case | Record | Hardware, per the table | `current` | `next` |
+|---|---|---|---|---|
+| R1 | Present | No compared field contradicts | S2 to S4 | `NONE` |
+| R2 | Present | A compared field contradicts | `INCONSISTENT` (`*_MISMATCH` or `DRIVER_ARMED_HW_OFF`) | `UNKNOWN`, `SLOT_UNATTRIBUTED` |
+| R3 | None | TSN on, or windows off their baseline, or shadow non-zero (3.6 rows 4 to 6; 4.3) | `INCONSISTENT`, `HW_ARMED_NO_RECORD` (#350) | `UNKNOWN`, `SLOT_UNATTRIBUTED` |
+| R4 | None | TSN off, windows at baseline, shadow 0. `BaseT` may be non-zero (residue, 3.6 row 7) | `NONE` | `NONE` |
+
+- **`next` is the tracked lifecycle slot.** A next schedule exists there only with a next record (`TAS_REPLACE`, #358; none in v1).
+- **`next` `NONE`** means no tracked next schedule and no unexplained compared state. It does not prove that the hardware holds no unrecorded state; such state surfaces through R2 and R3.
+- **Regression case.** One initial activation, no replacement, a retained current record, and `QBVCYCLET_S` non-zero as written. Result: R1, so `next` `NONE` with `next_reasons` 0, no mismatch from the shadow, and `regs.qbvcyclet_s` reported as read.
+
+S4 detail:
+
+- **`PENDING`** needs all of the following:
+  - `commit.state` = `RETAINED`;
+  - the commit classified in time (7.3);
+  - `phc_after_ns` valid and below the retained target `current.base_time_ns`;
+  - mode TSN;
+  - no compared field contradicting the record.
+- **`INFERRED_ACTIVE`** needs every 4.1 condition. Otherwise the slot is `UNKNOWN` with its reason:
+
+  | Missing condition | Reason |
+  |---|---|
+  | Commit timing missing | `COMMIT_INFO_LOST` |
+  | Commit not classified in time | `ACTIVATION_AMBIGUOUS` |
+  | Retained target `current.base_time_ns` inside the PHC bracket | `TRANSITION_DURING_SNAPSHOT` |
+  | "No link or power event since commit" not established | `LINK_EVENTS_UNOBSERVED` |
+
+  **While K8 is unverified, v1 never returns `INFERRED_ACTIVE`.**
+- **Never:** readback alone never moves a slot past `PROGRAMMED`. `BaseT` alone is never evidence. `HARDWARE_VERIFIED` is never returned (#381).
+
+### 12.5 Restoration (advisory, decision 3B)
+
+`restoration` is computed only from the SSOT observed baselines (section 8). The driver keeps no table of its own.
+
+It never establishes a clean adapter, restoration or working TX. #361 and the tests decide those from the test's own pre-test and post-cleanup captures.
+
+| Value | Meaning |
+|---|---|
+| `COMPLETE` 1 | TSN off, and every restoration-set register equals its observed baseline. `ENDQT`: 0, or `_ALT` only under 3.6 |
+| `PARTIAL_OPEN_ALL` 2 | TSN on, and every window covers the cycle |
+| `PARTIAL_RESIDUE` 3 | TSN off, and some restoration-set register differs |
+| `NONE` 4 | TSN on, otherwise |
+| `UNKNOWN` 5 | An input register is invalid |
+| `NO_SSOT_BASELINE` 6 | The family's SSOT has no observed baselines |
+
+The restoration set is the v1 register set without `DTXMXPKTSZ`, so `BASET_L` and `BASET_H` are included. PHC continuity stays a separate fact (#361).
+
+### 12.6 Evidence boundary and open coverage
+
+What each row of 12.4 rests on. None of it is hardware GREEN for #350. Every comparison stays UNVERIFIED on hardware until the query's own replies are captured under #366 and #369.
+
+| Group | **SOURCE**: what the #357 activation writes (`devices/i226_tas_activate.h`) | **HW**: observed, under section 1 conditions | UNVERIFIED |
+|---|---|---|---|
+| `TQAVCTRL` | Read-modify-write that sets `TRANSMIT_MODE` and `ENHANCED_QAV` | Gating under `SETUP_TAS`-started schedules (E1 to E7). E21 for the activation itself. 6.1: the designed sequence has never run | Retention after the activation; meaning of the uncompared bits |
+| `STQT`, `ENDQT` | `START_TIME`, `END_TIME` per queue | `ENDQT` 0 at the baseline (E18). E10: written back during one in-place disarm (1 run, 3 cycles) | Retention after the activation; any other device |
+| `QBVCYCLET`, `QBVCYCLET_S` | Both cycle fields, shadow first | E3: shadow, cycle and future `BaseT` applied a changed cycle (1 run). E19: shadow non-zero in a surviving schedule (1 case). E20: shadow 0 under `SETUP_TAS` | Shadow retention after the commit on every device |
+| `BASET_L`, `BASET_H` | `BASET_H` raw seconds, then the `BASE_TIME_L` field | E3 stepped at the new cycle (1 run). E5: old value on a running schedule. E10: kept advancing after an in-place disarm (1 run) | General progression behaviour |
+| `TXQCTL` | Not written by the activation | E7: `Strict_End` took effect by the next window (3 runs, `SETUP_TAS` path) | Anything about `TXQCTL` under the activation |
+| `DTXMXPKTSZ` | Never written; read only | E17: raw `0x00000098` in every reading, with Debug register reads | The query's decoded value on the HIL adapter (#366); any other device or configuration |
+
+**Requirement coverage that stays open:**
+
+| Item | Why it stays open |
+|---|---|
+| Ring pointers | #353, #392 and section 12 ("Need") require ring pointers; v1 excludes `TDH` and `TDT` (3C), and code 70 has none either. #366 can verify every other #353 field. #353 and #392 are **not fully verified** until the separately versioned diagnostic extension exists. Neither requirement is rewritten here |
+| #351 dependencies | Tiers (0 until the #351 table), `revision_id` (K9), `link_speed_mbps` (K8). Their interim values are truthful reporting, **not acceptance evidence**. The tier part of #367 stays not GREEN until #351 |
+| #369 status part | The status progression (`PENDING`, then `INFERRED_ACTIVE`) cannot pass while K8 is open. #369 keeps its status and its independent wire-gating assertions and reports the status part not GREEN |
+| #350 | Stays incomplete while its `PENDING` and `INFERRED_ACTIVE` evidence (through #369) and the K8 and C6 evidence are missing |
+
+A GREEN clean-query subset (#366, #381, the unbound part of #367) completes neither #350 nor #353 nor #392.
+
+### 12.7 Verification and order of work
+
+Existing TEST issues are reused. No new TEST issue is created for the query.
+
+| TEST | Verifies | What it checks against the query | State on 2026-11-15 |
+|---|---|---|---|
+| #366 TC-TASAPI-001 | #350, #353 | Clean adapter. Bound by LUID; two replies agree on every schedule register; PHC and statistics consistent; the I210 sees TX unaffected. `NONE`, `OFF`, advisory `COMPLETE`. `DTXMXPKTSZ` raw and decoded, recorded as a measurement | Not written. Hardware RED planned: the driver without a handler answers `STATUS_INVALID_DEVICE_REQUEST` |
+| #381 TC-TASAPI-016 | #350 | `HARDWARE_VERIFIED` never returned in a valid, executed query. An unsupported or unexecuted query never counts as passing | Not written |
+| #367 TC-TASAPI-002 | #351 | Unbound handle refused with exactly `STATUS_INVALID_DEVICE_STATE` and no lazy initialization. `SKIP_UNSUPPORTED` or `SKIP_NOT_IMPLEMENTED` from discovered capability. Tiers per #351 | Not written. The tier part waits for #351 |
+| #368 TC-TASAPI-003 | #351 | The query before and after each invalid request: registers and TX unchanged | Not written. RED only if the assertion fails before the handler; no manufactured RED |
+| #369 TC-TASAPI-004 | #357, #350 | Existing `test_tas_activate.c --hold`: status progression and the independent wire assertions. After the activation: `next` `NONE`, `next_reasons` 0, no `CYCLE_MISMATCH`. `regs.qbvcyclet_s` recorded as an observation; the test never asserts that a device retains it | Status sub-check `SKIP_NOT_IMPLEMENTED` today |
+
+#377 stays with #361. #379 and #380 stay with #352.
+
+**Order of work.** One branch at a time, each merged into the #357 integration branch before the next starts:
+
+1. This design change, owned by #365.
+2. #350: the structures and values of 12.2 in `include/avb_ioctl.h`, with ABI pins and negative controls. No handler.
+3. #366, #381 and #367, each on its own branch, with hardware RED against the driver without a handler.
+4. #350: the handler, with offline mocks that include R1 to R4 and the regression case.
+5. #368, then #369.
+
+No issue closes on the merge of code or of a RED test.
+
+**How the tests run:**
+
+- Hardware TDD runs one compiled testcase at a time, in Debug, through `tools/test/Run-Tests-Elevated.ps1 -TestName <entry> -CaptureDbgView`. Release runs only when the Release driver is installed.
+- Acceptance of each requirement still needs its own hardware evidence in Debug and Release (#362 decision 6), with full provenance.
+- Offline and mock results are supplementary and never establish GREEN.
+
+### 12.8 Layout verification (STATIC)
+
+This section establishes sizes and offsets only. It establishes no behaviour.
+
+The C_ASSERTs of the proposed header (SHA256 `93f349a4…`) were compiled on 2026-11-15, outside the repository, with MSVC `cl /W4 /WX /c` against Windows SDK 10.0.26100.0 headers, for x64 and x86.
+
+| Check | x64 | x86 |
+|---|---|---|
+| Positive: all sizes (16, 80, 80, 48, 72, 24, 536), 15 offsets, `IOCTL_AVB_TAS_QUERY_HW` = `0x0017602C` | Compiles, exit 0 | Compiles, exit 0 |
+| Negative: size 528 | C2118, exit 2 | C2118, exit 2 |
+| Negative: `lookup` at 408 | C2118, exit 2 | C2118, exit 2 |
+| Negative: `regs` at 344 | C2118, exit 2 | C2118, exit 2 |
+| Negative: `revision_state` at 32 | C2118, exit 2 | C2118, exit 2 |
+
+Each negative control fails on its own assertion line, so the positive build's assertions are live. The ABI pins enter the repository with the header change (step 2 in 12.7).
+
+### 12.9 Not approved through this layout
+
+Their bytes are fixed and their "not reported" encodings are defined above. Their meaning is decided elsewhere:
+
+| Item | Decided by |
+|---|---|
+| Production, retention and storage of the operation record, `context_epoch` and `generation` | #352 |
+| Tier values, including `tier_hold` | #351 |
+| The lead time | EG-01, and the coordinated #357 change |
+| The opt-in for an unverified configuration | #363, #351 |
+| The activation request and the record shape of `current` and `next` | The coordinated #357 change |
+| `origin`, `gate_policy`, `legacy_conflicts` | #355, #359 |
+
+### 12.10 Amendment 1 (2026-11-17): incomplete observation, register-lock case, version 2
+
+**Why.** #350 serialises TAS register access with a per-adapter lock, as #45 and #52 require ("all hardware register access", "all device operations ... within acquired spin locks"):
+- Mutating TAS operations hold it exclusively.
+- The query tries it once and never waits (12.1 "Never blocking").
+- When the attempt fails, #45 and #52 forbid any register or PHC read.
+
+The contract before this amendment had no reply for that case:
+- `PARTIAL` was defined only through read failure (12.3).
+- The header text described it as "MMIO performed".
+- `NOT_RUNNING` and `NO_MMIO` state other conditions.
+
+**Change in meaning.** `hw_read` `PARTIAL` (3) is an **incomplete hardware observation**: at least one v1 register or PHC value is invalid because its read failed or was not attempted.
+- `PARTIAL` never states that MMIO occurred. Whether any read was attempted follows only from the validity bits and reasons below.
+- `READ` (1) keeps its meaning: a complete observation.
+- `NOT_RUNNING` (2) and `NO_MMIO` (4) keep their conditions and precedence. Their checks come first, so the register-lock case arises only for a Running adapter with MMIO access.
+
+**Reply in the register-lock case** (`STATUS_SUCCESS`, `Information` 536):
+
+| Field | Value |
+|---|---|
+| `version`, `size` | 2, 536 |
+| Identity, `net_luid`, `lookup_result`, `legacy_conflicts`, limits | As in every reply |
+| `hw_read` | `PARTIAL` (3) |
+| `flags` | `OP_IN_PROGRESS` (0x1) set |
+| `regs` | Every `read_failed` bit (0-17) set, every value 0: not attempted. `consistency` 0 |
+| `phc_before_ns`, `phc_after_ns` | 0, with `PHC_BEFORE_INVALID` (0x080) and `PHC_AFTER_INVALID` (0x100) set |
+| `snapshot_reasons` | Exactly `PHC_BEFORE_INVALID` and `PHC_AFTER_INVALID`. `READ_FAILED` (0x004) is **clear**, because no read failed. `NOT_RUNNING` and `NO_MMIO` are clear |
+| `hw_mode` | `UNREADABLE` (3): `TQAVCTRL` is invalid |
+| `dtx_max_frame_state` | `NOT_READ` (4), bytes 0 |
+| `current_status`, `next_status` | `UNKNOWN` (7) by S1 (an input register invalid, a PHC value invalid, `OP_IN_PROGRESS`). Reasons 0: S1 carries no slot reason |
+| `restoration` | `UNKNOWN` (5): an input register is invalid (12.5) |
+| Record fields (`current_commit`, `current`, `origin`, `gate_policy`) | Reported as record (U3), never filled from or into hardware fields. The record is sampled while an operation runs, so it may be the state before or after that operation |
+
+**Version.** Under 12.2 ("a semantic change to any field raises `AVB_TAS_QUERY_VERSION`") and 3.4:
+- `AVB_TAS_QUERY_VERSION` is **2**.
+- The layout, the 536-byte size, all offsets and every numeric enum value are unchanged.
+- The driver serves only version 2. A request with version 1 gets `STATUS_REVISION_MISMATCH` (12.1 row 3) and nothing is written. Version 1 was never served by a merged driver: its handler exists only on the unmerged #350 branch. And version 1 has no conforming reply for the register-lock case.
+- `IOCTL_VERSION` (1.1) and `AVB_IOCTL_ABI_VERSION` (0x00020001) are unchanged: no code is added and no other structure changes (3.3, #64).
+
+**Mirror.** DES-C-TAS-010 §1.1 and §12 mirror this amendment on #365's own branch. `include/avb_ioctl.h`, the handler, the TC-ABI pin and the clients follow under #350.
+
+**Verification state.** The register-lock reply is **UNVERIFIED** on hardware. Under 12.7 no existing TEST issue checks a query that overlaps a mutating operation:
+- #366, #381 and #367 run their queries serially.
+- #380 TC-TASAPI-015 races mutating operations for #352.
+- #287 and #279 are the generic #45 and #52 lock tests.
+
+Nothing in this amendment rests on a hardware observation of the case.
+
+## 13. Activation request, `IOCTL_AVB_TAS_ACTIVATE` (2026-11-18, provisional; the coordinated #357 change)
+
+**Source of truth:** section 13 of #365, published 2026-11-18. This section mirrors it verbatim (heading levels adapted); where they differ, #365 governs. Provisional review baseline, not accepted (#362).
+
+**Status.** This section fills 12.9's row "the activation request … decided by the coordinated #357 change".
+- It is part of this review baseline, **not accepted**. The layout stays provisional until this design is accepted (#362).
+- It publishes the r5 structure recorded in #362 and #352 (r13): `AVB_TAS_OP_REQUEST`, 144 bytes.
+- It replaces 3.5's 0.5.0 draft of that structure. 3.5 already records that the 0.5.0 draft is replaced.
+- Delivery follows the already recorded P2 departure (#352, #357): the producer stage precedes the #352 store. This publication is a review baseline, not acceptance of unsettled field semantics or permission to substitute unknown values. The questions listed in 13.6 remain explicit.
+
+### 13.1 Code and buffer model
+
+- **Code:** `IOCTL_AVB_TAS_ACTIVATE` = `CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS)` = 0x0017A030 (#362 decision 1). Function 71 (0x0017811C, 80-byte request) is withdrawn before release; it is never served alongside 0x80C.
+- **One structure, one buffer.** `AVB_TAS_OP_REQUEST` is a single 144-byte `METHOD_BUFFERED` structure:
+  - the caller writes bytes 0–135 as input and passes the structure as both input and output buffer, each at least 144 bytes;
+  - the driver writes only bytes 136–143, and only on `STATUS_SUCCESS`;
+  - on success, `IoStatus.Information` is 144 and bytes 0–135 come back as written, because the driver does not write input fields;
+  - on any error completion, `Information` is 0 and nothing is returned;
+  - there is no separate response layout.
+- **The operation's outcome detail** (result, stage, NTSTATUS, hardware effect, generation after the operation, commit bracket) is **not** in this structure. It is the operation's `AVB_TAS_OP_RECORD` (72 bytes, 12.2), retrieved by `client_op_id` through `TAS_QUERY_HW` on the originating open instance (#352, r13).
+
+### 13.2 Layout
+
+```c
+typedef struct AVB_TAS_OP_REQUEST {
+    avb_u32 version;              /*   0 in  AVB_TAS_OP_VERSION = 1 */
+    avb_u32 size;                 /*   4 in  144 */
+    avb_u64 net_luid;             /*   8 in  the open instance's bound adapter */
+    avb_u64 client_op_id;         /*  16 in  non-zero; key of the #352 record */
+    avb_u64 expected_generation;  /*  24 in  generation from the caller's last TAS_QUERY_HW (13.6 D.1) */
+    avb_u64 context_epoch;        /*  32 in  context_epoch from the same query (13.6 D.1) */
+    avb_u32 flags;                /*  40 in  bit 0 AVB_TAS_F_ACCEPT_UNVERIFIED (13.6 D.4), bit 1 AVB_TAS_F_OPEN_ALL (REPLACE only) */
+    avb_u32 pre_activation;       /*  44 in  AVB_TAS_PRE_HOLD 1, AVB_TAS_PRE_PASS 2; no default */
+    avb_u32 debug_fault;          /*  48 in  0; Debug drivers only, encoding 13.3 */
+    avb_u32 reserved0;            /*  52 in  0 */
+    AVB_TAS_SCHEDULE schedule;    /*  56 in  80 bytes, 3.5 / 12.2 (shared with the query) */
+    avb_u32 out_flags;            /* 136 out success only */
+    avb_u32 reserved1;            /* 140 out success only, 0 */
+} AVB_TAS_OP_REQUEST;             /* 144 */
+```
+
+`AVB_TAS_SCHEDULE` and `AVB_TAS_QUEUE_WINDOW` are those of 3.5 and 12.2:
+- `base_time_ns` is absolute PHC ns.
+- `cycle_ns` is ns.
+- Per queue: `start_ns` and `end_ns` are relative to BaseT (end exclusive), `max_frame_bytes` is bytes on the wire, and `flags` is `Q_STRICT_END` 0x1 / `Q_STRICT_CYCLE` 0x2.
+
+### 13.3 Field validation and completion
+
+Every check runs before any register write (#351 AC1). The validation order is in 13.5.
+
+| Field / condition | Rule | Completion | Basis |
+|---|---|---|---|
+| Handle without write access | — | `STATUS_ACCESS_DENIED` (I/O manager) | #362 decision 1 |
+| Open instance not bound | must be bound | `STATUS_INVALID_DEVICE_STATE` (result NOT_BOUND 15) | r3 decision (D-6 replaced), #352 AC2 |
+| Input or output length | ≥ 144 | `STATUS_BUFFER_TOO_SMALL` | 3.4 |
+| `version` | = 1 | `STATUS_REVISION_MISMATCH` | 3.4, #64 |
+| `size` | = 144 | `STATUS_INVALID_PARAMETER` | 3.4 |
+| `reserved0`, `schedule.reserved`, unknown `flags` bits, unknown `queue[].flags` bits | 0 | `STATUS_INVALID_PARAMETER` (INVALID 1) | 3.4 |
+| `flags.OPEN_ALL` | not on ACTIVATE | `STATUS_INVALID_PARAMETER` (INVALID 1) | #359 |
+| `client_op_id` | non-zero | `STATUS_INVALID_PARAMETER` | #352 AC1 |
+| `debug_fault` | Release: 0. Any driver: bits 9–31 are 0. Debug: bits 0–7 = write number N (1 = first write, 0 = none), bit 8 = also fail the first restore write | `STATUS_INVALID_PARAMETER` (INVALID 1), nothing read or written | #357 AC4 |
+| `net_luid` | = the bound adapter | `STATUS_INVALID_DEVICE_STATE` (ADAPTER_MISMATCH 16) | #352 AC2 |
+| `pre_activation` | 1 or 2 | other values: `STATUS_INVALID_PARAMETER` (INVALID 1). Valid PASS: `STATUS_NOT_IMPLEMENTED`, Information 0, before any register access, until #363 is accepted | #357, TAS-DR-14, #363 (Option C as published in #362) |
+| `expected_generation`, `context_epoch` | match the current values | `STATUS_INVALID_DEVICE_STATE` (STATE_CONFLICT 12), nothing written | #352 AC4, TAS-DR-12. Production: 13.6 D.1 |
+| `schedule` | TAS-DR-03 to TAS-DR-09 of 5.2 | `STATUS_INVALID_PARAMETER` (INVALID 1), nothing written | 5.2, #351 AC1–AC3. TAS-DR-05 at the current link speed: 13.6 D.2 |
+| BaseT lead | at least `limits.min_margin_ns` (reported by the query) after a PHC read | `STATUS_INVALID_PARAMETER` (INVALID 1) | TAS-DR-08. The enforced value: 13.6 D.3 |
+
+The 0.5.0 failure names of 5.2 (`INVALID_CONFIG`, `DEADLINE_TOO_NEAR`, `UNSUPPORTED_COMBINATION`) are expressed in this contract as result INVALID (1).
+
+### 13.4 Outcome completion (K2, #352)
+
+The operation completes with the NTSTATUS of its result. Only COMMITTED returns the structure. Every other result completes with an error status and no output; its detail is in the record (#352).
+
+| Result | NTSTATUS | Hardware effect |
+|---|---|---|
+| COMMITTED 0 | `STATUS_SUCCESS`, Information 144, `out_flags` written | schedule programmed, BaseT ahead after the commit |
+| INVALID 1 | `STATUS_INVALID_PARAMETER` | nothing written |
+| NOT_CLEAN 2 | `STATUS_INVALID_DEVICE_STATE` | nothing written (#357 AC3) |
+| FAILED_RESTORED 3 | `STATUS_IO_DEVICE_ERROR` | restored |
+| FAILED_NOT_RESTORED 4 | `STATUS_UNSUCCESSFUL` | unknown |
+| BASE_PASSED 5 / COMMITTED_UNTIMED 6 | 13.6 D.5 | a schedule remains |
+| BUSY 7 | `STATUS_DEVICE_BUSY` | nothing read (#352 AC3, #362) |
+| READ_FAILED 8 | `STATUS_IO_DEVICE_ERROR` | nothing written |
+| NOT_HARDWARE_VERIFIED 9 | `STATUS_REQUEST_NOT_ACCEPTED` | nothing written (#351 AC4; applicability 13.6 D.4) |
+| NOT_SUPPORTED 10 | `STATUS_NOT_SUPPORTED` | nothing |
+| NOT_IMPLEMENTED 11 | `STATUS_NOT_IMPLEMENTED` | nothing |
+| STATE_CONFLICT 12 | `STATUS_INVALID_DEVICE_STATE` | nothing written |
+| NOT_READY 13 | `STATUS_DEVICE_NOT_READY` | nothing |
+| NOT_BOUND 15 / ADAPTER_MISMATCH 16 | `STATUS_INVALID_DEVICE_STATE` | nothing |
+
+- `out_flags` bit `UNVERIFIED_CONFIG_ACTIVE` is set only when an explicit acceptance acted. The flag is inert until an accepted ADR and policy grant that authority, so the bit is 0 until then.
+- **Producer stage (P2):** no #352 store exists. A lookup answers `LOOKUP_NOT_IMPLEMENTED` (12.2), so error completions carry no retrievable detail. Passing completion-status checks does **not** establish K2 (#352, #357).
+
+### 13.5 Order
+
+- **I226 HOLD register writes:** D-8 selected the existing #357 order. In the source at 85d36f7, `devices/i226_tas_activate.h::i226_tas_write_schedule` writes TQAVCTRL with transmit-mode and ENHANCED_QAV set (other bits preserved), then STQTq followed by ENDQTq for q = 0..3, then QBVCYCLET_S, QBVCYCLET, BASET_H, and finally BASET_L (commit). Stop on a write failure and follow the separate restoration contract. This records source order; it does not prove retention or timing on other hardware. The order belongs in the I226 device implementation; generic callers use capabilities and device operations. This does not authorize PASS or establish the missing Strict-mode support/write contract.
+- **Header checks:** as listed in 13.3 down to `net_luid`.
+- **Semantic checks:** the order among them is not decided (13.6 D.7).
+
+### 13.6 Not decided by this section
+
+| | Question | Conflicting or missing sources | Consequence |
+|---|---|---|---|
+| D.1 | Define the generation/epoch lifecycle and delivery before the store; ownership remains #352 | #352 AC4/D-5 require stale-state refusal. C3 previously approved the direction: unchanged before any write, increment once if a write was attempted, whatever the outcome. The exact initialization, epoch uniqueness/lifetime, transitions and overflow rules must be reconciled with the published #352 semantics. P2 orders the producer before the record store; it does not require metadata to be physically stored in that store. Query zeros mean not reported | A valid activation control, stale-state cases and post-commit generation assertions need real defined metadata. Do not treat zero as a wildcard, silently ignore either field, or infer new lifecycle rules from the delivery order |
+| D.2 | Complete and verify driver-owned current link-speed acquisition for TAS-DR-05/TAS-DR-13 (K8) | The driver's ownership of this fact is already the design direction. NDIS attach/status inputs were identified as candidate acquisition paths, not verified implementation. The query reports 0 today | This is an implementation/evidence prerequisite, not authorization to use the caller's rate, a fixed 1 Gbit/s value or an adapter-model assumption. It affects the valid activation control as well as WINDOW_MIN |
+| D.3 | The enforced lead value | 12.2: 100 ms enforced, NOT_ESTABLISHED; #362: 1.5 s proposed | tests read `min_margin_ns`; only a change of the enforced value needs a decision |
+| D.4 | The producer's behaviour until #351's tier table exists; `ACCEPT_UNVERIFIED` | #351 AC4–AC5; D-10 conditional; the flag is inert; tiers are 0 until #351 | This affects whether the baseline HOLD control may succeed, not merely a separately labelled tier case. Prior successful activation, capability presence or tier 0 cannot silently grant an acceptance policy or HARDWARE_VERIFIED status |
+| D.5 | Completion of BASE_PASSED and COMMITTED_UNTIMED | D-3 recorded as conditional, condition not recorded; r5 maps them to `STATUS_IO_TIMEOUT` / `STATUS_IO_DEVICE_ERROR` | not asserted until decided |
+| D.6 | Recorded delivery departure, not a new choice | #352/#357 P2 explicitly permits the producer before the store and keeps that stage incomplete until retrieval works | Apply that recorded departure to integration delivery. Do not reopen P2, redefine every use of the word merge in #362, or claim complete K2/release acceptance from producer-only status checks |
+| D.7 | Order among the semantic checks | not published | A one-field mutation is isolated only after all other prerequisites of its control are established. Unknown metadata, link speed or tier admission can otherwise mask the intended validation status. No multi-fault precedence or semantic-case GREEN is inferred |
+
+Field-by-field reconciliation and sources (offsets, widths, directions, units, validation, completion, source decision): `logs/p2-step5-20261118/RECONCILIATION-ACTIVATION-r5.md` (local, derived). The derived document `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md` is updated from this section on #365's own branch.
+
+### 13.7 Test applicability and evidence boundaries
+
+Shared tests enumerate supported adapters and select applicable operations by advertised capabilities and interface contracts (#15, #44, #84). A receiving wire observer is selected by interface/capture capability and a received baseline; it need not support TAS and is not required to be an I210. Historical I226/I210 names describe observations, not mandatory topology. Management-link/default-gateway/attendance and Unsafe labels do not veto execution. Tests own setup, bounded workers, cleanup and final-state reporting.
+
+Unsettled design assertions are recorded individually as not specified; they are not a new topology/authorization gate and do not suppress independent executable checks. Header checks with defined precedence can be distinguished from semantic checks requiring a valid control. Normal activation COMMIT and its dependent wire/state checks cannot be claimed verified without resolving the control's admission semantics. Missing-handler RED is distinguished from per-field validation evidence, and no expected result is manufactured from an unknown input.
+
+## 14. Open decisions
 
 | # | Decision | Owner | State |
 |---|---|---|---|
 | O1 | `SETUP_TAS` on a live schedule | Q | **Decided (D4):** must not silently overwrite. Section 3.6 is the proposal, for REQ-F-TAS-LEGACY-001 |
 | O2 | `tas_armed` meaning | Q | **Decided (D5):** derived from a richer record. Section 4.5 is the proposal, for ADR-TSN-002 |
-| O3 | Four codes or `TAS_APPLY` | Q, via ADR-TSN-002 | Open. Recommendation: four |
-| O4 | Is `DISABLE_TO_LEGACY` allowed in production | Q, via ADR-TSN-002 | Open. Decide with EG-14 |
+| O3 | Four codes or `TAS_APPLY` | Q, via ADR-TSN-002 | **Decided by #362 decision 1:** separate query (0x80B) and activation (0x80C) codes. No other code is allocated |
+| O4 | Is `DISABLE_TO_LEGACY` allowed in production | Q, via ADR-TSN-002 | **#362 decision 2:** not part of the initial implementation; #360 is decided separately |
 | O5 | Pre-activation mechanism | Q, via ADR-TSN-003 | Open. Run EG-02 for M1 and M2 first |
-| O6 | Should mutating codes require `FILE_WRITE_ACCESS` | Q, after EG-17 | Open. Recommendation: yes |
+| O6 | Should mutating codes require `FILE_WRITE_ACCESS` | Q, after EG-17 | **Decided for the new codes by #362 decision 3:** 0x80C write, 0x80B read. Released codes and the device policy are tracked separately |
 | O7 | Should `BaseT` non-zero alone refuse `SETUP_TAS` | Q | **Decided: no.** `BaseT` is reported only. Section 3.6 uses windows, shadow and the record |
 
-## 14. Evidence gaps
+## 15. Evidence gaps
 
 Priority order. **Blocks** names only the operation or claim affected. Everything else proceeds.
 
@@ -770,7 +1290,7 @@ Priority order. **Blocks** names only the operation or claim affected. Everythin
 | EG-15, P3 | #358 REQ-F-TAS-REPLACE-001 | None | Overlapping, off-grid and changed-cycle-miss effects | Each case separately | Characterised | Recorded outcome | Those cases only |
 | EG-16, P3 | Various | 1 run each: E2, E3, E9, E15 | Repeatability | Covered by TC-TASAPI | Same | GREEN | Nothing beyond those tests |
 
-### 14.1 EG-18 investigation
+### 15.1 EG-18 investigation
 
 A separate hardware evidence gap with its own issue, #364. **No relationship to #328 is claimed without hardware evidence.**
 
@@ -796,6 +1316,6 @@ Competing outcomes: the PHC reseeds and the schedule stays, giving the E14 hold;
 
 Method: `LOCAL_DIAGNOSTIC`, Debug-only, extending `tests/diagnostic/tas_gate_investigation.c`, never a runner entry. Every step is bounded, and each run proves its pre-state and restoration. Nothing runs during this governance phase.
 
-## 15. Not in this design
+## 16. Not in this design
 
 Production code, new header entries, test files, runner changes, Debug diagnostics in automated tests, a fix for the surviving schedule, PHC reseed or TIMINCA fixes, and any statement about the #328 unload hang.

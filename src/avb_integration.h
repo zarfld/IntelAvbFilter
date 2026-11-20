@@ -17,6 +17,7 @@ Abstract:
 #include "precomp.h"
 /* Share IOCTL ABI (codes and request structs) with user-mode */
 #include "include/avb_ioctl.h"
+#include "include/avb_init_fault_dbg.h"   /* #412: shared layout of the Debug-only initialization fault mechanism */
 
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
@@ -324,12 +325,63 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * for snapshot/restore verification.
      * Access: InterlockedExchange/InterlockedOr (may be read at DISPATCH_LEVEL).
      */
-    volatile LONG tas_armed;
+    volatile LONG tas_armed;   /* AVB_TAS_STATE_CLEAN, _ARMED or _DIRTY (include/avb_ioctl.h) */
+
+    /* One mutating TAS operation per adapter across all handles, claimed at entry without waiting (ADR-TSN-002, #357).
+     * Held by IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS from their state check to their published
+     * state, so two of them can never interleave register writes, rollbacks or state updates. 0 free, 1 held. */
+    volatile LONG tas_op_claim;
+
+    /* TAS operation sequence (#350): incremented right after a mutating TAS operation takes tas_op_claim and again right
+     * before it releases it (avb_tas_op_claim / avb_tas_op_release), so an odd value means one is running. The read-only
+     * IOCTL_AVB_TAS_QUERY_HW compares it before and after its register pass: any change, also an operation that started
+     * and finished in between, reports OP_IN_PROGRESS and UNKNOWN slots. Interlocked access only. */
+    volatile LONG tas_op_seq;
+
+    /* TAS register access (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350): serialises every TAS register write
+     * pass of this adapter, together with the TAS record it publishes, against the read pass of IOCTL_AVB_TAS_QUERY_HW.
+     * IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS hold it exclusively across their device
+     * operation and record update, after they took tas_op_claim. The query tries it once in shared mode and never waits:
+     * not obtained, it reads nothing and reports OP_IN_PROGRESS. No other lock is taken under it and the code under it
+     * does not log; the hold time (from acquisition to release, without any wait for it) is logged after release
+     * (avb_tas_reg_unlock). Other register writers, such as PHC adjustment or the diagnostic register IOCTLs, do not take
+     * it (#45 is not implemented for them). */
+    EX_SPIN_LOCK tas_reg_lock;
+
+    /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's register pass (#350): the query reads registers only while it
+     * holds this rundown, and reads nothing when it cannot acquire it. FilterPause waits for the current holders before it
+     * publishes FilterPausing, so a query register pass happens only while the filter is FilterRunning. FilterRestart
+     * re-arms it only after a successful hardware bring-up. Run down from allocation until then. */
+    EX_RUNDOWN_REF tas_query_rundown;
+    volatile LONG tas_query_armed;   /* 1 between a successful bring-up in FilterRestart and the next FilterPause */
+
+    /* Initialization ownership (#404 part 2; #12 amendment 2026-11-12 row "Another initialization running"): one hardware
+     * initialization per adapter at a time, claimed at entry without waiting by AvbBringUpHardware, AvbEnsureDeviceReady's
+     * intel_init path and IOCTL_AVB_INIT_DEVICE (AvbInitClaim / AvbInitRelease). A competing caller gets STATUS_DEVICE_BUSY
+     * before any hardware access or context write; FilterRestart instead waits for it, bounded (AvbBringUpHardwareWaitOwner).
+     * 0 free, 1 held. Interlocked access only. */
+    volatile LONG init_owner;
 
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
     struct tsn_tas_config last_tas_config;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
+
+/*
+ * Per-open-instance context (#404; P2 step 3, logs/issue352-20261117/DELIVERY-PLAN-r3-20261117.md, recorded decisions r5):
+ * one per open instance of the control device, i.e. per file object (duplicated or inherited handles share it). Allocated at
+ * IRP_MJ_CREATE (CREATE fails with STATUS_INSUFFICIENT_RESOURCES without it), held in FileObject->FsContext2, freed at
+ * IRP_MJ_CLOSE only (never at IRP_MJ_CLEANUP: cleanup and cancellation stay with #401). FileObject->FsContext keeps the
+ * adapter binding set by OPEN_ADAPTER. It holds this instance's INIT_DEVICE success marker (#404 part 2); #352's operation
+ * records are placed here later.
+ */
+#define AVB_OPEN_INSTANCE_TAG 'AvbO'
+
+typedef struct _AVB_OPEN_INSTANCE {
+    /* 1 after this open instance's successful IOCTL_AVB_INIT_DEVICE, else 0; set only under the adapter's initialization
+     * ownership (AVB_DEVICE_CONTEXT.init_owner) and before it is released. Interlocked access only */
+    volatile LONG init_succeeded;
+} AVB_OPEN_INSTANCE, *PAVB_OPEN_INSTANCE;
 
 /*========================================================================
  * Global context registry
@@ -356,11 +408,14 @@ extern NDIS_SPIN_LOCK      g_AvbContextListLock;
  * @brief Initialize AVB device context and bind to an Intel miniport filter instance.
  * @param FilterModule Pointer to NDIS filter module instance.
  * @param AvbContext Pointer to receive allocated AVB device context.
+ * @param InitOrigin AVB_INITFAULT_ORIGIN_* of the caller (include/avb_init_fault_dbg.h): which path started the
+ *        initialization attempt. Used only by the Debug-only #412 fault mechanism; no effect on behaviour.
  * @return NTSTATUS STATUS_SUCCESS on success or appropriate NTSTATUS error.
  */
 NTSTATUS AvbInitializeDevice(
     _In_ PMS_FILTER FilterModule,
-    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext
+    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext,
+    _In_ ULONG InitOrigin
 );
 
 /**
@@ -370,11 +425,62 @@ NTSTATUS AvbInitializeDevice(
  * are reset to 0 by the hardware power cycle.
  * @note Runs at PASSIVE_LEVEL; intel_init/init_ptp perform MMIO and a short delay.
  * @param Ctx Device context.
+ * @param InitOrigin AVB_INITFAULT_ORIGIN_* of the caller; Debug-only #412 attribution, no effect on behaviour.
  * @return NTSTATUS STATUS_SUCCESS or error.
  */
 NTSTATUS AvbBringUpHardware(
-    _Inout_ PAVB_DEVICE_CONTEXT Ctx
+    _Inout_ PAVB_DEVICE_CONTEXT Ctx,
+    _In_ ULONG InitOrigin
 );
+
+/**
+ * @brief AvbBringUpHardware for a lifecycle owner that must not skip its bring-up (#404 part 2, PR #469 review): while
+ *        another initialization owns the adapter it waits (PASSIVE_LEVEL only, bounded by AVB_INIT_OWNER_WAIT_MS), then runs
+ *        the bring-up under the ownership. Used by FilterRestart, whose bring-up is the S3/S4 resume re-initialization and
+ *        reopens the #350 TAS query gate; the "STATUS_DEVICE_BUSY, no wait" contract row applies to INIT_DEVICE clients.
+ * @return the bring-up's status, or STATUS_DEVICE_BUSY only when the bound expired (or not at PASSIVE_LEVEL).
+ */
+NTSTATUS AvbBringUpHardwareWaitOwner(
+    _Inout_ PAVB_DEVICE_CONTEXT Ctx,
+    _In_ ULONG InitOrigin
+);
+
+/*========================================================================
+ * #412: Debug-only adapter-initialization fault mechanism (src/avb_init_fault_dbg.c, include/avb_init_fault_dbg.h)
+ * Every intel_init call site of the adapter lifecycle brackets the call with AvbInitFaultEnter / AvbInitFaultExit. Only
+ * AVB_INITFAULT_SITE_BASIC consumes armed actions; the other sites are recorded. In a Release build both are inline
+ * functions without effect, so the Release driver contains no arm, no registry access and no wait.
+ *=======================================================================*/
+typedef struct AVB_INITFAULT_CALL {
+    BOOLEAN active;                 /* the attempt is on the armed adapter and its record will be written */
+    AVB_INITFAULT_RECORD rec;
+} AVB_INITFAULT_CALL, *PAVB_INITFAULT_CALL;
+
+#if DBG
+/** DriverEntry, PASSIVE_LEVEL: remembers <RegistryPath>\Parameters; the mechanism is inert until this ran */
+VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath);
+/** Before an intel_init call. Returns the AVB_INITFAULT_ACT_* applied; on ACT_FAIL the caller must not call intel_init and
+ *  must treat the attempt as failed (intel_init result -1). A HOLD has already been waited out when this returns */
+ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call);
+/** After the intel_init call (or its replacement): writes the attempt's record for the test */
+VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult);
+/** IOCTL_AVB_DBG_INITFAULT_CONTROL (METHOD_BUFFERED, PASSIVE_LEVEL): ARM / DISARM / CLEAR_UNCONSUMED under the admission lock.
+ *  The handler does not wait for in-flight attempts to drain (the executable performs that bounded drain); it only takes the
+ *  admission lock. Code defined in include/avb_ioctl.h; a Release driver rejects it with STATUS_INVALID_DEVICE_REQUEST */
+NTSTATUS AvbInitFaultControl(_Inout_ PVOID Buffer, _In_ ULONG InLen, _In_ ULONG OutLen, _Out_ ULONG *Info);
+#else
+static __inline VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath) { UNREFERENCED_PARAMETER(RegistryPath); }
+static __inline ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call)
+{
+    UNREFERENCED_PARAMETER(Ctx); UNREFERENCED_PARAMETER(Origin); UNREFERENCED_PARAMETER(Site);
+    Call->active = FALSE;
+    return AVB_INITFAULT_ACT_NONE;
+}
+static __inline VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult)
+{
+    UNREFERENCED_PARAMETER(Ctx); UNREFERENCED_PARAMETER(Call); UNREFERENCED_PARAMETER(InitResult);
+}
+#endif
 
 /**
  * @brief Stop all periodic timers/DPCs for an AVB device context.

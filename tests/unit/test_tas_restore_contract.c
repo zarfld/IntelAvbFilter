@@ -11,6 +11,9 @@
  * only available through IOCTL_NTSTATUS_CALL (NtDeviceIoControlFile in production).
  *
  * Verifies: #9 (REQ-F-TAS-001), #206 (TAS test issue)
+ * TC-MOCK-057 checks the send-window accounting of TC-TASAPI-001 (#366): test logic only, no hardware TX claim.
+ * TC-MOCK-058 / TC-MOCK-059 check the F2 STATE and F2 REFUSE classification of TEST-TASACT-FAULT-001 (#482, PR #489 review):
+ * test logic only, no fault-path or hardware claim.
  * Verdict contract: docs/testing/test-verdict-contract.md
  *
  * Build:
@@ -35,6 +38,9 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restore.h"
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
+#include "../../devices/i226_tas_activate.h"
+#include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -574,6 +580,1342 @@ static void test_09_negative_tests_always_executable(void) {
  * Main
  * ========================================================================= */
 
+/*
+ * TC-MOCK-028 to 033: first TAS activation (#357), the production sequence of devices/i226_tas_activate.h on a fake register
+ * file. The order matches what ran on I226 0x125B REV_04 through tas_gate_investigation. These cases test the code path and
+ * say nothing about what the hardware does with it.
+ */
+#define FAKE_REGS 0x4000u
+#define FAKE_LOG 128u
+typedef struct {
+    avb_u32 reg[FAKE_REGS / 4];
+    avb_u32 log_off[FAKE_LOG], log_val[FAKE_LOG];
+    unsigned writes, reads, fail_write, stuck_after_fail;
+    BOOL read_fails, phc_fails;
+    avb_u64 phc_first, phc_later;
+    unsigned phc_reads;
+    unsigned phc_fail_from;   /* nonzero: PHC reads from this number on fail, the first read is number 1 */
+} FAKE_HW;
+
+static int fake_read(void *c, avb_u32 off, avb_u32 *v) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    f->reads++;
+    if (f->read_fails) return -1;
+    *v = f->reg[off / 4];
+    return 0;
+}
+
+static int fake_write(void *c, avb_u32 off, avb_u32 v) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    f->writes++;
+    if (f->fail_write != 0 && f->writes >= f->fail_write && f->writes < f->fail_write + 1 + f->stuck_after_fail) return -1;
+    if (f->writes <= FAKE_LOG) {
+        f->log_off[f->writes - 1] = off;
+        f->log_val[f->writes - 1] = v;
+    }
+    f->reg[off / 4] = v;
+    return 0;
+}
+
+static int fake_phc(void *c, avb_u64 *ns) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    if (f->phc_fails) return -1;
+    if (f->phc_fail_from != 0 && f->phc_reads + 1 >= f->phc_fail_from) { f->phc_reads++; return -1; }
+    *ns = f->phc_reads++ == 0 ? f->phc_first : f->phc_later;
+    return 0;
+}
+
+static FAKE_HW g_hw;
+static AVB_TAS_ACTIVATE_REQUEST g_act;
+static int g_mode_written;   /* i226_tas_activate: the transmit-mode write reached the fake adapter */
+static const I226_TAS_IO g_io = {&g_hw, fake_read, fake_write, fake_phc};
+
+/* The verified schedule of the Case C and D design: 1 s cycle, 200 to 400 ms windows, BaseT 2 s ahead */
+static void act_setup(avb_u32 mode) {
+    unsigned q;
+
+    ZeroMemory(&g_hw, sizeof(g_hw));
+    ZeroMemory(&g_act, sizeof(g_act));
+    g_hw.reg[I226_QBVCYCLET / 4] = 0x3B9ACA00;   /* the clean value seen on I226 0x125B */
+    g_hw.phc_first = 5000000000ULL;
+    g_hw.phc_later = 5000100000ULL;
+    g_act.version = AVB_TAS_ACTIVATE_VERSION;
+    g_act.pre_activation = mode;
+    g_act.base_time_ns = 7000000000ULL;
+    g_act.cycle_ns = 1000000000u;
+    g_act.link_mbps = 1000;
+    g_act.max_frame_bytes = 1538;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        g_act.window_start_ns[q] = 200000000u;
+        g_act.window_end_ns[q] = 400000000u;
+    }
+}
+
+static int act_order(const avb_u32 *want, unsigned n) {
+    unsigned i;
+
+    if (g_hw.writes != n) return 0;
+    for (i = 0; i < n; i++) {
+        if (g_hw.log_off[i] != want[i]) return 0;
+    }
+    return 1;
+}
+
+static void test_28_activate_validation(void) {
+    printf("\n[TC-MOCK-028] Every request is validated before any register write\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    EXPECT_EQ("the verified schedule is valid", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.version = 2;
+    EXPECT_EQ("unknown version", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(0);
+    EXPECT_EQ("no default pre-activation behaviour", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(3);
+    EXPECT_EQ("unknown pre-activation behaviour", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 0;
+    EXPECT_EQ("no cycle", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 0x40000000u;
+    EXPECT_EQ("cycle beyond the register field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 4294967296ULL * NSEC_PER_SEC;
+    EXPECT_EQ("BaseT seconds beyond the 32-bit BASET_H register", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 4294967295ULL * NSEC_PER_SEC + (NSEC_PER_SEC - 1u);
+    EXPECT_EQ("the largest BaseT that fits BASET_H", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[2] = g_act.window_start_ns[2];
+    EXPECT_EQ("empty window", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[3] = g_act.cycle_ns + 1;
+    EXPECT_EQ("window past the cycle", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.link_mbps = 1234;
+    EXPECT_EQ("unknown link rate", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 0;
+    EXPECT_EQ("no frame size", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 9729;
+    EXPECT_EQ("frame beyond the buffer limit", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 13535;
+    EXPECT_EQ("13.535 us exceeds the minimum for 1538 bytes at 1 Gbit/s", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 13000;
+    EXPECT_EQ("13 us is below it", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 64; g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 4600;
+    EXPECT_EQ("the 512 byte floor governs small frames", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 64; g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 4500;
+    EXPECT_EQ("below the 512 byte floor", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.version = 2;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("an invalid request reports it", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("and writes nothing", g_hw.writes, 0);
+}
+
+static void test_29_activate_not_clean(void) {
+    static const avb_u32 dirty[] = {I226_TQAVCTRL, I226_BASET_L, I226_BASET_H, I226_STQT0, I226_STQT3, I226_ENDQT0, I226_ENDQT3};
+    unsigned i;
+
+    printf("\n[TC-MOCK-029] An adapter that is not clean is refused and nothing is written\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&g_io, &g_act, TRUE, &g_mode_written);
+    EXPECT_EQ("driver says armed", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write when armed", g_hw.writes, 0);
+    for (i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.reg[dirty[i] / 4] = 1;
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+        EXPECT_EQ("left-over schedule state", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+        EXPECT_EQ("no write", g_hw.writes, 0);
+    }
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.read_fails = TRUE;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("unreadable state is never clean", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write when unreadable", g_hw.writes, 0);
+}
+
+static void test_30_activate_hold(void) {
+    static const avb_u32 want[] = {I226_TQAVCTRL, I226_STQT0, I226_ENDQT0, I226_STQT0 + 4, I226_ENDQT0 + 4, I226_STQT0 + 8, I226_ENDQT0 + 8, I226_STQT0 + 12, I226_ENDQT0 + 12,
+                                   I226_QBVCYCLET_S, I226_QBVCYCLET, I226_BASET_H, I226_BASET_L};
+
+    printf("\n[TC-MOCK-030] Hold: the sequence run on hardware, no reserved bit\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("committed", g_act.result, AVB_TAS_ACT_COMMITTED);
+    EXPECT_TRUE("register order", act_order(want, sizeof(want) / sizeof(want[0])));
+    EXPECT_EQ("TQAVCTRL is 0x09", g_hw.reg[I226_TQAVCTRL / 4], 0x09);
+    EXPECT_EQ("FutScdDis clear", g_hw.reg[I226_TQAVCTRL / 4] & (avb_u32)I226_TQAVCTRL_FUTSCDDIS_MASK, 0);
+    EXPECT_EQ("window start", g_hw.reg[(I226_STQT0 + 8) / 4], 200000000);
+    EXPECT_EQ("window end", g_hw.reg[(I226_ENDQT0 + 8) / 4], 400000000);
+    EXPECT_EQ("cycle", g_hw.reg[I226_QBVCYCLET / 4], 1000000000);
+    EXPECT_EQ("shadow cycle", g_hw.reg[I226_QBVCYCLET_S / 4], 1000000000);
+    EXPECT_EQ("BaseT seconds", g_hw.reg[I226_BASET_H / 4], 7);
+    EXPECT_EQ("BaseT nanoseconds", g_hw.reg[I226_BASET_L / 4], 0);
+    EXPECT_TRUE("PHC at commit reported", g_act.phc_at_commit_ns == g_hw.phc_later);
+
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 7250000000ULL;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("BaseT splits into seconds", g_hw.reg[I226_BASET_H / 4], 7);
+    EXPECT_EQ("and nanoseconds", g_hw.reg[I226_BASET_L / 4], 250000000);
+}
+
+/* TC-MOCK-031: #357 AC2 makes PASS depend on ADR-TSN-003, which is not accepted. Under the #363 interim Option C (Q
+ * 2026-11-13) a valid PASS request is refused as not implemented before any register access; TC-MOCK-055 checks the completion */
+static void test_31_activate_pass(void) {
+    int outcome;
+
+    printf("\n[TC-MOCK-031] Pass: not implemented until ADR-TSN-003 is accepted, nothing read or written\n");
+    act_setup(AVB_TAS_PRE_PASS); g_act.base_time_ns = 7250000000ULL;
+    outcome = i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("refused as not implemented", outcome, AVB_TAS_ACTIVATE_NOT_IMPLEMENTED);
+    EXPECT_EQ("no register write, FutScdDis included", g_hw.writes, 0);
+    EXPECT_EQ("no register read", g_hw.reads, 0);
+    EXPECT_EQ("no PHC read", g_hw.phc_reads, 0);
+    EXPECT_EQ("TQAVCTRL untouched", g_hw.reg[I226_TQAVCTRL / 4], 0);
+}
+
+static void test_32_activate_failure(void) {
+    unsigned at, q, same;
+
+    printf("\n[TC-MOCK-032] Failure before commit restores the registers and says so\n");
+    for (at = 1; at <= 13; at++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.fail_write = at;
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+        EXPECT_EQ("write failed, restored", g_act.result, AVB_TAS_ACT_FAILED_RESTORED);
+        EXPECT_EQ(at == 1 ? "the failed mode write never reached the adapter" : "the transmit-mode write had reached the adapter",
+                  g_mode_written, at == 1 ? 0 : 1);
+        same = g_hw.reg[I226_TQAVCTRL / 4] == 0 && g_hw.reg[I226_BASET_L / 4] == 0 && g_hw.reg[I226_BASET_H / 4] == 0 && g_hw.reg[I226_QBVCYCLET / 4] == 0x3B9ACA00;
+        for (q = 0; q < AVB_TAS_QUEUES; q++) {
+            same = same && g_hw.reg[(I226_STQT0 + 4 * q) / 4] == 0 && g_hw.reg[(I226_ENDQT0 + 4 * q) / 4] == 0;
+        }
+        EXPECT_TRUE("every register back at its value", same);
+    }
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 2;
+    g_hw.stuck_after_fail = 1;   /* the first restore write fails too */
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("a restore that fails says so", g_act.result, AVB_TAS_ACT_FAILED_NOT_RESTORED);
+}
+
+static void test_33_activate_time(void) {
+    printf("\n[TC-MOCK-033] BaseT must be in the future\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_fails = TRUE;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("unreadable PHC", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS - 1;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("too close", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("no write when too close", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS;
+    g_hw.phc_later = g_hw.phc_first + 1;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("exactly the lead is accepted", g_act.result, AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_later = g_act.base_time_ns + 1;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("BaseT passed while writing", g_act.result, AVB_TAS_ACT_BASE_PASSED);
+}
+
+/* TC-MOCK-045: the request is validated in full before anything is read or written, including the reserved word and the BaseT width */
+static void test_45_activate_fields(void) {
+    printf("\n[TC-MOCK-045] Reserved word and BaseT width\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 1;
+    EXPECT_EQ("reserved word not 0", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 999999999ULL;
+    EXPECT_EQ("BaseT seconds at the 32-bit field limit", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0x100000000ULL * 1000000000ULL;
+    EXPECT_EQ("BaseT seconds one past the field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 7ULL;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("committed at the limit", g_act.result, AVB_TAS_ACT_COMMITTED);
+    EXPECT_EQ("BASET_H holds the full seconds", g_hw.reg[I226_BASET_H / 4], 0xFFFFFFFFu);
+    EXPECT_EQ("BASET_L the nanoseconds", g_hw.reg[I226_BASET_L / 4], 7);
+}
+
+/* TC-MOCK-046: a schedule written but not timed is reported as such, and stays written */
+static void test_46_activate_untimed(void) {
+    unsigned writes;
+
+    printf("\n[TC-MOCK-046] PHC unreadable after the commit\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_fail_from = 2;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    writes = g_hw.writes;
+    EXPECT_EQ("committed without timing evidence", g_act.result, AVB_TAS_ACT_COMMITTED_UNTIMED);
+    EXPECT_TRUE("no PHC time claimed", g_act.phc_at_commit_ns == 0);
+    EXPECT_EQ("no rollback: the 13 schedule writes only", writes, 13);
+    EXPECT_EQ("the schedule stays in the registers", g_hw.reg[I226_TQAVCTRL / 4], 0x09);
+}
+
+/* TC-MOCK-047: what each activation result leaves the adapter's TAS state as */
+static void test_47_activate_state(void) {
+    printf("\n[TC-MOCK-047] Adapter TAS state after an activation result\n");
+    EXPECT_EQ("committed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("committed untimed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED_UNTIMED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("BaseT passed still arms: the schedule was written", avb_tas_state_after(AVB_TAS_ACT_BASE_PASSED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("a failed restore leaves the state unknown", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("a failed restore leaves the state unknown, mode write or not", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_DIRTY);
+    /* PR #397 R8: register readbacks do not prove the transmit mode. After the mode write reached the adapter, a restore whose
+     * readbacks all match leaves the hardware state unknown; only when nothing reached the adapter does it change nothing */
+    EXPECT_EQ("readbacks matched after the transmit-mode write: unknown, not CLEAN", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("restored when no write reached the adapter: unchanged", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("a refusal changes nothing", avb_tas_state_after(AVB_TAS_ACT_INVALID, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("not clean changes nothing", avb_tas_state_after(AVB_TAS_ACT_NOT_CLEAN, AVB_TAS_STATE_ARMED, 0), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("busy changes nothing", avb_tas_state_after(AVB_TAS_ACT_BUSY, AVB_TAS_STATE_DIRTY, 0), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("an unknown result is never clean", avb_tas_state_after(99u, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_DIRTY);
+}
+
+/* TC-MOCK-048: the state query reports the programmed windows as a gate list, or the request is refused before any write */
+static void test_48_activate_gcl(void) {
+    struct tsn_tas_config c;
+
+    printf("\n[TC-MOCK-048] Windows as the gate list GET_TAS_STATE reports\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 7250000000ULL;
+    EXPECT_TRUE("the shared schedule fits", avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_TRUE("base and cycle", c.base_time_s == 7 && c.base_time_ns == 250000000 && c.cycle_time_s == 1 && c.cycle_time_ns == 0);
+    EXPECT_TRUE("closed, open on all four queues, closed",
+                c.gate_states[0] == 0x00 && c.gate_durations[0] == 200000000 && c.gate_states[1] == 0x0F && c.gate_durations[1] == 200000000 &&
+                c.gate_states[2] == 0x00 && c.gate_durations[2] == 600000000 && c.gate_durations[3] == 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[0] = 0; g_act.window_end_ns[0] = 100000000;
+    EXPECT_TRUE("different windows per queue fit", avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_TRUE("queue 0 alone, nothing, the other three, nothing",
+                c.gate_states[0] == 0x01 && c.gate_durations[0] == 100000000 && c.gate_states[1] == 0x00 && c.gate_durations[1] == 100000000 &&
+                c.gate_states[2] == 0x0E && c.gate_durations[2] == 200000000 && c.gate_states[3] == 0x00 && c.gate_durations[3] == 600000000);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 500000000u;
+    g_act.window_start_ns[0] = 10000000; g_act.window_end_ns[0] = 20000000; g_act.window_start_ns[1] = 30000000; g_act.window_end_ns[1] = 40000000;
+    g_act.window_start_ns[2] = 50000000; g_act.window_end_ns[2] = 60000000; g_act.window_start_ns[3] = 70000000; g_act.window_end_ns[3] = 80000000;
+    EXPECT_TRUE("nine intervals do not fit eight entries", !avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_EQ("and validation refuses that request", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("before any write", g_hw.writes, 0);
+}
+
+/* TC-MOCK-050: capture times are host times, the schedule is PHC time; the line through two bracketed reads maps them */
+static void test_50_act_mapping(void) {
+    TAS_ACT_ANCHOR a = {1000000, 408000000000LL}, b = {11000000, 418293000000LL}, same = {1000000, 409000000000LL};
+    long long phc = 0;
+
+    printf("\n[TC-MOCK-050] Host to PHC time through two anchors\n");
+    EXPECT_TRUE("maps the first anchor onto itself", tas_act_phc_at(&a, &b, 1000000, &phc) && phc == 408000000000LL);
+    EXPECT_TRUE("the PHC rate between the anchors applies, 1.0293", tas_act_phc_at(&a, &b, 2000000, &phc) && phc == 409029300000LL);
+    EXPECT_TRUE("also before the first anchor", tas_act_phc_at(&a, &b, 0, &phc) && phc == 406970700000LL);
+    EXPECT_FALSE("two anchors at one host time define no line", tas_act_phc_at(&a, &same, 2000000, &phc));
+    EXPECT_FALSE("anchors in reverse order are refused", tas_act_phc_at(&b, &a, 2000000, &phc));
+}
+
+#define ACT_MS 1000000LL
+#define ACT_BASE (10000LL * ACT_MS)
+static TAS_ACT_FRAME g_af[16];
+static unsigned g_afn;
+static void act_frame(long long sent_ms, long long arrival_ms) {   /* times relative to BaseT; arrival < -999999 means not seen */
+    g_af[g_afn].sent_ns = ACT_BASE + sent_ms * ACT_MS;
+    g_af[g_afn].seen = arrival_ms > -999999;
+    g_af[g_afn].arrival_ns = g_af[g_afn].seen ? ACT_BASE + arrival_ms * ACT_MS : 0;
+    g_afn++;
+}
+#define ACT_LOST (-1000000)
+static TAS_ACT_WIRE_CLASS act_eval(avb_u32 pre, BOOL alive, TAS_ACT_WIRE_COUNTS *c) {
+    return tas_act_wire(pre, g_af, g_afn, alive, ACT_BASE, 1000 * ACT_MS, 200 * ACT_MS, 400 * ACT_MS, TAS_ACT_EDGE_MARGIN_NS, c);
+}
+
+/* TC-MOCK-051: HOLD: nothing before the first window after BaseT, then only inside windows */
+static void test_51_act_hold_wire(void) {
+    TAS_ACT_WIRE_COUNTS c;
+
+    printf("\n[TC-MOCK-051] HOLD wire rules, 1 s cycle, window 200 to 400 ms, 20 ms margin\n");
+    g_afn = 0; act_frame(-1500, 200); act_frame(-500, 201); act_frame(100, 230); act_frame(500, 1250); act_frame(1300, 1300);
+    EXPECT_EQ("held, released in the first window, then gated", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_GATED);
+    EXPECT_TRUE("held frames leave at the window start: released, though at the edge", c.released == 2 && c.near_edge == 2 && c.inside == 3);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame before BaseT passed the hold", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_EARLY);
+    g_afn = 0; act_frame(-500, 100); act_frame(-400, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame after BaseT but before the first window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_EARLY);
+    g_afn = 0; act_frame(-500, 230); act_frame(500, 700);
+    EXPECT_EQ("a frame outside a later window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_OUTSIDE);
+    g_afn = 0; act_frame(-500, 1230); act_frame(500, 1250);
+    EXPECT_EQ("held frames released only in a later window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_NOT_RELEASED);
+    g_afn = 0; act_frame(-500, 230); act_frame(500, ACT_LOST); act_frame(600, ACT_LOST);
+    EXPECT_EQ("frames missing on a live capture", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_LOST);
+    g_afn = 0; act_frame(-500, ACT_LOST); act_frame(500, ACT_LOST);
+    EXPECT_EQ("nothing seen on a live capture is lost, not unobserved", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_LOST);
+    EXPECT_EQ("nothing seen on a dead capture decides nothing", act_eval(AVB_TAS_PRE_HOLD, FALSE, &c), TAS_ACT_WIRE_UNOBSERVED);
+    g_afn = 0; act_frame(-500, 199); act_frame(-400, 399);
+    EXPECT_EQ("released, but arrivals only at the edges prove no gating", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_NO_WINDOW);
+    g_afn = 0;
+    EXPECT_EQ("no frame at all decides nothing", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_UNOBSERVED);
+}
+
+/* TC-MOCK-052: PASS: frames flow until BaseT, then only inside windows */
+static void test_52_act_pass_wire(void) {
+    TAS_ACT_WIRE_COUNTS c;
+
+    printf("\n[TC-MOCK-052] PASS wire rules\n");
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, -499); act_frame(-10, 200); act_frame(500, 1250);
+    EXPECT_EQ("flowing before BaseT, gated after", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_GATED);
+    EXPECT_TRUE("two flowed, one sent at the BaseT edge", c.flowed == 2 && c.inside == 1 && c.near_edge == 1);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame sent well before BaseT was held", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_HELD_BEFORE_BASE);
+    g_afn = 0; act_frame(-10, 230); act_frame(500, 1250);
+    EXPECT_EQ("nothing flowed before BaseT", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_NOT_FLOWING);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(500, 600);
+    EXPECT_EQ("a frame outside the window after BaseT", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_OUTSIDE);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, -499);
+    EXPECT_EQ("never gated: nothing sent after BaseT reached a window", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_NO_WINDOW);
+}
+
+/* TC-MOCK-053: #361. TAS restoration is judged from the schedule registers, TSN mode, the driver record and the wire; the PHC
+ * is a separate outcome and never decides it */
+static void test_53_act_restore(void) {
+    TAS_ACT_RESTORE_EVIDENCE e, ok;
+
+    printf("\n[TC-MOCK-053] TAS restoration and PHC continuity are separate outcomes (#361)\n");
+    ZeroMemory(&ok, sizeof(ok));
+    ok.cycle_completed = TRUE; ok.adapter_returned = TRUE; ok.driver_clean = TRUE; ok.regs_measured = TRUE; ok.regs_differing = 0;
+    ok.tsn_mode_off = TRUE; ok.tx_probed = TRUE; ok.tx_on_wire = TRUE;
+    EXPECT_EQ("registers at baseline, mode off, clean, TX on the wire: complete", tas_act_restore(&ok), TAS_ACT_RESTORE_COMPLETE);
+    e = ok; e.phc = TAS_ACT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("a PHC reset alone does not make restoration incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+    e = ok; e.regs_differing = 1;
+    EXPECT_EQ("a schedule register left behind: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.tsn_mode_off = FALSE;
+    EXPECT_EQ("TSN mode still on: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.driver_clean = FALSE;
+    EXPECT_EQ("the driver still records a schedule: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.tx_on_wire = FALSE;
+    EXPECT_EQ("TX not shown on the wire: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.cycle_completed = FALSE;
+    EXPECT_EQ("the NIC cycle did not complete: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.adapter_returned = FALSE;
+    EXPECT_EQ("the adapter did not come back: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.regs_measured = FALSE;
+    EXPECT_EQ("registers not measured: unverified, never complete", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.regs_measured = FALSE; e.tsn_mode_off = FALSE;
+    EXPECT_EQ("unmeasured registers say nothing about the mode either", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.tx_probed = FALSE;
+    EXPECT_EQ("TX not probed: unverified", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.regs_measured = FALSE; e.driver_clean = FALSE;
+    EXPECT_EQ("an observed failure outranks what is unmeasured", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    EXPECT_EQ("PHC advanced with wall time: continuous", tas_act_phc(TRUE, 19000000000LL, 19001000000LL, 2000000000LL), TAS_ACT_PHC_CONTINUOUS);
+    /* the 18:25 HOLD run: PHC 92.25 s before, 9.23 s after, 19.34 s of wall time */
+    EXPECT_EQ("PHC moved back by the cycle: discontinuous", tas_act_phc(TRUE, 9230908065LL - 92247825218LL, 19344460900LL, 2000000000LL), TAS_ACT_PHC_DISCONTINUOUS);
+    EXPECT_EQ("PHC not read: unmeasured", tas_act_phc(FALSE, 0, 0, 2000000000LL), TAS_ACT_PHC_UNMEASURED);
+}
+
+/*
+ * TC-MOCK-049: the HIL fault path (#357, Q 2026-11-10). Debug drivers only: reserved word N fails schedule write N and the
+ * first restore write, so the registered HIL test can reach FAILED_NOT_RESTORED. A Release driver refuses any nonzero value.
+ */
+static void test_49_activate_fault(void) {
+    static const I226_TAS_IO release_io = {&g_hw, fake_read, fake_write, fake_phc, 0};
+    static const I226_TAS_IO debug_io = {&g_hw, fake_read, fake_write, fake_phc, 1};
+    unsigned n, all = 1, reached = 1, commit_kept_out = 1, pass_refused = 1;
+
+    printf("\n[TC-MOCK-049] Debug-only fault injection through the reserved word\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 5;
+    i226_tas_activate(&release_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("Release: a nonzero reserved word is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("Release: before any write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("Debug: reserved 0 activates normally", g_act.result, AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 14;
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("Debug: HOLD has 13 schedule writes, 14 is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 16;
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
+    EXPECT_EQ("Debug: PASS has 15 schedule writes, 16 is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
+    /* Option C: a PASS request with a valid fault selector is a valid PASS request, refused before any register access */
+    for (n = 1; n <= I226_TAS_PASS_WRITES; n++) {
+        act_setup(AVB_TAS_PRE_PASS); g_act.reserved = n;
+        pass_refused = pass_refused && i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED &&
+                       g_hw.writes == 0 && g_hw.reads == 0;
+    }
+    EXPECT_TRUE("Debug: PASS with any valid fault selector is not implemented, nothing read or written", pass_refused);
+    for (n = 1; n <= I226_TAS_HOLD_WRITES; n++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_act.reserved = n;
+        i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
+        all = all && g_act.result == AVB_TAS_ACT_FAILED_NOT_RESTORED;
+        /* writes before N, then the 13 restore writes without the first one */
+        reached = reached && g_hw.writes == (n - 1) + (I226_TAS_SAVED_COUNT - 1);
+        commit_kept_out = commit_kept_out && g_hw.reg[I226_BASET_L / 4] == 0;
+    }
+    EXPECT_TRUE("Debug: every N in HOLD ends FAILED_NOT_RESTORED", all);
+    EXPECT_TRUE("Debug: neither injected write reaches the hardware", reached);
+    EXPECT_TRUE("Debug: the commit write never reaches the hardware", commit_kept_out);
+}
+
+/* Every schedule write of one activation carries the request value it encodes. BASET_L: zeros before the last write */
+static int act_writes_carry_request(avb_u32 mode) {
+    static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
+    static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+    avb_u32 base_ns = (avb_u32)(g_act.base_time_ns % NSEC_PER_SEC), base_s = (avb_u32)(g_act.base_time_ns / NSEC_PER_SEC);
+    unsigned i, q, ok;
+
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    ok = g_act.result == AVB_TAS_ACT_COMMITTED &&
+         g_hw.writes == (mode == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES) &&
+         g_hw.log_off[g_hw.writes - 1] == I226_BASET_L && g_hw.log_val[g_hw.writes - 1] == base_ns;
+    for (i = 0; ok && i + 1 < g_hw.writes; i++) {
+        avb_u32 off = g_hw.log_off[i], v = g_hw.log_val[i];
+
+        for (q = 0; q < AVB_TAS_QUEUES; q++) {
+            ok = ok && (off != start[q] || v == g_act.window_start_ns[q]) && (off != end[q] || v == g_act.window_end_ns[q]);
+        }
+        ok = ok && (off != I226_QBVCYCLET_S || v == g_act.cycle_ns) && (off != I226_QBVCYCLET || v == g_act.cycle_ns);
+        ok = ok && (off != I226_BASET_H || v == base_s) && (off != I226_BASET_L || v == 0);
+    }
+    return ok;
+}
+
+/*
+ * TC-MOCK-054: #357, #21. The STQT, ENDQT, QBVCYCLET_S, QBVCYCLET and BASET_L writes carry exactly the validated request
+ * value, with the bits outside the SSOT field (QBVCYCLET_S.PLUS1, BASET_L.AUTO_SET and COPY_H) clear, at the smallest and
+ * largest values validation accepts, in HOLD and in PASS
+ */
+static void test_54_activate_encoding(void) {
+    unsigned mode, edge, q;
+
+    printf("\n[TC-MOCK-054] Schedule writes carry the request value at the field limits\n");
+    for (mode = AVB_TAS_PRE_HOLD; mode <= AVB_TAS_PRE_PASS; mode++) {
+        for (edge = 0; edge < 2; edge++) {
+            act_setup(mode);
+            if (edge == 0) {
+                /* smallest: the shortest window validation accepts (64 byte frame, 2.5 Gbit/s) as the whole cycle, BaseT
+                 * nanoseconds 0 */
+                g_act.link_mbps = 2500;
+                g_act.max_frame_bytes = 64;
+                g_act.cycle_ns = 1803;
+                g_act.base_time_ns = 8000000000ULL;
+                for (q = 0; q < AVB_TAS_QUEUES; q++) {
+                    g_act.window_start_ns[q] = 0;
+                    g_act.window_end_ns[q] = 1803;
+                }
+            } else {
+                /* largest: the cycle at the QBVCYCLET field limit, windows ending there, BaseT at its last second and
+                 * nanosecond */
+                g_act.cycle_ns = (avb_u32)(I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT);
+                g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 999999999ULL;
+                for (q = 0; q < AVB_TAS_QUEUES; q++) {
+                    g_act.window_start_ns[q] = g_act.cycle_ns - 2000000u;
+                    g_act.window_end_ns[q] = g_act.cycle_ns;
+                }
+            }
+            EXPECT_EQ(edge == 0 ? "smallest values are valid" : "largest values are valid", i226_tas_validate(&g_act),
+                      AVB_TAS_ACT_COMMITTED);
+            if (mode == AVB_TAS_PRE_HOLD) {
+                EXPECT_TRUE("HOLD: every write carries its request value", act_writes_carry_request(mode));
+            } else {
+                /* Option C: valid at the limits, and still refused before any write */
+                EXPECT_TRUE("PASS: valid at the limits and not implemented, no write",
+                            i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED && g_hw.writes == 0);
+            }
+        }
+    }
+}
+
+/*
+ * TC-MOCK-055: #357, #363 interim Option C (Q 2026-11-13). A valid PASS request completes with STATUS_NOT_IMPLEMENTED and
+ * IoStatus.Information 0, before any register access, with the Release rule and the Debug rule, on a clean and on an armed
+ * adapter. Malformed PASS requests are still refused by validation as before: STATUS_SUCCESS, the request as output, INVALID.
+ * A HOLD request still completes with STATUS_SUCCESS and the request as output.
+ */
+static void test_55_activate_pass_not_implemented(void) {
+    static const I226_TAS_IO release_io = {&g_hw, fake_read, fake_write, fake_phc, 0};
+    static const I226_TAS_IO debug_io = {&g_hw, fake_read, fake_write, fake_phc, 1};
+    const I226_TAS_IO *io;
+    ULONG_PTR info;
+    LONG st;
+    int outcome, rule, armed;
+
+    printf("\n[TC-MOCK-055] PASS: STATUS_NOT_IMPLEMENTED, Information 0, zero register access (Option C)\n");
+    for (rule = 0; rule < 2; rule++) {
+        io = rule == 0 ? &release_io : &debug_io;
+        for (armed = 0; armed < 2; armed++) {
+            act_setup(AVB_TAS_PRE_PASS);
+            info = 12345;
+            outcome = i226_tas_activate(io, &g_act, armed, &g_mode_written);
+            st = avb_tas_activate_completion(outcome, &info);
+            printf("    %s rule, %s: outcome=%d status=0x%08lX information=%lu writes=%u reads=%u phcReads=%u\n",
+                   rule == 0 ? "Release" : "Debug", armed ? "armed" : "clean", outcome, (unsigned long)st, (unsigned long)info,
+                   g_hw.writes, g_hw.reads, g_hw.phc_reads);
+            EXPECT_EQ("valid PASS: STATUS_NOT_IMPLEMENTED", st, STATUS_NOT_IMPLEMENTED);
+            EXPECT_TRUE("valid PASS: Information 0", info == 0);
+            EXPECT_EQ("valid PASS: zero register writes", g_hw.writes, 0);
+            EXPECT_EQ("valid PASS: zero register reads", g_hw.reads, 0);
+            EXPECT_EQ("valid PASS: zero PHC reads", g_hw.phc_reads, 0);
+        }
+
+        /* Malformed PASS requests: validation as before */
+        act_setup(AVB_TAS_PRE_PASS); g_act.version = 2;
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (version): STATUS_SUCCESS, INVALID, the request as output, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) &&
+                    g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.window_end_ns[1] = g_act.window_start_ns[1];
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (empty window): STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.cycle_ns = 0;
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (no cycle): STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.reserved = I226_TAS_PASS_WRITES + 1u;
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("PASS with a reserved word out of range: STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+
+        /* HOLD keeps its completion */
+        act_setup(AVB_TAS_PRE_HOLD);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("HOLD: STATUS_SUCCESS, the request as output, COMMITTED",
+                    st == STATUS_SUCCESS && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) && g_act.result == AVB_TAS_ACT_COMMITTED);
+    }
+    act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 1;
+    outcome = i226_tas_activate(&release_io, &g_act, FALSE, &g_mode_written);
+    st = avb_tas_activate_completion(outcome, &info);
+    EXPECT_TRUE("Release rule: PASS with a nonzero reserved word stays INVALID with STATUS_SUCCESS, nothing written",
+                st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+}
+
+/*
+ * TC-MOCK-056: PR #397 R8. A failure after the transmit-mode write still reports FAILED_RESTORED when every register reads back
+ * at its old value, because that is what the result states. The adapter state becomes DIRTY (hardware state unknown, a NIC
+ * cycle is owed), since a readback does not prove the transmit mode, and a further activation is refused without any write.
+ * When only the first write failed nothing reached the adapter and the adapter stays CLEAN. This is state reporting only: it
+ * does not show that the transmit mode latches on our hardware, and it does not satisfy #357 AC4.
+ */
+static void test_56_activate_restore_state(void) {
+    unsigned at;
+    avb_u32 state;
+    int ok = 1;
+
+    printf("\n[TC-MOCK-056] Matching readbacks after the transmit-mode write do not make the adapter CLEAN\n");
+    for (at = 2; at <= I226_TAS_HOLD_WRITES; at++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.fail_write = at;
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+        state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+        ok = ok && g_act.result == AVB_TAS_ACT_FAILED_RESTORED && g_mode_written == 1 && state == AVB_TAS_STATE_DIRTY;
+    }
+    EXPECT_TRUE("writes 2 to 13: FAILED_RESTORED, transmit-mode write reached the adapter, state DIRTY", ok);
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 5;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+    g_hw.fail_write = 0;
+    g_hw.writes = 0;
+    g_hw.reads = 0;
+    i226_tas_activate(&g_io, &g_act, state != AVB_TAS_STATE_CLEAN, &g_mode_written);
+    EXPECT_EQ("the next activation on that adapter is refused", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("without any write", g_hw.writes, 0);
+    EXPECT_EQ("and leaves it DIRTY", avb_tas_state_after(g_act.result, state, g_mode_written), AVB_TAS_STATE_DIRTY);
+
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 1;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+    EXPECT_TRUE("first write failed: FAILED_RESTORED, nothing reached the adapter, state CLEAN",
+                g_act.result == AVB_TAS_ACT_FAILED_RESTORED && g_mode_written == 0 && state == AVB_TAS_STATE_CLEAN);
+    g_hw.fail_write = 0;
+    g_hw.phc_reads = 0;
+    i226_tas_activate(&g_io, &g_act, state != AVB_TAS_STATE_CLEAN, &g_mode_written);
+    EXPECT_EQ("and a further activation proceeds", g_act.result, AVB_TAS_ACT_COMMITTED);
+}
+
+/* Feeds n send results, `accepted` of them accepted, in the order given by fail_first */
+static void tx_feed(TAS_TX_WINDOW *w, unsigned n, unsigned accepted, BOOL fail_first) {
+    unsigned k;
+    for (k = 0; k < n; k++) {
+        tas_tx_record_send(w, fail_first ? (k >= n - accepted) : (k < accepted));
+    }
+}
+
+/* TC-MOCK-057: TC-TASAPI-001 send-window accounting and TX verdict (#366, PR #437 review r4579071534).
+ * The functions of tests/ioctl/tas_query_tx_eval.h that tests/hardware/test_tas_query_clean.c calls for every window.
+ * TEST-LOGIC EVIDENCE ONLY: no socket, observer or adapter; it never verifies TX on hardware. */
+static void test_57_query_tx_accounting(void) {
+    TAS_TX_WINDOW base, w;
+    const unsigned pct = TAS_ACT_SEEN_MIN_PERCENT;
+    unsigned k;
+
+    printf("\n[TC-MOCK-057] #366 TX window: every attempt counts, any send error fails, zero attempts never pass (test logic only)\n");
+
+    /* Passing control: 40 attempts, all accepted, all seen, 10 unchanged queries */
+    ZeroMemory(&base, sizeof(base));
+    tx_feed(&base, 40, 40, FALSE); base.seen = 40;
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 40;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("control: counts attempted 40, sent 40, errors 0", w.attempted == 40 && w.sent == 40 && w.errors == 0);
+    EXPECT_TRUE("control: on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("control: PASS", tas_tx_judge(&base, &w, pct), TAS_TX_PASS);
+
+    /* The review's case: 1 accepted and seen, 39 refused; 10 queries still issued and unchanged */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 1, TRUE); w.seen = 1;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("1 of 40 accepted: attempted 40, sent 1, errors 39", w.attempted == 40 && w.sent == 1 && w.errors == 39);
+    EXPECT_FALSE("1 of 40 accepted, the 1 seen: not on the wire (denominator is attempts)", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("1 of 40 accepted in the checked window: FAIL, never PASS", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("1 of 40 accepted in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* Partial failure: one refused send in 40, every accepted one seen (97.5 % of attempts) */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 39, FALSE); w.seen = 39;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_FALSE("1 send error of 40, share met: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("1 send error in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+
+    /* All sends failing */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 0, FALSE);
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("all refused: attempted 40, sent 0, errors 40", w.attempted == 40 && w.sent == 0 && w.errors == 40);
+    EXPECT_FALSE("all refused: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("all refused in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("all refused in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* Zero attempts */
+    ZeroMemory(&w, sizeof(w));
+    EXPECT_FALSE("zero attempts: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("zero attempts in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("zero attempts in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* No send error, but the seen share is short: 35 of 40 = 87.5 % */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 35;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_FALSE("35 of 40 seen, no error: below the share", tas_tx_on_wire(&w, pct));
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 36;
+    EXPECT_TRUE("36 of 40 seen, no error: exactly the share", tas_tx_on_wire(&w, pct));
+
+    /* Queries: none issued, or one changed, fails a window that is otherwise on the wire */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 40;
+    EXPECT_EQ("no interleaved query: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, k != 4); }
+    EXPECT_TRUE("one changed query counted", w.queries == 10 && w.changed == 1);
+    EXPECT_EQ("one changed query: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+}
+
+/* TC-MOCK-058: TEST-TASACT-FAULT-001 F2 STATE classification (#482; PR #489 review r4631805746).
+ * tas_fv_f2_state of tests/ioctl/tas_activate_eval.h, called by tests/hardware/test_tas_activate.c --fault-versioned.
+ * A measured restoration-set change while the fault path was not reached is a violation whether or not the record was read:
+ * an unread record must not hide it. TEST-LOGIC EVIDENCE ONLY. */
+static void test_58_fault_f2_state(void) {
+    printf("\n[TC-MOCK-058] #482 F2 STATE: DIRTY after the failed restore; a measured change is never hidden by an unread record (test logic only)\n");
+
+    EXPECT_EQ("fault ran, record DIRTY: DIRTY (PASS)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_DIRTY, 0), TAS_FV_STATE_DIRTY);
+    EXPECT_EQ("fault ran, record CLEAN: NOT_DIRTY (FAIL)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_CLEAN, 0), TAS_FV_STATE_NOT_DIRTY);
+    EXPECT_EQ("fault ran, record ARMED: NOT_DIRTY (FAIL)", tas_fv_f2_state(TRUE, TRUE, AVB_TAS_STATE_ARMED, 3), TAS_FV_STATE_NOT_DIRTY);
+    EXPECT_EQ("fault ran, record unread: UNREAD (INCONCLUSIVE)", tas_fv_f2_state(TRUE, FALSE, 0, 0), TAS_FV_STATE_UNREAD);
+    EXPECT_EQ("not reached, record CLEAN, 0 differ: NOT_EXERCISED (INCONCLUSIVE)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_CLEAN, 0),
+              TAS_FV_STATE_NOT_EXERCISED);
+    EXPECT_EQ("not reached, record DIRTY: CHANGED_UNREACHED (FAIL)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_DIRTY, 0),
+              TAS_FV_STATE_CHANGED_UNREACHED);
+    EXPECT_EQ("not reached, record CLEAN, 2 differ: CHANGED_UNREACHED (FAIL)", tas_fv_f2_state(FALSE, TRUE, AVB_TAS_STATE_CLEAN, 2),
+              TAS_FV_STATE_CHANGED_UNREACHED);
+    /* r4631805746: the measured difference is a violation even when GET_TAS_STATE failed */
+    EXPECT_EQ("not reached, record unread, 1 differ: CHANGED_UNREACHED (FAIL), not UNREAD",
+              tas_fv_f2_state(FALSE, FALSE, 0, 1), TAS_FV_STATE_CHANGED_UNREACHED);
+    EXPECT_EQ("not reached, record unread, 0 differ: UNREAD (INCONCLUSIVE)", tas_fv_f2_state(FALSE, FALSE, 0, 0), TAS_FV_STATE_UNREAD);
+}
+
+/* Evidence of a passing F2 REFUSE probe: refused STATUS_INVALID_DEVICE_STATE, no output, record DIRTY kept, all 17 registers
+ * read and unchanged, the fault ran, metadata reported */
+static void fv_refuse_pass(TAS_FV_REFUSE_EVIDENCE *e) {
+    ZeroMemory(e, sizeof(*e));
+    e->state_refusal = TRUE;
+    e->record_before = TRUE;
+    e->armed_before = AVB_TAS_STATE_DIRTY;
+    e->record_after = TRUE;
+    e->armed_after = AVB_TAS_STATE_DIRTY;
+    e->fault_ran = TRUE;
+    e->metadata_reported = TRUE;
+}
+
+/* TC-MOCK-059: TEST-TASACT-FAULT-001 F2 REFUSE classification (#482, #369's rule for this probe; PR #489 review r4631805812).
+ * tas_fv_f2_refuse of tests/ioctl/tas_activate_eval.h. "Unchanged" needs every restoration-set register read in both queries:
+ * an unread register is not a measured "unchanged". TEST-LOGIC EVIDENCE ONLY. */
+static void test_59_fault_f2_refuse(void) {
+    TAS_FV_REFUSE_EVIDENCE e;
+
+    printf("\n[TC-MOCK-059] #482 F2 REFUSE: STATUS_INVALID_DEVICE_STATE, no output, state measured unchanged (test logic only)\n");
+
+    fv_refuse_pass(&e);
+    EXPECT_EQ("all established: PASS", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_PASS);
+
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.not_served = TRUE;
+    EXPECT_EQ("0x80C not served: NOT_SERVED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_SERVED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE;
+    EXPECT_EQ("raw status not captured: STATUS_UNAVAILABLE (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.accepted = TRUE;
+    EXPECT_EQ("accepted: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.output = TRUE;
+    EXPECT_EQ("refused with output: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.armed_after = AVB_TAS_STATE_ARMED;
+    EXPECT_EQ("record changed: CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.differing = 1; e.unread = 4;
+    EXPECT_EQ("1 register changed, 4 unread: CHANGED (FAIL), the measured change is not hidden", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE;
+    EXPECT_EQ("another refusal status: OTHER_STATUS (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_OTHER_STATUS);
+    fv_refuse_pass(&e); e.record_after = FALSE;
+    EXPECT_EQ("record after unread: UNCHANGED_UNESTABLISHED (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    /* r4631805812: unread registers do not establish an unchanged restoration set */
+    fv_refuse_pass(&e); e.unread = 1;
+    EXPECT_EQ("1 of 17 registers unread, nothing measured changed: UNCHANGED_UNESTABLISHED (INCONCLUSIVE), not PASS",
+              tas_fv_f2_refuse(&e), TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    fv_refuse_pass(&e); e.unread = 17;
+    EXPECT_EQ("a query failed (17 unread): UNCHANGED_UNESTABLISHED (INCONCLUSIVE), not PASS", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+    fv_refuse_pass(&e); e.fault_ran = FALSE;
+    EXPECT_EQ("fault not observed: NOT_DIRTY (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_DIRTY);
+    fv_refuse_pass(&e); e.armed_before = AVB_TAS_STATE_CLEAN; e.armed_after = AVB_TAS_STATE_CLEAN;
+    EXPECT_EQ("record CLEAN before the probe: NOT_DIRTY (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_NOT_DIRTY);
+    fv_refuse_pass(&e); e.metadata_reported = FALSE;
+    EXPECT_EQ("generation or epoch 0: METADATA_ZERO (INCONCLUSIVE)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_METADATA_ZERO);
+
+    /* r4632275740: a missing raw status never erases an independently measured violation, and never permits PASS */
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1;
+    EXPECT_EQ("raw status not captured + 1 register changed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.armed_after = AVB_TAS_STATE_ARMED;
+    EXPECT_EQ("raw status not captured + record changed DIRTY -> ARMED: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.output = TRUE;
+    EXPECT_EQ("raw status not captured + output observed: CHANGED (FAIL), not STATUS_UNAVAILABLE", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.differing = 1; e.unread = 16; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured + 1 changed, 16 unread, record unread: CHANGED (FAIL)", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE;
+    EXPECT_EQ("raw status not captured, everything measured unchanged: STATUS_UNAVAILABLE (INCONCLUSIVE), not PASS",
+              tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    fv_refuse_pass(&e); e.state_refusal = FALSE; e.status_unavailable = TRUE; e.unread = 17; e.record_after = FALSE;
+    EXPECT_EQ("raw status not captured, nothing measured (17 unread, record unread): STATUS_UNAVAILABLE (INCONCLUSIVE), no FAIL "
+              "fabricated", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_STATUS_UNAVAILABLE);
+    /* earlier corrections kept: a measured change survives unread registers; PASS needs all 17 read */
+    fv_refuse_pass(&e); e.differing = 1; e.unread = 4;
+    EXPECT_EQ("status captured, 1 changed, 4 unread: still CHANGED (FAIL)", tas_fv_f2_refuse(&e), TAS_FV_REFUSE_CHANGED);
+    fv_refuse_pass(&e); e.unread = 1;
+    EXPECT_EQ("status captured, 1 unread: still UNCHANGED_UNESTABLISHED, not PASS", tas_fv_f2_refuse(&e),
+              TAS_FV_REFUSE_UNCHANGED_UNESTABLISHED);
+
+    /* Reporting: the capture sentinel is never shown as a driver completion code; a captured status is shown exactly */
+    {
+        char text[96];
+        tas_fv_status_text(FALSE, (LONG)0x7FFFFFFF, text, sizeof(text));
+        printf("    status text, not captured: \"%s\"\n", text);
+        EXPECT_TRUE("not captured: the text says so", strstr(text, "not captured") != NULL);
+        EXPECT_TRUE("not captured: the sentinel 0x7FFFFFFF is not printed as a completion code", strstr(text, "7FFFFFFF") == NULL);
+        tas_fv_status_text(TRUE, (LONG)0xC0000010, text, sizeof(text));
+        printf("    status text, captured: \"%s\"\n", text);
+        EXPECT_TRUE("captured: ntstatus=0xC0000010 shown exactly", strcmp(text, "ntstatus=0xC0000010") == 0);
+    }
+}
+
+/* TC-MOCK-060: TEST-TAS-API-003 (#368) semantic COMPLETION under #365's published validation order R7 (oracle amendment
+ * 2026-11-19, #352 R1, #351 R2/R4). A case reaches its own rule only when every earlier step passes for the actual request:
+ * a request carrying generation or epoch 0 must be refused at step 4 (STATE_CONFLICT), an unknown driver-owned speed at step 5
+ * (NOT_READY). Missing prerequisites are named, never PASS; a completion the order excludes is FAIL. Test logic only. */
+static void fill_inv_sem(TAS_INV_SEM_EVIDENCE *e, TAS_INV_STEP step, LONG required, LONG status)
+{
+    ZeroMemory(e, sizeof(*e));
+    e->step = step;
+    e->required = required;
+    e->captured = TRUE;
+    e->status = status;
+    e->pair_established = TRUE;      /* the query reported a non-zero pair and the request carries it */
+    e->speed_before = 1000u;
+    e->speed_after_read = TRUE;
+    e->speed_after = 1000u;
+    e->before_read = TRUE;           /* the case's own query before the request was valid */
+    e->pair_after_read = TRUE;       /* and the one after, with the same pair */
+}
+
+static void test_60_invalid_semantic_order(void) {
+    TAS_INV_SEM_EVIDENCE e;
+    LONG exp;
+    TAS_INV_STEP at;
+    const LONG INVP = (LONG)STATUS_INVALID_PARAMETER, CONFLICT = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const LONG NOTREADY = (LONG)STATUS_DEVICE_NOT_READY, NOTACC = (LONG)STATUS_REQUEST_NOT_ACCEPTED;
+
+    printf("\n[TC-MOCK-060] #368 semantic COMPLETION under #365 R7 (test logic only)\n");
+
+    /* the case's own rule reached: PASS on its exact completion */
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, INVP);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("PRE_ACTIVATION 0: step 2 precedes metadata, INVALID_PARAMETER is PASS even with a zero pair",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    EXPECT_EQ("schedule case, established pair and speed: INVALID_PARAMETER is PASS", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_LEAD, INVP, INVP);
+    EXPECT_EQ("BASET_NEAR, established pair and speed: INVALID_PARAMETER is PASS", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("META_ZERO: a zero pair is refused STATE_CONFLICT on its own (R1), PASS without an established pair",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.request_pair_mismatch = TRUE;
+    EXPECT_EQ("STALE_GENERATION from an established pair, a deliberately different value: STATE_CONFLICT is PASS",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    EXPECT_EQ("NO_ACCEPTANCE, tier not reported (never verified): REQUEST_NOT_ACCEPTED is PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_PASS);
+
+    /* an earlier step must refuse the actual request: its refusal is reported, the field's own rule is not reached */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("schedule case carrying the query's 0/0: STATE_CONFLICT is the earlier step (INCONCLUSIVE)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("schedule case carrying 0/0 answered INVALID_PARAMETER: metadata must refuse first (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTREADY);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("speed unknown: NOT_READY is the earlier step (INCONCLUSIVE), not a window bound", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against NOT_READY at step 5", exp == NOTREADY && at == TAS_INV_STEP_SPEED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("speed unknown answered INVALID_PARAMETER: NOT_READY must come first (FAIL)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTREADY);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("NO_ACCEPTANCE with unknown speed: NOT_READY first (INCONCLUSIVE)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_EARLIER_STEP);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("zero pair and unknown speed: step 4 precedes step 5", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against STATE_CONFLICT", exp == CONFLICT && at == TAS_INV_STEP_META);
+
+    /* a stale claim without an established current pair is not constructible: reported, never PASS */
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STALE_* with the query's 0/0: STATE_CONFLICT observed, staleness not established (INCONCLUSIVE)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_STALE_UNESTABLISHED);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, INVP);
+    e.stale_case = TRUE; e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STALE_* carrying a zero value answered INVALID_PARAMETER: R1 requires STATE_CONFLICT (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+
+    /* the default refusal is no longer an undecided-tier excuse */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTACC);
+    EXPECT_EQ("schedule case with acceptance refused NOT_HARDWARE_VERIFIED: step 6 precedes step 8 (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, CONFLICT);
+    EXPECT_EQ("NO_ACCEPTANCE with an established pair answered STATE_CONFLICT (FAIL)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_FAIL);
+
+    /* not determined by the order for the measured facts */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTREADY);
+    e.speed_after = 100u;
+    EXPECT_EQ("speed changed around the case: UNDETERMINED", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_DEVICE_BUSY);
+    EXPECT_EQ("BUSY after the claim step: another operation, UNDETERMINED", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, (LONG)STATUS_DEVICE_BUSY);
+    EXPECT_EQ("BUSY for PRE_ACTIVATION: step 2 precedes the claim (FAIL)", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    e.tier_hold = AVB_TAS_TIER_IMPLEMENTED_VERIFIED;
+    EXPECT_EQ("NO_ACCEPTANCE on a HOLD tier IMPLEMENTED_VERIFIED: not an invalid request (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.tier_hold = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    EXPECT_EQ("query reports HOLD NOT_IMPLEMENTED: no valid control, its outcome position is unpublished (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+
+    /* violations whatever the prerequisites */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.tier_hold = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    EXPECT_EQ("0x80C not served: FAIL even when the control is undetermined", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST); e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STATUS_SUCCESS with output: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.information = 4;
+    EXPECT_EQ("the required status with output: FAIL (errors carry none)", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.captured = FALSE;
+    EXPECT_EQ("raw NTSTATUS not captured: NOT_CAPTURED", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_NOT_CAPTURED);
+
+    /* The completion a FAIL is judged against is the one R7 requires for the ACTUAL request, also on a violation path (finding on
+     * the 2026-11-19 20:20 hardware run: schedule cases carrying the query's 0/0 were reported as "requiring" their own rule) */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, schedule case carrying 0/0: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4, not the case's own rule", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, NO_ACCEPTANCE carrying 0/0: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("not served, schedule case at unknown speed: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against NOT_READY at step 5", exp == NOTREADY && at == TAS_INV_STEP_SPEED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("success with output, prerequisites established: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against the case's own rule at its own step", exp == INVP && at == TAS_INV_STEP_SCHEDULE);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, META_ZERO: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against its own STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+
+    /* PR #491 review: isolation needs the measurements it rests on, taken around the case; missing or changed ones are not
+     * established (INCONCLUSIVE), never PASS, and never turn a correct completion into FAIL */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after the case not measured, schedule case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after not measured, NO_ACCEPTANCE: UNDETERMINED", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: pair changed around the case, STATE_CONFLICT: UNDETERMINED, not FAIL", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.pair_after_read = FALSE;
+    EXPECT_EQ("r4634404991: pair after the case not measured: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.request_pair_mismatch = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: STALE_* with the pair changed around the case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.before_read = FALSE; e.pair_established = FALSE;
+    EXPECT_EQ("case's own query before the request not valid, non-zero pair sent: UNDETERMINED, not PASS",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("r4634404917: WINDOW_MIN committed while the speed changed: its invalidity is not established (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("WINDOW_MIN committed at a stable measured speed: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+
+    /* kept: unconditional failures, metadata first, independent steps */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("CYCLE_ZERO committed while the speed changed: still FAIL (its invalidity does not depend on the speed)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE;
+    EXPECT_EQ("not served with nothing measured after: still FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("META_ZERO with the pair changed around it: still PASS (0 is refused whatever the current pair)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, INVP);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE; e.before_read = FALSE;
+    EXPECT_EQ("PRE_ACTIVATION with nothing measured around it: still PASS (step 2 needs neither)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.speed_after_read = FALSE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("0/0 sent, nothing stable after: STATE_CONFLICT is still the earlier step (metadata first)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+}
+
+/* TC-MOCK-061: WINDOW_MIN (#368, TAS-DR-05 as #351 R2 publishes it): a window not greater than 1.1 x the transmit time of
+ * max(512 bytes, max_frame_bytes) at the driver-owned speed. The unpublished "plus overhead" term only raises the bound, so the
+ * largest window under the bound without it is invalid under either reading. Speed 0 constructs no bound. Test logic only. */
+static void test_61_invalid_window_min(void) {
+    static const struct { avb_u32 frame, mbps; avb_u64 want; } c[] = {
+        { 1538u, 1000u, 13534u },    /* 1538 x 8.8 = 13534.4 */
+        { 1522u, 1000u, 13393u },
+        {  100u, 1000u,  4505u },    /* below 512 bytes: 512 x 8.8 = 4505.6 */
+        { 1538u, 10000u, 1353u },
+        { 1538u,  100u, 135344u },
+        { 1538u,    0u,      0u },   /* speed unknown: no bound */
+    };
+    unsigned i;
+    char label[200];
+
+    printf("\n[TC-MOCK-061] #368 WINDOW_MIN at the driver-owned speed, TAS-DR-05 (test logic only)\n");
+    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        avb_u64 w = tas_inv_window_min_ns(c[i].frame, c[i].mbps);
+        sprintf_s(label, sizeof(label), "frame %u bytes at %u Mbit/s: window %llu ns (want %llu)", c[i].frame, c[i].mbps, w, c[i].want);
+        EXPECT_TRUE(label, w == c[i].want);
+        if (c[i].mbps != 0) {
+            avb_u64 bytes = c[i].frame > 512u ? c[i].frame : 512u;
+            sprintf_s(label, sizeof(label), "frame %u at %u: w x mbps <= bytes x 8800 < (w + 1) x mbps (largest window not greater "
+                      "than the bound)", c[i].frame, c[i].mbps);
+            EXPECT_TRUE(label, w * c[i].mbps <= bytes * 8800u && (w + 1u) * c[i].mbps > bytes * 8800u);
+        }
+    }
+}
+
+/* TC-MOCK-062: TEST-TAS-API-004 (#369) COMMIT of the accepted HOLD race under the published 2026-11-19 rules (#369 oracle
+ * amendment; #365 R1/R2/R4/R5/R7; #362; #351; #352 R1). out_flags carries AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE exactly when
+ * unverified acceptance acted: tier IMPLEMENTED_UNVERIFIED (3) bit 0, IMPLEMENTED_VERIFIED (4) 0, otherwise not judged (never a
+ * permanent 0, never 1 merely because the flag was sent). A tier refusal of the accepted control, an R5 status, a zero pair and a
+ * refusal at a measured valid speed or pair are FAIL, no longer "undecided"; a changed or unmeasured prerequisite is
+ * INCONCLUSIVE. Test logic only. */
+static void fill_hold(TAS_HOLD_EVIDENCE *e, avb_u32 tier, LONG s0, LONG s1)
+{
+    unsigned k;
+    const LONG st[2] = { s0, s1 };
+
+    ZeroMemory(e, sizeof(*e));
+    for (k = 0; k < 2; k++) {
+        e->call[k].captured = TRUE;
+        e->call[k].status = st[k];
+        if (st[k] == 0) {   /* a complete success reply with the output tier 3 requires */
+            e->call[k].information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+            e->call[k].echoed = TRUE;
+            e->call[k].out_flags = tier == AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED ? AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE : 0u;
+        }
+    }
+    e->accept_sent = TRUE;
+    e->pre_valid = TRUE;
+    e->pre_clean = TRUE;
+    e->pre_generation = 5u;
+    e->pre_epoch = 0x1234ABCDull;
+    e->pre_mbps = 1000u;
+    e->tier_hold = tier;
+    e->post_valid = TRUE;
+    e->post_generation = (s0 == 0 || s1 == 0) ? 6u : 5u;   /* one transition per commit */
+    e->post_epoch = 0x1234ABCDull;
+    e->post_mbps = 1000u;
+}
+
+static void test_62_hold_commit(void) {
+    TAS_HOLD_EVIDENCE e;
+    const LONG OK = 0, BUSY = (LONG)STATUS_DEVICE_BUSY, STATE = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const LONG NOTACC = (LONG)STATUS_REQUEST_NOT_ACCEPTED, NOTREADY = (LONG)STATUS_DEVICE_NOT_READY;
+    const avb_u32 UNVER = AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED, VER = AVB_TAS_TIER_IMPLEMENTED_VERIFIED;
+
+    printf("\n[TC-MOCK-062] #369 COMMIT of the accepted HOLD race, published 2026-11-19 rules (test logic only)\n");
+
+    /* the out_flags expectation comes from the measured tier, not from the flag sent */
+    EXPECT_EQ("tier IMPLEMENTED_UNVERIFIED: acceptance acts, bit 0 expected", tas_hold_out_expect(TRUE, UNVER), TAS_HOLD_OUT_BIT0);
+    EXPECT_EQ("tier IMPLEMENTED_VERIFIED: acceptance does not act, 0 expected", tas_hold_out_expect(TRUE, VER), TAS_HOLD_OUT_ZERO);
+    EXPECT_EQ("tier not reported (0): not judged", tas_hold_out_expect(TRUE, 0u), TAS_HOLD_OUT_UNJUDGED);
+    EXPECT_EQ("tier NOT_IMPLEMENTED: not judged", tas_hold_out_expect(TRUE, AVB_TAS_TIER_NOT_IMPLEMENTED), TAS_HOLD_OUT_UNJUDGED);
+    EXPECT_EQ("query not valid: the tier is not measured, not judged", tas_hold_out_expect(FALSE, UNVER), TAS_HOLD_OUT_UNJUDGED);
+
+    /* one complete success and one BUSY/STATE refusal */
+    fill_hold(&e, UNVER, OK, BUSY);
+    EXPECT_EQ("tier 3: success with bit 0 and BUSY is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, UNVER, STATE, OK);
+    EXPECT_EQ("tier 3: STATE refusal and success with bit 0 is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags = 0u;
+    EXPECT_EQ("tier 3: success with out_flags 0 is FAIL (acceptance acted)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+    fill_hold(&e, VER, OK, STATE);
+    EXPECT_EQ("tier 4: success with out_flags 0 and STATE is PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_PASS);
+    fill_hold(&e, VER, OK, BUSY);
+    e.call[0].out_flags = AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE;
+    EXPECT_EQ("tier 4: bit 0 set merely because the flag was sent is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+    fill_hold(&e, 0u, OK, BUSY);
+    EXPECT_EQ("tier not reported, out_flags 0: INCONCLUSIVE (not judged), never PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_UNJUDGED);
+    fill_hold(&e, 0u, OK, BUSY);
+    e.call[0].out_flags = AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE;
+    EXPECT_EQ("tier not reported, bit 0: INCONCLUSIVE (not judged)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_UNJUDGED);
+
+    /* a success reply's own violations, independent of the tier */
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags |= 0x2u;
+    EXPECT_EQ("another out_flags bit is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, 0u, OK, BUSY);
+    e.call[0].reserved1 = 1u;
+    EXPECT_EQ("reserved1 non-zero is FAIL even with the tier not reported", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].information = 0u;
+    EXPECT_EQ("success without the 144-byte reply is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].echoed = FALSE;
+    EXPECT_EQ("success with the inputs not echoed is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    e.call[0].reserved1 = 1u;
+    EXPECT_EQ("an observed violation is kept when the other call was not captured", tas_hold_commit(&e), TAS_HOLD_COMMIT_BAD_SUCCESS);
+    fill_hold(&e, UNVER, OK, OK);
+    EXPECT_EQ("two successes are FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_TWO_SUCCESSES);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_generation = 0u; e.pre_epoch = 0u;
+    EXPECT_EQ("success of a request carrying 0/0 is FAIL (R1: refused STATE_CONFLICT)", tas_hold_commit(&e), TAS_HOLD_COMMIT_ZERO_ACCEPTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].information = 8u;
+    EXPECT_EQ("a refusal with output is FAIL (errors carry no output)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, OK, NOTREADY);
+    EXPECT_EQ("success and a NOT_READY refusal is FAIL (not BUSY/STATE)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("success with the other completion not captured is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_CAPTURED);
+
+    /* the missing handler and the formerly undecided refusals */
+    fill_hold(&e, 0u, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pre_generation = 0u; e.pre_epoch = 0u;
+    EXPECT_EQ("0x80C not served is FAIL, never SKIP (the current driver)", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_SERVED);
+    fill_hold(&e, UNVER, NOTACC, NOTACC);
+    EXPECT_EQ("tier refusal of the accepted control is FAIL (R4: the flag acts)", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, 0u, NOTACC, BUSY);
+    EXPECT_EQ("tier refusal with the tier not reported is still FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, NOTACC, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("tier refusal is kept when the other call was not captured", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    EXPECT_EQ("STATUS_IO_TIMEOUT (R5 BASE_PASSED) is FAIL, named", tas_hold_commit(&e), TAS_HOLD_COMMIT_R5);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, STATE);
+    EXPECT_EQ("STATUS_IO_DEVICE_ERROR (R5 COMMITTED_UNTIMED, shared) is FAIL, named", tas_hold_commit(&e), TAS_HOLD_COMMIT_R5);
+    fill_hold(&e, 0u, STATE, STATE);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u;
+    EXPECT_EQ("both STATE with the query's 0/0 sent is FAIL, zero metadata the likely cause", tas_hold_commit(&e), TAS_HOLD_COMMIT_META_ZERO);
+    fill_hold(&e, UNVER, STATE, STATE);
+    EXPECT_EQ("both STATE with an established pair unchanged after is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_STATE_REFUSED);
+    fill_hold(&e, UNVER, STATE, BUSY);
+    EXPECT_EQ("STATE and BUSY with an established pair unchanged after is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_STATE_REFUSED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.post_generation = 9u;
+    EXPECT_EQ("both STATE with the pair changed after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.post_valid = FALSE;
+    EXPECT_EQ("both STATE with the pair not measured after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.pre_valid = FALSE;
+    EXPECT_EQ("both STATE with the pair not measured before is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_PAIR_CHANGED);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    EXPECT_EQ("NOT_READY at a stably measured 1000 Mbit/s is FAIL", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.pre_mbps = 0u;
+    EXPECT_EQ("NOT_READY with the speed unknown (0) is INCONCLUSIVE (R2's defined refusal)", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, NOTREADY, BUSY);
+    e.post_mbps = 100u;
+    EXPECT_EQ("NOT_READY with the speed changed after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.post_valid = FALSE;
+    EXPECT_EQ("NOT_READY with the speed not measured after is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_SPEED_UNDETERMINED);
+    fill_hold(&e, UNVER, BUSY, BUSY);
+    EXPECT_EQ("both BUSY is FAIL (no commit)", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, BUSY, BUSY);
+    e.call[0].captured = FALSE;
+    EXPECT_EQ("no success and a completion not captured is INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_CAPTURED);
+
+    /* PR #492 r4638870407: NOT_CLEAN (R7 step 9) and STATE_CONFLICT share STATUS_INVALID_DEVICE_STATE (#365 13.3/13.4), so a STATE
+     * refusal is attributed only when the adapter was measured clean immediately before the race; a success without that
+     * measurement is not PASS. Refusals at earlier steps (4 metadata, 5 speed, 8 tier) and observed violations stay FAIL */
+    fill_hold(&e, UNVER, STATE, STATE);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("both STATE, pair kept, clean not established at the race: INCONCLUSIVE (may be NOT_CLEAN)", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, UNVER, STATE, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("STATE and BUSY, clean not established at the race: INCONCLUSIVE", tas_hold_commit(&e), TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("a success with clean not established at the race is not PASS", tas_hold_commit(&e), TAS_HOLD_COMMIT_CLEAN_UNDETERMINED);
+    fill_hold(&e, 0u, STATE, STATE);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u; e.pre_clean = FALSE;
+    EXPECT_EQ("both STATE with 0/0 sent stays FAIL without clean (step 4 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_META_ZERO);
+    fill_hold(&e, UNVER, NOTREADY, NOTREADY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("NOT_READY at a stable speed stays FAIL without clean (step 5 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, STATE, NOTREADY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("STATE with NOT_READY at a stable speed: the NOT_READY violation is kept without clean", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_NOT_READY);
+    fill_hold(&e, UNVER, NOTACC, BUSY);
+    e.pre_clean = FALSE;
+    EXPECT_EQ("a tier refusal stays FAIL without clean (step 8 precedes step 9)", tas_hold_commit(&e), TAS_HOLD_COMMIT_TIER_REFUSED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[0].out_flags = 0u; e.pre_clean = FALSE;
+    EXPECT_EQ("a wrong out_flags is kept FAIL without clean", tas_hold_commit(&e), TAS_HOLD_COMMIT_OUT_FLAGS);
+
+    /* PR #492 r4638870535: a captured completion outside SUCCESS/BUSY/STATE/NOT_READY is FAIL; neither missing evidence nor a
+     * changed prerequisite explains it away */
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_PARAMETER, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("INVALID_PARAMETER with the other not captured is FAIL, not NOT_CAPTURED", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_PARAMETER, STATE);
+    e.post_generation = 9u;
+    EXPECT_EQ("INVALID_PARAMETER with STATE and the pair changed is FAIL, not PAIR_CHANGED", tas_hold_commit(&e), TAS_HOLD_COMMIT_OTHER);
+    fill_hold(&e, UNVER, (LONG)STATUS_UNSUCCESSFUL, NOTREADY);
+    e.post_mbps = 100u;
+    EXPECT_EQ("STATUS_UNSUCCESSFUL with NOT_READY and the speed changed is FAIL, not SPEED_UNDETERMINED", tas_hold_commit(&e),
+              TAS_HOLD_COMMIT_OTHER);
+}
+
+/* TC-MOCK-063: TEST-TAS-API-004 (#369) GENERATION across the race (#352 R1 L2/L7/L9; #369 oracle amendment 2026-11-19). A logical
+ * mutation that attempts a write advances generation exactly once (a commit: one); a refusal before any write advances nothing.
+ * Judged only from a non-zero pair measured before and after in the same context; a completion whose write attempt is not
+ * established (an uncaptured status, a shared R5/R8 status) leaves the expectation unknown. A decrease is always FAIL. Test logic
+ * only. */
+static void test_63_hold_generation(void) {
+    TAS_HOLD_EVIDENCE e;
+    unsigned n = 99u;
+    const LONG OK = 0, BUSY = (LONG)STATUS_DEVICE_BUSY, STATE = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const avb_u32 UNVER = AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED;
+
+    printf("\n[TC-MOCK-063] #369 GENERATION across the race, #352 R1 (test logic only)\n");
+
+    fill_hold(&e, UNVER, OK, BUSY);
+    EXPECT_EQ("one commit, one BUSY: 5 -> 6 is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with one transition expected", n == 1u);
+    fill_hold(&e, UNVER, STATE, OK);
+    e.post_generation = 5u;
+    EXPECT_EQ("one commit, generation unchanged is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_generation = 7u;
+    EXPECT_EQ("one commit, two steps is FAIL (the refusal adds nothing)", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, STATE, STATE);
+    EXPECT_EQ("both refused before any write, unchanged: PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with no transition expected", n == 0u);
+    fill_hold(&e, UNVER, (LONG)STATUS_REQUEST_NOT_ACCEPTED, (LONG)STATUS_DEVICE_NOT_READY);
+    EXPECT_EQ("NOT_ACCEPTED and NOT_READY are pre-write refusals: unchanged is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    fill_hold(&e, UNVER, BUSY, (LONG)STATUS_INVALID_PARAMETER);
+    e.post_generation = 6u;
+    EXPECT_EQ("pre-write refusals with a transition is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+    fill_hold(&e, UNVER, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    EXPECT_EQ("not served with an established pair unchanged: PASS (no operation ran)", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+
+    /* the current driver: 0/0 */
+    fill_hold(&e, 0u, (LONG)STATUS_INVALID_DEVICE_REQUEST, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pre_generation = 0u; e.pre_epoch = 0u; e.post_generation = 0u; e.post_epoch = 0u;
+    EXPECT_EQ("0/0 before: INCONCLUSIVE (not reported), never PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PRE_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.pre_valid = FALSE;
+    EXPECT_EQ("query before not valid: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PRE_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_generation = 0u;
+    EXPECT_EQ("generation 0 after: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_POST_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_valid = FALSE;
+    EXPECT_EQ("query after not valid: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_POST_UNREPORTED);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.post_epoch = 0x55u;
+    EXPECT_EQ("epoch changed (another context): INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_EPOCH_CHANGED);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, BUSY);
+    e.post_generation = 6u;
+    EXPECT_EQ("a shared R5/R8 status: the write attempt is not established, INCONCLUSIVE", tas_hold_generation(&e, &n),
+              TAS_HOLD_GEN_UNKNOWN_EXPECTATION);
+    fill_hold(&e, UNVER, OK, BUSY);
+    e.call[1].captured = FALSE;
+    EXPECT_EQ("a completion not captured: INCONCLUSIVE", tas_hold_generation(&e, &n), TAS_HOLD_GEN_UNKNOWN_EXPECTATION);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_DEVICE_ERROR, BUSY);
+    e.post_generation = 4u;
+    EXPECT_EQ("a decrease is FAIL even with the expectation unknown", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+
+    /* PR #492 r4638870492: STATUS_IO_TIMEOUT is R5's BASE_PASSED only (#365 R5), an outcome after attempted writes, so it advances
+     * generation exactly once (#352 R1 L7) */
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    e.post_generation = 6u;
+    EXPECT_EQ("IO_TIMEOUT (BASE_PASSED) and BUSY: 5 -> 6 is PASS", tas_hold_generation(&e, &n), TAS_HOLD_GEN_PASS);
+    EXPECT_TRUE("... with one transition expected", n == 1u);
+    fill_hold(&e, UNVER, (LONG)STATUS_IO_TIMEOUT, BUSY);
+    EXPECT_EQ("IO_TIMEOUT (BASE_PASSED) with generation unchanged is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -596,6 +1938,31 @@ int main(void) {
     test_11_skip_distinct_from_pass();
     test_12_restoration_outcome();
     test_13_wire_match();
+    test_28_activate_validation();
+    test_29_activate_not_clean();
+    test_30_activate_hold();
+    test_31_activate_pass();
+    test_32_activate_failure();
+    test_33_activate_time();
+    test_45_activate_fields();
+    test_46_activate_untimed();
+    test_47_activate_state();
+    test_48_activate_gcl();
+    test_49_activate_fault();
+    test_50_act_mapping();
+    test_51_act_hold_wire();
+    test_52_act_pass_wire();
+    test_53_act_restore();
+    test_54_activate_encoding();
+    test_55_activate_pass_not_implemented();
+    test_56_activate_restore_state();
+    test_57_query_tx_accounting();
+    test_58_fault_f2_state();
+    test_59_fault_f2_refuse();
+    test_60_invalid_semantic_order();
+    test_61_invalid_window_min();
+    test_62_hold_commit();
+    test_63_hold_generation();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

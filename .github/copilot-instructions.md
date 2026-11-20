@@ -77,6 +77,22 @@ For features, bug fixes, behavior changes, and refactoring, use the existing `te
 - Do not claim success, performance, timing, or compliance without fresh evidence.
 - Before completion claims, use `verification-before-completion`; for debugging, use `systematic-debugging`; for test execution use `run-tests` / `intelavbfilter-testing` as applicable.
 
+### Mandatory HIL execution integrity
+
+Required and applicable HIL tests MUST NOT be suppressed
+solely because they perform register writes, initialization,
+fault injection or other expected hardware mutations.
+
+An Unsafe classification describes operation effects;
+it is not independently an execution veto.
+
+Every unjustified test-execution block is a test-infrastructure
+defect. Record its occurrence, link the existing root-cause
+issue or create a new defect when authorized.
+
+Follow `intelavbfilter-testing` for execution, verdicts,
+restoration and defect-handling requirements.
+
 ## 7. Design, quality, security, and maintainability
 
 Always:

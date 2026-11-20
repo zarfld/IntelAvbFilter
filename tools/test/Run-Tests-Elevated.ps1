@@ -54,16 +54,13 @@ $repoRoot   = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
 function ConvertTo-AvbPsLiteral { param([string]$Text) return "'" + $Text.Replace("'", "''") + "'" }
 
-# Manual runs are operator-attended (Q 2026-11-04): naming an entry here authorizes exactly that entry, on by default, on top of
-# any list already set.  The gate in Run-Tests-CI.ps1 still decides and still ignores this under GitHub Actions.
+# #458 (Q 2026-11-19): Unsafe execution requires neither attendance nor per-entry permission, so naming an entry creates
+# no authorization.  AVB_HIL_AUTHORIZE_UNSAFE is a compatibility variable only: a value the operator set is forwarded
+# unchanged (normalized list) and has no dispatch effect; Run-Tests-CI.ps1 reports that when it sees it.  -TestName and
+# -TestArgs are accepted for call compatibility and ignored.
 function Get-AvbElevatedAuthorization {
     param([string]$Existing, [string]$TestName, [string]$TestArgs)
     $list = @($Existing -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    if ($TestName -and $TestName -notmatch '\.ps1$') {
-        $entry = $TestName -replace '\.exe$', ''
-        if ($TestArgs) { $entry = "$entry $TestArgs" }
-        if ($list -cnotcontains $entry) { $list += $entry }
-    }
     return ($list -join ',')
 }
 
@@ -76,7 +73,8 @@ function New-AvbElevatedCommand {
           [string]$AuthorizeUnsafe = '')
     $command = if ($LogFile) { "Start-Transcript -Path $(ConvertTo-AvbPsLiteral $LogFile) -Force | Out-Null; " } else { '' }
     $command += "`$_innerCode = 1; `$global:LASTEXITCODE = `$null; "
-    # -Verb RunAs builds a new environment.  The operator's authorization is carried across it; the gate in Run-Tests-CI.ps1 decides.
+    # -Verb RunAs builds a new environment.  An operator-set compatibility value is carried across it unchanged; it has no
+    # dispatch effect (#458).
     if ($AuthorizeUnsafe) { $command += "`$env:AVB_HIL_AUTHORIZE_UNSAFE = $(ConvertTo-AvbPsLiteral $AuthorizeUnsafe); " }
     if ($Suite) {
         $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration"
@@ -141,12 +139,12 @@ if (-not $LogFile) {
         }
     }
 }
-# Always active on local runs, no parameter to set (Q 2026-11-04): no local blocks.
+# Only a value the operator set is forwarded (compatibility, no dispatch effect, #458); nothing is added for the named entry.
 $authorizeUnsafe = Get-AvbElevatedAuthorization -Existing $env:AVB_HIL_AUTHORIZE_UNSAFE -TestName $TestName -TestArgs $TestArgs
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
                -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe $authorizeUnsafe -LegacyScript $scriptPath -RunCiScript $runCiPath
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
-if ($authorizeUnsafe) { Write-Host "Forwarding AVB_HIL_AUTHORIZE_UNSAFE=$authorizeUnsafe to the elevated runner" -ForegroundColor Cyan }
+if ($authorizeUnsafe) { Write-Host "Forwarding AVB_HIL_AUTHORIZE_UNSAFE=$authorizeUnsafe to the elevated runner (compatibility only: no dispatch effect, #458)" -ForegroundColor Cyan }
 
 if ($LogFile) {
     Write-Host "Output will be logged to: $LogFile" -ForegroundColor Cyan
