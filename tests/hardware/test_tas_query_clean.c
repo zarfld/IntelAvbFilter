@@ -31,8 +31,11 @@
  * INFERRED_ACTIVE are #369's. Cleanup, CLEANUP and RESTORE as below (the restoration baseline is the clean query).
  * A forbidden status fails a phase line before any timing judgement; PENDING passes only on a valid, ordered PHC bracket that
  * ends before the retained target BaseT. The activation counts as committed only from the reply #365 13.4 gives COMMITTED
- * alone (raw NTSTATUS STATUS_SUCCESS with all 144 bytes; COMMITTED means BaseT was still ahead after the commit); any other
- * completion, an unserved 0x80C included, is printed with its raw NTSTATUS. REPLIES covers every answered query of the
+ * alone (raw NTSTATUS STATUS_SUCCESS with all 144 bytes; COMMITTED means BaseT was still ahead after the commit). ACTIVATE is
+ * the sent activation's own line: PASS only on COMMITTED, otherwise the canonical verdict of its raw NTSTATUS (an unserved
+ * 0x80C, 0xC0000010, is FAIL); BLOCKED when it was not sent. Without a commit the PENDING and PAST_BASET queries still run
+ * (the latter once the PHC is two cycles past the requested BaseT): a HARDWARE_VERIFIED reply is FAIL, any other reply leaves
+ * the line BLOCKED "COVERAGE MISSING", because the activated state was not established. REPLIES covers every answered query of the
  * adapter run, polling and the cleanup's query after the cycle included: FAIL on any HARDWARE_VERIFIED, INCONCLUSIVE if no
  * query was answered.
  *
@@ -1030,8 +1033,9 @@ static void op_hold_request(AVB_TAS_OP_REQUEST *r, avb_u64 net_luid, avb_u32 fra
                             avb_u64 gen, avb_u64 epoch);
 
 /** --hw-verified, TC-TASAPI-016 (#381): HARDWARE_VERIFIED is never returned, on a clean adapter, with a committed schedule
- *  whose BaseT is still ahead, and with the PHC past BaseT. Only the verdicts on HARDWARE_VERIFIED belong to this case; the
- *  slot statuses themselves (PENDING, INFERRED_ACTIVE) are #369's and are printed as evidence only. */
+ *  whose BaseT is still ahead, and with the PHC past BaseT. Besides the verdicts on HARDWARE_VERIFIED, ACTIVATE reports the
+ *  sent precondition activation itself, so a failed activation is a failure of its own and not only the reason for BLOCKED
+ *  phases; the slot statuses themselves (PENDING, INFERRED_ACTIVE) are #369's and are printed as evidence only. */
 static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, IN_ADDR ipv4,
                             const MIB_IF_ROW2 *row)
 {
@@ -1043,7 +1047,7 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
     LONG st;
     BOOL past = FALSE, committed;
     long long base = 0;
-    char reason[256];
+    char reason[320];
 
     ZeroMemory(&q1, sizeof(q1));
     ZeroMemory(&q2, sizeof(q2));
@@ -1054,11 +1058,14 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
     print_query("clean", &q0);
     verdict_not_hw_verified("QUERY", index, id->device_id, &q0, "clean adapter");
     if (!query_valid(&q0)) {
+        verdict("BLOCKED", "ACTIVATE", index, id->device_id, "not sent: requires a valid query of the clean adapter");
         verdict("BLOCKED", "PENDING", index, id->device_id, "requires a valid query of the clean adapter before any activation");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a valid query of the clean adapter before any activation");
         goto done;
     }
     if (!query_clean(&q0) || !p0.ok) {
+        verdict("BLOCKED", "ACTIVATE", index, id->device_id, !p0.ok ? "not sent: PHC unavailable, no BaseT can be placed" :
+                "not sent: the query does not report a clean adapter (#381 precondition)");
         verdict("BLOCKED", "PENDING", index, id->device_id, !p0.ok ? "PHC unavailable: no BaseT can be placed" :
                 "the query does not report a clean adapter; no activation on it (#381 precondition)");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a clean adapter, the PHC and a committed schedule");
@@ -1075,6 +1082,7 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
     hw = open_device(GENERIC_READ | GENERIC_WRITE);
     if (hw == INVALID_HANDLE_VALUE || !bind_luid(hw, id->net_luid)) {
         if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
+        verdict("BLOCKED", "ACTIVATE", index, id->device_id, "not sent: cannot bind a handle with write access");
         verdict("BLOCKED", "PENDING", index, id->device_id, "cannot bind a handle with write access for the activation");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no committed schedule");
         goto done;
@@ -1090,22 +1098,36 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
            CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, sent.schedule.queue[0].max_frame_bytes);
     printf("    [EVIDENCE] activation reply: ntstatus=%s0x%08lX information=%lu out_flags=0x%X reserved1=0x%X\n",
            st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)st, got, req.out_flags, req.reserved1);
-    /* #365 13.4: only COMMITTED completes STATUS_SUCCESS with the whole 144-byte structure, and COMMITTED means BaseT was still
-     * ahead after the commit; every other result is an error with no output. Anything else leaves no schedule to query */
+    /* ACTIVATE: the sent activation itself. #365 13.4: only COMMITTED completes STATUS_SUCCESS with the whole 144-byte structure,
+     * and COMMITTED means BaseT was still ahead after the commit; every other result is an error with no output. The verdict is
+     * the canonical one of the raw NTSTATUS (avb_verdict.h, the capability advertised): an unserved 0x80C (0xC0000010) or any other
+     * error is FAIL, STATUS_SUCCESS without the whole structure is FAIL, an uncaptured status INCONCLUSIVE */
     committed = st == 0 && got == (DWORD)sizeof(req);
-    if (!committed) {
-        sprintf_s(reason, sizeof(reason), "activation not established as COMMITTED (ntstatus=0x%08lX information=%lu); no schedule "
-                  "to query", (unsigned long)st, got);
-        verdict("BLOCKED", "PENDING", index, id->device_id, reason);
-        verdict("BLOCKED", "PAST_BASET", index, id->device_id, reason);
-        goto done;
+    {
+        AVB_VERDICT av = avb_verdict_from_status((NTSTATUS)st, AVB_CAP_PRESENT, committed, TRUE);
+        if (av == AVB_VERDICT_PASS) {
+            sprintf_s(reason, sizeof(reason), "COMMITTED (#365 13.4): ntstatus=0x%08lX information=%lu", (unsigned long)st, got);
+        } else {
+            sprintf_s(reason, sizeof(reason), "the sent activation was not COMMITTED (#365 13.4): ntstatus=%s0x%08lX information=%lu%s",
+                      st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)st, got,
+                      st == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (IOCTL_AVB_TAS_ACTIVATE_80C not served)" : "");
+        }
+        verdict(avb_verdict_tag(av), "ACTIVATE", index, id->device_id, reason);
     }
 
-    /* PENDING: a forbidden status fails whatever the timing; a pass needs valid, ordered PHC readings before BaseT */
+    /* PENDING: a forbidden status fails whatever the timing; a pass needs a committed schedule and valid, ordered PHC readings
+     * before BaseT. Without a commit the query still runs (a HARDWARE_VERIFIED reply is FAIL whatever the activation did), but
+     * the activated PENDING state was not established: that coverage is missing, never a pass */
     query(h, &q1);
-    print_query("committed, BaseT ahead", &q1);
+    print_query(committed ? "committed, BaseT ahead" : "after the uncommitted activation, BaseT ahead", &q1);
     if (!query_valid(&q1) || q1.q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || q1.q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
-        verdict_not_hw_verified("PENDING", index, id->device_id, &q1, "committed, BaseT ahead");
+        verdict_not_hw_verified("PENDING", index, id->device_id, &q1,
+                                committed ? "committed, BaseT ahead" : "after the uncommitted activation, BaseT ahead");
+    } else if (!committed) {
+        sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed schedule, the activated PENDING state was not established; "
+                  "the query after the uncommitted activation answered current=%u next=%u (observation only)",
+                  q1.q.current_status, q1.q.next_status);
+        verdict("BLOCKED", "PENDING", index, id->device_id, reason);
     } else if (!phc_valid(&q1.q) || q1.q.phc_before_ns > q1.q.phc_after_ns) {
         verdict("BLOCKED", "PENDING", index, id->device_id, "the query's PHC bracket is invalid or unordered; it cannot show the query precedes BaseT");
     } else if (q1.q.phc_after_ns >= (avb_u64)base) {
@@ -1114,8 +1136,8 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
         verdict_not_hw_verified("PENDING", index, id->device_id, &q1, "committed, query bracket before BaseT");
     }
 
-    /* Wait, bounded, until a valid query's own ordered PHC bracket starts PAST_BASE_CYCLES cycles past BaseT. Every polled reply
-     * is checked by query() for HARDWARE_VERIFIED; the REPLIES line below reports it */
+    /* Wait, bounded, until a valid query's own ordered PHC bracket starts PAST_BASE_CYCLES cycles past BaseT (the requested BaseT
+     * when nothing committed). Every polled reply is checked by query() for HARDWARE_VERIFIED; the REPLIES line below reports it */
     start = GetTickCount();
     do {
         Sleep(PAST_BASE_POLL_MS);
@@ -1125,9 +1147,15 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
         /* Stop at the first forbidden reply: it becomes PAST_BASET's FAIL, never overwritten by a later reply (PR #438) */
     } while (!past && query_valid(&q2) && q2.q.current_status != AVB_TAS_ST_HARDWARE_VERIFIED &&
              q2.q.next_status != AVB_TAS_ST_HARDWARE_VERIFIED && GetTickCount() - start < PAST_BASE_BOUND_MS);
-    print_query("PHC past BaseT", &q2);
+    print_query(committed ? "PHC past BaseT" : "PHC past the requested BaseT, nothing committed", &q2);
     if (!query_valid(&q2) || q2.q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || q2.q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
-        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "PHC past BaseT");
+        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2,
+                                committed ? "PHC past BaseT" : "PHC past the requested BaseT, nothing committed");
+    } else if (!committed) {
+        sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed schedule, the activated PAST_BASET state was not established; "
+                  "the query %s the requested BaseT answered current=%u next=%u (observation only)",
+                  past ? "two cycles past" : "within the bound, not proven past,", q2.q.current_status, q2.q.next_status);
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, reason);
     } else if (!past) {
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no valid, ordered query bracket past BaseT within the bound; the case was not observed");
     } else {
