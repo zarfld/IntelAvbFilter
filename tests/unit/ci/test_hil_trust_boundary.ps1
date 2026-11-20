@@ -20,8 +20,8 @@
 #       workflow_dispatch on any ref                                    -> Dispatch (no manual HIL path);
 #       any other event (push, schedule, release, ...) on master and on a feature branch  -> Automatic (a direct
 #             push would bypass the CI + deploy-staging gate).
-#   - every self-hosted job needs explicit read-only permissions, an environment, serialized matrix legs
-#     (strategy.max-parallel 1), no cancelling concurrency group, no continue-on-error, and checkout without
+#   - every self-hosted job needs explicit read-only permissions, an environment, parallel-eligible matrix legs
+#     (no global serialization), no cancelling concurrency group, no continue-on-error, and checkout without
 #     persisted credentials (Governance); missing = violation.
 #   - REAL-011 simulates the job graph (GitHub needs/skip semantics); REAL-012 executes hil.yml's authorization
 #     script against a localhost fixture API and its acceptance script against fixture evidence, so a failed CI, a
@@ -373,11 +373,10 @@ function Get-EventContexts([string]$EventName, $Leg) {
     return ,$c
 }
 
-# Governance of a self-hosted job: explicit read-only token, an environment (deployment-branch policy), serialized
-# legs, failures never masked, no persisted git credentials.  Missing or non-map values fail closed.
-# Serialization: a job-level concurrency group would CANCEL pending matrix legs (GitHub keeps one pending entry
-# per group), so matrix legs must be serialized with strategy.max-parallel 1; a concurrency group, if present,
-# must not cancel.
+# Governance of a self-hosted job: explicit read-only token, an environment (deployment-branch policy),
+# independent parallel-eligible legs, failures never masked, no persisted git credentials.
+# A job-level concurrency group can CANCEL pending matrix legs; any concurrency group must not cancel.
+# Cross-host matrix parallelism is required by #441; same-host exclusivity is enforced in HilLock.ps1.
 function Get-GovernanceIssues($Wf, $Job) {
     $issues = @()
     $perm = if ($Job.Contains('permissions')) { $Job['permissions'] } elseif ($Wf.Contains('permissions')) { $Wf['permissions'] } else { $null }
@@ -390,7 +389,10 @@ function Get-GovernanceIssues($Wf, $Job) {
     $strat = if ($Job.Contains('strategy') -and $Job['strategy'] -is [System.Collections.IDictionary]) { $Job['strategy'] } else { $null }
     $legCount = 1
     if ($null -ne $strat -and $strat.Contains('matrix')) { $mLegs = Expand-Matrix $strat['matrix']; $legCount = @($mLegs).Count }   # Expand-Matrix returns ,$legs
-    if ($legCount -gt 1 -and -not ($null -ne $strat -and "$($strat['max-parallel'])" -eq '1')) { $issues += "matrix legs not serialized ($legCount legs; strategy.max-parallel must be 1)" }
+    if ($legCount -gt 1 -and $null -ne $strat -and $strat.Contains('max-parallel') -and
+        "$($strat['max-parallel'])" -notmatch '^[2-9][0-9]*$') {
+        $issues += "matrix legs globally serialized or concurrency limit unverifiable ($legCount legs; strategy.max-parallel must permit at least 2)"
+    }
     if ($Job.Contains('continue-on-error') -and "$($Job['continue-on-error'])" -ne 'false') { $issues += "job continue-on-error '$($Job['continue-on-error'])' masks HIL failures" }
     if ($Job.Contains('steps')) {
         foreach ($s in @($Job['steps'])) {
@@ -589,6 +591,7 @@ jobs:
     environment: hil
     continue-on-error: true
     strategy:
+      max-parallel: 1
       matrix:
         config: [Debug, Release]
     steps:
@@ -669,7 +672,7 @@ jobs:
     steps:
 $preflightStep
 "@
-$fx21 = New-Fx 'fx21_matrix_serialized.yml' @"
+$fx21 = New-Fx 'fx21_matrix_parallel_eligible.yml' @"
 on:
   workflow_run:
     workflows: [CI]
@@ -683,7 +686,6 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         config: [Debug, Release]
     steps:
@@ -978,12 +980,12 @@ tc_check 'TEST-HILTRUST-FX-019-write-permission-and-cancelling-concurrency-are-v
     (($g19.Count -eq 1) -and ($g19[0].Detail -match 'permission contents: write') -and ($g19[0].Detail -match 'cancel-in-progress')) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx20
 $g20 = Get-Kind $f 'Governance'
-tc_check 'TEST-HILTRUST-FX-020-unserialized-matrix-and-continue-on-error-are-violations' `
-    (($g20.Count -eq 1) -and ($g20[0].Detail -match 'max-parallel must be 1') -and ($g20[0].Detail -match 'job continue-on-error') -and
+tc_check 'TEST-HILTRUST-FX-020-serialized-matrix-and-continue-on-error-are-violations' `
+    (($g20.Count -eq 1) -and ($g20[0].Detail -match 'max-parallel must permit at least 2') -and ($g20[0].Detail -match 'job continue-on-error') -and
      ($g20[0].Detail -match 'step continue-on-error')) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx21
 $a21 = Get-Kind $f 'Authorized'
-tc_check 'TEST-HILTRUST-FX-021-serialized-guarded-workflow-run-matrix-is-authorized-per-leg-without-violations' `
+tc_check 'TEST-HILTRUST-FX-021-parallel-eligible-guarded-workflow-run-matrix-is-authorized-per-leg-without-violations' `
     (((Get-Violations $f).Count -eq 0) -and ($a21.Count -eq 2) -and (@($a21 | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -eq 0)) (Show-Findings $f)
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1020,23 +1022,23 @@ tc_check 'TEST-HILTRUST-REAL-003-no-unverifiable-external-workflow-on-untrusted-
     ("{0} external reusable workflow reference(s)" -f $realExt.Count)
 tc_check 'TEST-HILTRUST-REAL-004-no-direct-push-schedule-or-other-automatic-event-reaches-the-hil-runner' ($realAuto.Count -eq 0) (Show-Findings $realAuto)
 tc_check 'TEST-HILTRUST-REAL-005-non-master-upstreams-and-foreign-repositories-cannot-reach-hil' ($realRef.Count -eq 0) (Show-Findings $realRef)
-tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-serialized-never-masked' ($realGov.Count -eq 0) (Show-Findings $realGov)
+tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-parallel-eligible-never-masked' ($realGov.Count -eq 0) (Show-Findings $realGov)
 tc_check 'TEST-HILTRUST-REAL-014-no-manual-dispatch-reaches-the-hil-runner' ($realDisp.Count -eq 0) (Show-Findings $realDisp)
 tc_check 'TEST-HILTRUST-REAL-015-failed-upstream-ci-cannot-reach-the-hil-runner' ($realUpFail.Count -eq 0) (Show-Findings $realUpFail)
 
-# Only hil.yml's two physical stages reach a self-hosted runner, each leg only after a successful master push CI
+# Only hil.yml's two physical matrix legs reach the self-hosted runner, each only after authorized CI.
 # (post-merge confirmation) or a successful same-repository PR CI behind authorize (mandatory pre-merge gate).
 $ciRel  = '.github/workflows/ci-standards-compliance.yml'
 $hilRel = '.github/workflows/hil.yml'
-# One atomic physical job per configuration (deploy -> Mandatory/Unit/Integration), no matrix legs.
-$hilJobIds = @('hil-debug', 'hil-release')
+# One atomic physical matrix job with exactly Debug and Release configuration legs.
+$hilJobIds = @('hil')
 $authIssues = @()
 foreach ($jid in $hilJobIds) {
     $a = @($realAuth | Where-Object { $_.Job -eq "$hilRel/$jid" })
-    if ($a.Count -ne 1) { $authIssues += "${jid}: $($a.Count) authorized execution context(s) (expected exactly 1, no matrix legs)" }
-    if (@($a | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -gt 0) { $authIssues += "${jid}: authorized on $(@($a | ForEach-Object { $_.Event }) -join ',')" }
+    if ($a.Count -ne 2 -or (@($a | ForEach-Object { $_.Leg } | Sort-Object) -join ',') -ne 'configuration=Debug,configuration=Release') { $authIssues += "${jid}: expected exactly two authorized physical matrix legs, found $($a.Count): $(@($a | ForEach-Object { $_.Leg }) -join ',')" }
+    if (@($a | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -gt 0) { $authIssues += "${jid}: unexpected authorized event" }
     $ap = @($realAuthPr | Where-Object { $_.Job -eq "$hilRel/$jid" })
-    if ($ap.Count -ne 1 -or $ap[0].Event -ne 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]') { $authIssues += "${jid}: pre-merge contexts $(@($ap | ForEach-Object { $_.Event }) -join ',') (expected exactly the same-repository PR contexts behind authorize)" }
+    if ($ap.Count -ne 2 -or (@($ap | ForEach-Object { $_.Leg } | Sort-Object) -join ',') -ne 'configuration=Debug,configuration=Release' -or @($ap | Where-Object { $_.Event -ne 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]' }).Count -gt 0) { $authIssues += "${jid}: two independently authorized PR matrix legs required" }
 }
 $selfHostedJobs = @($realFindings | Where-Object { $_.Kind -in 'Authorized', 'AuthorizedPR', 'Reachable', 'Automatic', 'UpstreamFailed', 'UnauthorizedRef', 'ForeignRepo', 'Dispatch', 'Order', 'Governance' } | ForEach-Object { ($_.Job -split ' -> ')[0] } | Sort-Object -Unique)
 $expectedSelfHosted = @($hilJobIds | ForEach-Object { "$hilRel/$_" } | Sort-Object)
@@ -1129,17 +1131,14 @@ else {
     $rb = Join-Path $RepoRoot '.github\workflows\update-readme-status.yml'
     if (Test-Path -LiteralPath $rb) { $adds = @([regex]::Matches([IO.File]::ReadAllText($rb), '(?m)^\s*git add\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value }); if (($adds -join ',') -ne 'README.md') { $azIssues += "update-readme-status.yml commits [$($adds -join ',')], not only README.md (metadata allow-list coupling)" } }
 }
-$expectedIf = @{
-    'hil-debug'   = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'"
-    'hil-release' = "`${{ !cancelled() && $wrGuardReal && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}"
-}
-$expectedNeeds = @{ 'hil-debug' = 'authorize'; 'hil-release' = 'authorize,hil-debug' }
+$expectedIf = @{ 'hil' = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'" }
+$expectedNeeds = @{ 'hil' = 'authorize' }
 foreach ($jid in $hilJobIds) {
     $j = $hilJobs[$jid]
     if ($null -eq $j) { $azIssues += "$jid missing"; continue }
-    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; Release strictly after Debug)" }
+    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; physical matrix depends on authorization only)" }
     if ("$($j['if'])".Trim() -cne $expectedIf[$jid]) { $azIssues += "$jid if is not the expected guard: $($j['if'])" }
-    if ($j.Contains('strategy')) { $azIssues += "${jid}: physical job has a matrix/strategy (configurations are separate serialized jobs)" }
+    $strat = $j['strategy']; if (-not ($strat -is [System.Collections.IDictionary]) -or "$($strat['fail-fast'])" -ne 'false' -or $strat.Contains('max-parallel') -or -not ($strat['matrix'] -is [System.Collections.IDictionary]) -or (@($strat['matrix']['configuration']) -join ',') -cne 'Debug,Release' -or (@($strat['matrix'].Keys) -join ',') -ne 'configuration') { $azIssues += "${jid}: expected exact parallel-eligible Debug/Release matrix with fail-fast=false and no max-parallel cap" }
     $first = @($j['steps'])[0]
     $fr = "$($first['run'])"
     if ("$($first['id'])" -ne 'hil-trusted-preflight' -or $first.Contains('if') -or $first.Contains('continue-on-error')) { $azIssues += "${jid}: first step is not an unconditional hil-trusted-preflight" }
@@ -1154,18 +1153,19 @@ foreach ($jid in $hilJobIds) {
 $hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
 foreach ($v in @([regex]::Matches($hilText, '\bvars\.\w+') | ForEach-Object { $_.Value } | Sort-Object -Unique)) { $azIssues += "hil.yml reads operator variable $v" }
 foreach ($v in 'HIL_AUTHORIZED_DRIVER_SHA256', 'HIL_BUGCHECK_ACK', 'HIL_HALT') { if ($hilText -match "\b$v\b") { $azIssues += "hil.yml still references $v" } }
-if ($hilJobs.Contains('hil-debug') -and $hilJobs.Contains('hil-release') -and
-    "$(@($hilJobs['hil-debug']['steps'])[0]['run'])" -cne "$(@($hilJobs['hil-release']['steps'])[0]['run'])") { $azIssues += 'hil-debug and hil-release preflights differ' }
-foreach ($jc in @(@{ J = 'hil-debug'; C = 'Debug'; S = 'staged_debug_sha256' }, @{ J = 'hil-release'; C = 'Release'; S = 'staged_release_sha256' })) {
-    if (-not $hilJobs.Contains($jc.J) -or -not $hilJobs[$jc.J].Contains('env')) { $azIssues += "$($jc.J): missing (or no env)"; continue }
-    $e = $hilJobs[$jc.J]['env']
-    if ("$($e['HIL_CONFIGURATION'])" -cne $jc.C -or "$($e['HIL_STAGED_DRIVER_SHA256'])" -ne "`${{ needs.authorize.outputs.$($jc.S) }}") { $azIssues += "$($jc.J): configuration / staged SHA256 not bound to $($jc.C)" }
+if ($hilJobs.Contains('hil-debug') -or $hilJobs.Contains('hil-release')) { $azIssues += 'legacy duplicate physical HIL jobs still present' }
+$h = $hilJobs['hil']
+$expectedDriverHash = "`${{ matrix.configuration == 'Debug' && needs.authorize.outputs.staged_debug_sha256 || needs.authorize.outputs.staged_release_sha256 }}"
+if ($null -eq $h -or -not $h.Contains('env')) { $azIssues += 'hil: matrix environment missing' }
+else {
+    $e = $h['env']
+    if ("$($e['HIL_CONFIGURATION'])" -cne '${{ matrix.configuration }}' -or "$($e['HIL_STAGED_DRIVER_SHA256'])" -cne $expectedDriverHash) { $azIssues += 'hil: configuration and signed staged SHA must be bound per matrix leg' }
 }
 $acc = $hilJobs['hil-acceptance']
 if ($null -eq $acc) { $azIssues += 'hil-acceptance missing' }
 else {
     if ("$($acc['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-acceptance must be GitHub-hosted' }
-    if ((@($acc['needs']) -join ',') -ne 'authorize,hil-debug,hil-release') { $azIssues += "hil-acceptance needs [$(@($acc['needs']) -join ',')]" }
+    if ((@($acc['needs']) -join ',') -ne 'authorize,hil') { $azIssues += "hil-acceptance needs [$(@($acc['needs']) -join ',')]" }
     if ("$($acc['if'])" -notmatch '!cancelled\(\)' -or "$($acc['if'])" -notmatch "needs\.authorize\.outputs\.authorized == 'true'") { $azIssues += 'hil-acceptance condition' }
     if (-not ($acc['outputs'] -is [System.Collections.IDictionary]) -or "$($acc['outputs']['verdict'])" -ne '${{ steps.verdict.outputs.verdict }}') { $azIssues += 'hil-acceptance does not publish its verdict as output (the pre-merge gate requires it)' }
 }
@@ -1174,7 +1174,7 @@ $gate = $hilJobs['hil-gate']
 if ($null -eq $gate) { $azIssues += 'hil-gate missing' }
 else {
     if ("$($gate['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-gate must be GitHub-hosted' }
-    if ((@($gate['needs']) -join ',') -ne 'authorize,hil-debug,hil-release,hil-acceptance') { $azIssues += "hil-gate needs [$(@($gate['needs']) -join ',')]" }
+    if ((@($gate['needs']) -join ',') -ne 'authorize,hil,hil-acceptance') { $azIssues += "hil-gate needs [$(@($gate['needs']) -join ',')]" }
     $gIf = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'"
     if ("$($gate['if'])".Trim() -cne "`${{ always() && $gIf }}") { $azIssues += "hil-gate if is not always() && $gIf (it must report every PR CI outcome, including skips): $($gate['if'])" }
     $gp = $gate['permissions']
@@ -1194,7 +1194,7 @@ tc_check 'TEST-HILTRUST-REAL-009-hil-starts-only-via-workflow-run-and-hosted-aut
 
 # Each physical stage builds and tests exactly the authorized upstream commit, in order, with isolated evidence.
 # Q 2026-11-03: exactly the two hardware suites, in the LocalSuites order.
-$expectedSuites = @{ 'hil-debug' = 'HardwareUnit,HardwareIntegration'; 'hil-release' = 'HardwareUnit,HardwareIntegration' }
+$expectedSuites = @{ 'hil' = 'HardwareUnit,HardwareIntegration' }
 $idIssues = @()
 foreach ($jid in $hilJobIds) {
     if (-not $hilJobs.Contains($jid)) { $idIssues += "$jid missing"; continue }
@@ -1212,7 +1212,9 @@ foreach ($jid in $hilJobIds) {
     # The package comes only from this run's authorize hand-over (no run-id / token: never another run's artifact).
     $dl = @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['uses'])" -match '^actions/download-artifact@' })
     $cfgName = "$($hilJobs[$jid]['env']['HIL_CONFIGURATION'])"
-    if ($dl.Count -ne 1 -or "$($dl[0]['with']['name'])" -ne "hil-staged-$cfgName" -or $dl[0]['with'].Contains('run-id') -or $dl[0]['with'].Contains('github-token')) { $idIssues += "${jid}: must download exactly this run's hil-staged-$cfgName (no run-id/github-token)" }
+    if ($cfgName -cne '${{ matrix.configuration }}') { $idIssues += "${jid}: configuration is not matrix-bound" }; if ($dl.Count -ne 1 -or "$($dl[0]['with']['name'])" -cne "hil-staged-$cfgName" -or $dl[0]['with'].Contains('run-id') -or $dl[0]['with'].Contains('github-token')) { $idIssues += "${jid}: must retrieve only this run's per-configuration staged package" }
+    $up = @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['uses'])" -match '^actions/upload-artifact@' })
+    if ($up.Count -ne 1 -or "$($up[0]['with']['name'])" -cne "hil-evidence-$cfgName") { $idIssues += "${jid}: upload must be unique per matrix configuration" }
     $runs = @($hSteps | ForEach-Object { if ($_ -is [System.Collections.IDictionary] -and $_.Contains('run')) { "$($_['run'])" } else { '' } })
     $idx = [ordered]@{}
     foreach ($k in 'git rev-parse HEAD\)\)\.Trim\(\)\s*\r?\n\s*if \(\$head -cne \$env:AVB_HIL_EXPECTED_REVISION\)', 'Invoke-HilDeployment\.ps1 -Action Deploy', 'Build-Tests\.ps1', 'Test-DriverPreFlight\.ps1', 'hil-run-identity\.json', 'Run-Tests-CI\.ps1') { $idx[$k] = [array]::FindIndex([string[]]$runs, [Predicate[string]]{ param($x) $x -match $k }) }
@@ -1269,7 +1271,18 @@ function Get-SimulatedResults($Jobs, [hashtable]$Vars, [hashtable]$Outcome) {
                 if (Test-Unk $g) { throw "undecidable if of ${jid}: $txt" }
                 $run = if ($txt -match '\b(success|always|failure|cancelled)\s*\(') { Test-Truthy $g } else { $allOk -and (Test-Truthy $g) }
             }
-            $res[$jid] = if ($run) { if ($Outcome.ContainsKey($jid)) { $Outcome[$jid] } else { 'success' } } else { 'skipped' }
+            if ($jid -eq 'hil' -and $job.Contains('strategy') -and $job['strategy'].Contains('matrix')) {
+                $legResults = @()
+                foreach ($cfg in @($job['strategy']['matrix']['configuration'])) {
+                    $key = "hil[$cfg]"
+                    $r = if (-not $run) { 'skipped' } elseif ($Outcome.ContainsKey($key)) { $Outcome[$key] } else { 'success' }
+                    $res[$key] = $r
+                    $legResults += $r
+                }
+                $res[$jid] = if (-not $run) { 'skipped' } elseif ($legResults -contains 'failure') { 'failure' } elseif ($legResults -contains 'cancelled') { 'cancelled' } elseif ($legResults -contains 'skipped') { 'failure' } else { 'success' }
+            } else {
+                $res[$jid] = if ($run) { if ($Outcome.ContainsKey($jid)) { $Outcome[$jid] } else { 'success' } } else { 'skipped' }
+            }
             [void]$pending.Remove($jid); $progress = $true
         }
         if (-not $progress) { throw "needs cycle or unknown need among: $($pending -join ',')" }
@@ -1284,7 +1297,6 @@ function New-WrVars([string]$UpEvent, [string]$UpBranch, [string]$UpConclusion, 
     $v['github.event.workflow_run.event'] = $UpEvent; $v['github.event.workflow_run.head_branch'] = $UpBranch
     $v['github.event.workflow_run.conclusion'] = $UpConclusion; $v['github.event.workflow_run.head_repository.full_name'] = $HeadRepo
     $v['needs.authorize.outputs.authorized'] = $Authorized
-    $v['needs.hil-debug.outputs.machine_ok'] = $(if ($Authorized -eq 'true') { 'true' } else { '' })
     return $v
 }
 function New-PrRunVars([string]$Base, [string]$HeadRepo, [string]$Association) {
@@ -1295,25 +1307,29 @@ function New-PrRunVars([string]$Base, [string]$HeadRepo, [string]$Association) {
 }
 function Set-Var([hashtable]$V, [string]$K, [string]$X) { $V[$K] = $X; return $V }
 $forkR = 'untrusted-fork/IntelAvbFilter'
-$allSkipped = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'skipped' }
+$allSkipped = @{ 'authorize' = 'skipped'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'skipped' }
 # Every PR CI completion is reported by the pre-merge gate (always), whether or not anything reached the HIL runner.
-$prNotRun = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' }
+$prNotRun = @{ 'authorize' = 'skipped'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' }
 $hilScen = [ordered]@{
     'authorized master push CI' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{}
-        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'skipped' } }
+        Expect = @{ 'hil' = 'success'; 'authorize' = 'success'; 'hil[Debug]' = 'success'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'skipped' } }
     'authorized OWNER same-repository PR CI' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{}
-        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
+        Expect = @{ 'hil' = 'success'; 'authorize' = 'success'; 'hil[Debug]' = 'success'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
     'same-repository PR, authorization denied (non-OWNER, stale head, closed, behind master, staging skipped)' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
-    'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
+        Expect = @{ 'hil' = 'skipped'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
+    'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Debug]' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
     'upstream same-repository PR CI failed' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'failure' ''); Out = @{}; Expect = $prNotRun }
     'eligible, authorization denied (deploy-staging skipped, wrong SHA, stale, unprotected)' = @{ Vars = (New-WrVars 'push' 'master' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped' } }
-    'Debug tests fail, machine healthy: Release still deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
-    'Debug deployment left the machine needing the operator: Release not attempted' = @{ Vars = (Set-Var (New-WrVars 'push' 'master' 'success' 'true') 'needs.hil-debug.outputs.machine_ok' 'false'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-release' = 'skipped'; 'hil-acceptance' = 'failure' } }
+        Expect = @{ 'hil' = 'skipped'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped' } }
+    'Debug tests fail: Release still independently deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Debug deployment left its runner needing operator: Release independently executes' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'failure'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Debug matrix leg skipped: Release still independently executes; acceptance fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'skipped'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Both configurations fail: acceptance still fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'failure'; 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' } }
     'upstream fork PR from its master' = @{ Vars = (New-WrVars 'pull_request' 'master' 'success' '' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream fork PR, authorize output forged true' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream CI failed on master'     = @{ Vars = (New-WrVars 'push' 'master' 'failure' ''); Out = @{}; Expect = $allSkipped }
@@ -1321,8 +1337,8 @@ $hilScen = [ordered]@{
     'upstream feature push'            = @{ Vars = (New-WrVars 'push' 'feature/x' 'success' ''); Out = @{}; Expect = $allSkipped }
     'upstream tag push'                = @{ Vars = (New-WrVars 'push' 'v1.0.0' 'success' ''); Out = @{}; Expect = $allSkipped }
     'foreign repository'               = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true' $forkR $forkR); Out = @{}; Expect = $allSkipped }
-    'HIL Release fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'success'; 'hil-acceptance' = 'failure' } }
+    'HIL Release fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Debug]' = 'success'; 'hil-acceptance' = 'failure' } }
 }
 $simIssues = @()
 foreach ($sn in $hilScen.Keys) {
@@ -1606,7 +1622,7 @@ srv.serve_forever()
                 $b = Join-Path $Root "hil-evidence-$cfg"; New-Item -ItemType Directory -Path $b -Force | Out-Null
                 Write-J (Join-Path $b 'deployment.json') ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = $cfg; verdict = 'DEPLOYED'; reason = 'ok'; crashEvidence = [ordered]@{ classification = 'NONE' } })
                 Write-J (Join-Path $b 'hil-run-identity.json') ([ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'
-                    job = "hil-$($cfg.ToLower())"; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
+                    job = 'hil'; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
                     imagePathSha256 = $stagedOf[$cfg]; runningImageEvidence = 'reloaded during this deployment' })
                 foreach ($su in 'HardwareUnit', 'HardwareIntegration') {
                     $sd = Join-Path $b $su; New-Item -ItemType Directory -Path $sd -Force | Out-Null
@@ -1620,8 +1636,8 @@ srv.serve_forever()
         $acCases = [ordered]@{
             'complete current-run evidence, both configurations' = @{ Mod = {}; Exit = 0 }
             'previous run crashed (reported, attributed, not gated)' = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\deployment.json' 'crashEvidence' ([ordered]@{ classification = 'PREVIOUS_RUN_CRASHED' }) }; Exit = 0; Out = 'previous HIL run crashed the machine' }
-            'hil-debug failed'                   = @{ Mod = {}; Debug = 'failure'; Exit = 1; Why = "hil-debug result is 'failure'" }
-            'hil-release skipped'                = @{ Mod = {}; Release = 'skipped'; Exit = 1; Why = "hil-release result is 'skipped'" }
+            'matrix failed despite complete bundles'                   = @{ Mod = {}; Matrix = 'failure'; Exit = 1; Why = "hil matrix result is 'failure'" }
+            'matrix skipped despite complete bundles'                = @{ Mod = {}; Matrix = 'skipped'; Exit = 1; Why = "hil matrix result is 'skipped'" }
             'deployment failed: zero tests, not executed' = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\deployment.json' 'verdict' 'DEPLOY_FAILED' }; Exit = 1; Why = 'HIL acceptance: HIL_NOT_EXECUTED' }
             'machine needed the operator'        = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\deployment.json' 'verdict' 'NEEDS_OPERATOR' }; Exit = 1; Why = 'Debug: deployment NEEDS_OPERATOR' }
             'no deployment record'               = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Debug\deployment.json') -Force }; Exit = 1; Why = 'no deployment record' }
@@ -1659,7 +1675,7 @@ srv.serve_forever()
             & $acCases[$n].Mod $root
             $c = $acCases[$n]
             $r = Invoke-Py $accPy @{ GITHUB_RUN_ID = '777'; HIL_HEAD_SHA = $sha; HIL_UPSTREAM_RUN_ID = "$rid"
-                                    HIL_DEBUG = $(if ($c.ContainsKey('Debug')) { $c.Debug } else { 'success' }); HIL_RELEASE = $(if ($c.ContainsKey('Release')) { $c.Release } else { 'success' })
+                                    HIL_MATRIX = $(if ($c.ContainsKey('Matrix')) { $c.Matrix } else { 'success' })
                                     HIL_STAGED_DEBUG = $stagedOf['Debug']; HIL_STAGED_RELEASE = $stagedOf['Release']
                                     HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md"); GITHUB_OUTPUT = (Join-Path $script:Tmp "acc_out_$k.txt")
                                     GITHUB_RUN_ATTEMPT = $(if ($c.ContainsKey('Attempt')) { $c.Attempt } else { '1' }) }
@@ -1698,7 +1714,7 @@ try {
     # The verdict step's inputs are exactly the job results and authorize/acceptance outputs named in its env.
     $gEnvWant = [ordered]@{ AZ_RESULT = '${{ needs.authorize.result }}'; AZ_AUTHORIZED = '${{ needs.authorize.outputs.authorized }}'; AZ_MODE = '${{ needs.authorize.outputs.mode }}'
         AZ_HEAD_SHA = '${{ needs.authorize.outputs.head_sha }}'; AZ_PR = '${{ needs.authorize.outputs.pr_number }}'; AZ_DENY = '${{ needs.authorize.outputs.deny_reasons }}'
-        DEBUG_RESULT = '${{ needs.hil-debug.result }}'; RELEASE_RESULT = '${{ needs.hil-release.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
+        HIL_MATRIX_RESULT = '${{ needs.hil.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
     if (-not ($gvStep[0]['env'] -is [System.Collections.IDictionary]) -or -not ($gsStep[0]['env'] -is [System.Collections.IDictionary])) { throw 'hil-gate verdict/status steps have no env map' }
     foreach ($k in $gEnvWant.Keys) { if ("$($gvStep[0]['env'][$k])" -ne $gEnvWant[$k]) { $x17 += "gate env $k is '$($gvStep[0]['env'][$k])', not '$($gEnvWant[$k])'" } }
     function New-GateEvent([string]$Conclusion = 'success', [string]$HeadRepo = 'zarfld/IntelAvbFilter', [string]$UpEvent = 'pull_request', [string]$HeadSha = $gSha) {
@@ -1706,11 +1722,11 @@ try {
             head_repository = [ordered]@{ full_name = $HeadRepo }; pull_requests = @([ordered]@{ number = 344 }) } }
     }
     $okEnv = @{ AZ_RESULT = 'success'; AZ_AUTHORIZED = 'true'; AZ_MODE = 'pull_request'; AZ_HEAD_SHA = $gSha; AZ_PR = '344'; AZ_DENY = ''
-                DEBUG_RESULT = 'success'; RELEASE_RESULT = 'success'; ACC_RESULT = 'success'; ACC_VERDICT = 'PASSED' }
+                HIL_MATRIX_RESULT = 'success'; ACC_RESULT = 'success'; ACC_VERDICT = 'PASSED' }
     $gCases = [ordered]@{
         'both configurations PASSED for the authorized head' = @{ Env = @{}; State = 'success'; Verdict = 'PASSED' }
         'acceptance INCOMPLETE (coverage gap)'     = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'INCOMPLETE' }; State = 'failure'; Verdict = 'INCOMPLETE' }
-        'acceptance FAILED'                        = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'FAILED'; RELEASE_RESULT = 'failure' }; State = 'failure'; Verdict = 'FAILED' }
+        'acceptance FAILED'                        = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'FAILED'; HIL_MATRIX_RESULT = 'failure' }; State = 'failure'; Verdict = 'FAILED' }
         'acceptance HIL_NOT_EXECUTED'              = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'HIL_NOT_EXECUTED' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
         'staged build not tested'                  = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'STAGED_BUILD_NOT_TESTED' }; State = 'failure'; Verdict = 'STAGED_BUILD_NOT_TESTED' }
         'acceptance skipped'                       = @{ Env = @{ ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
@@ -1721,13 +1737,14 @@ try {
         'acceptance job success, verdict passed (wrong case)' = @{ Env = @{ ACC_VERDICT = 'passed' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'acceptance verdict outside the vocabulary' = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'MOSTLY_OK' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'verdict PASSED but acceptance job failed' = @{ Env = @{ ACC_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
-        'hil-release skipped (PASSED forged)'      = @{ Env = @{ RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-release 'skipped'" }
-        'hil-debug cancelled'                      = @{ Env = @{ DEBUG_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-debug 'cancelled'" }
-        'authorize denied (stale head)'            = @{ Env = @{ AZ_RESULT = 'failure'; AZ_AUTHORIZED = ''; AZ_DENY = 'pull request #344 head eeee is not the CI run head'; ACC_RESULT = 'skipped'; ACC_VERDICT = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED'; Why = 'is not the CI run head' }
+        'matrix skipped (PASSED forged)'           = @{ Env = @{ HIL_MATRIX_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'skipped'" }
+        'matrix cancelled (PASSED forged)'         = @{ Env = @{ HIL_MATRIX_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'cancelled'" }
+        'matrix failed (PASSED forged)'            = @{ Env = @{ HIL_MATRIX_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'failure'" }
+        'authorize denied (stale head)'            = @{ Env = @{ AZ_RESULT = 'failure'; AZ_AUTHORIZED = ''; AZ_DENY = 'pull request #344 head eeee is not the CI run head'; ACC_RESULT = 'skipped'; ACC_VERDICT = ''; HIL_MATRIX_RESULT = 'skipped' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED'; Why = 'is not the CI run head' }
         'authorize success but not authorized'     = @{ Env = @{ AZ_AUTHORIZED = '' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
         'authorized output true but job failed'    = @{ Env = @{ AZ_RESULT = 'failure' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
-        'fork pull request'                        = @{ Event = (New-GateEvent -HeadRepo 'untrusted-fork/IntelAvbFilter'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'NOT_ELIGIBLE'; Why = 'fork' }
-        'upstream CI failed'                       = @{ Event = (New-GateEvent -Conclusion 'failure'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'CI_NOT_SUCCESSFUL'; Why = "'failure'" }
+        'fork pull request'                        = @{ Event = (New-GateEvent -HeadRepo 'untrusted-fork/IntelAvbFilter'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; HIL_MATRIX_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'NOT_ELIGIBLE'; Why = 'fork' }
+        'upstream CI failed'                       = @{ Event = (New-GateEvent -Conclusion 'failure'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; HIL_MATRIX_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'CI_NOT_SUCCESSFUL'; Why = "'failure'" }
         'authorized head is not the CI head'       = @{ Env = @{ AZ_HEAD_SHA = ('e' * 40) }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized as a master push'              = @{ Env = @{ AZ_MODE = 'push'; AZ_PR = '' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized another pull request'          = @{ Env = @{ AZ_PR = '345' }; State = 'failure'; Verdict = 'INCONSISTENT' }
@@ -1819,7 +1836,7 @@ tc_check 'TEST-HILTRUST-REAL-017-pre-merge-gate-posts-success-only-for-passed-de
 # block; an absent or stopped driver does not - the deployment replaces it); former operator variables are ignored.
 # ---------------------------------------------------------------------------------------------------------
 $x16 = @()
-$pfRun = if ($null -ne $hilJobs['hil-debug']) { "$(@($hilJobs['hil-debug']['steps'])[0]['run'])" } else { '' }
+$pfRun = if ($null -ne $hilJobs['hil']) { "$(@($hilJobs['hil']['steps'])[0]['run'])" } else { '' }
 $isAdmin = (New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 $pfStubs = @'
 # Load the modules first: an autoload triggered later (e.g. by New-Object) would replace these stubs with the real,
@@ -1864,7 +1881,7 @@ $pfCases = [ordered]@{
     'not workflow_run'                      = @{ Set = @{ GITHUB_EVENT_NAME = 'push' }; Why = 'is not workflow_run' }
     'malformed revision'                    = @{ Set = @{ AVB_HIL_EXPECTED_REVISION = 'master' }; Why = 'is not a 40-hex commit id' }
 }
-if (-not $pfRun) { $x16 += 'hil-debug preflight missing' }
+if (-not $pfRun) { $x16 += 'hil matrix preflight missing' }
 else {
     $pfFile = Join-Path $script:Tmp 'preflight.ps1'
     [System.IO.File]::WriteAllText($pfFile, $pfStubs + "`r`n" + ($pfRun -replace "`r?`n", "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
@@ -1922,7 +1939,7 @@ foreach ($wfFile in @(Get-ChildItem $wfDir -File | Where-Object { $_.Extension -
         }
     }
 }
-# One dispatch site per suite and configuration: exactly hil.yml/hil-debug and hil.yml/hil-release.
+# One physical dispatch site per suite shared by both matrix configurations: hil.yml/hil.
 $wantSites = (@($hilJobIds | ForEach-Object { "hil.yml/$_" } | Sort-Object) -join ',')
 foreach ($kk in $sites.Keys) {
     if ((@($sites[$kk] | Sort-Object) -join ',') -ne $wantSites) { $evIssues += "suite $kk dispatched from [$($sites[$kk] -join ', ')] (expected exactly [$wantSites])" }

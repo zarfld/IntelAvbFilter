@@ -577,47 +577,149 @@ function Get-YamlJobBlock([string]$Text, [string]$Job) {
     $m = [regex]::Match($Text, "(?ms)^  $([regex]::Escape($Job)):\s*\r?\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*\r?\n|\z)")
     if ($m.Success) { return $m.Groups[1].Value } else { return $null }
 }
-# 021 STATIC (workflow text, not a GitHub Actions run), rule (2): within an admitted HIL run every hardware suite step and
-#     the Release job run after an earlier failure (deployment of the staged package stays the essential input); the
-#     hosted test matrices never cancel their sibling legs.
-$ciBad = @()
+function Get-YamlJobIf([string]$Block) {
+    if ($null -eq $Block) { return $null }
+    $m = [regex]::Match($Block, '(?m)^    if:\s*(.+?)\s*$')
+    if ($m.Success) { return $m.Groups[1].Value } else { return $null }
+}
+function Get-YamlJobNeeds([string]$Block) {
+    if ($null -eq $Block) { return @() }
+    $m = [regex]::Match($Block, '(?ms)^    needs:\s*(\[.*?\]|\r?\n(?:\s+-[^\r\n]*\r?\n)+)')
+    if ($m.Success) { return @([regex]::Matches($m.Groups[1].Value, '[A-Za-z0-9_-]+') | ForEach-Object { $_.Value }) } else { return @() }
+}
+# 021 STATIC (workflow text, not a GitHub Actions run), rule (2): within an admitted HIL run every hardware suite
+#     execution runs after an earlier failure, provided the staged package was deployed (the essential input).  Since
+#     master #447 hil.yml runs ONE job 'hil' as a [Debug, Release] matrix: its two suite step definitions expanded across
+#     the two configurations are four executions (not four textual steps), and fail-fast: false keeps a failing leg from
+#     cancelling its sibling.  The hosted test matrices never cancel their sibling legs either.
+function Get-AvbHilContinuationViolations([string]$HilText) {
+    $bad = @()
+    $hil = Get-YamlJobBlock $HilText 'hil'
+    if ($null -eq $hil) { return @("hil.yml: job 'hil' missing") }
+    if ($hil -notmatch '(?m)^      fail-fast:\s*false\s*$') { $bad += 'hil: matrix fail-fast is not false (a failing leg cancels its sibling)' }
+    $cfg = [regex]::Match($hil, '(?m)^        configuration:\s*\[([^\]\r\n]*)\]\s*$')
+    $cfgs = @(if ($cfg.Success) { $cfg.Groups[1].Value -split ',' | ForEach-Object { $_.Trim().Trim("'", '"') } | Where-Object { $_ } })
+    foreach ($c in 'Debug', 'Release') { if ($cfgs -cnotcontains $c) { $bad += "hil: matrix configuration $c missing (found [$($cfgs -join ', ')])" } }
+    if ($hil -notmatch '(?m)^      HIL_CONFIGURATION:\s*\$\{\{\s*matrix\.configuration\s*\}\}\s*$') { $bad += 'hil: HIL_CONFIGURATION is not bound to matrix.configuration' }
+    # Steps are split at their '- name:' lines (a step block may end in blank lines).
+    $steps = @([regex]::Split($hil, '(?m)^      - name:') | Select-Object -Skip 1)
+    if (@($steps | Where-Object { $_ -match '(?m)^        id:\s*deploy\s*$' }).Count -ne 1) { $bad += "hil: no single step with id 'deploy'" }
+    foreach ($suite in 'HardwareUnit', 'HardwareIntegration') {
+        $def = @($steps | Where-Object { $_ -match "-Suite $suite\b" })
+        if ($def.Count -ne 1) { $bad += "hil: expected one $suite step definition, found $($def.Count)"; continue }
+        if ($def[0] -notmatch '(?m)^        if:\s*\$\{\{\s*!cancelled\(\)\s*&&\s*steps\.deploy\.outcome\s*==\s*''success''\s*\}\}\s*$') { $bad += "hil: the $suite step does not run after an earlier failure following a successful deployment" }
+        if ($def[0] -notmatch '-Configuration \$env:HIL_CONFIGURATION\b') { $bad += "hil: the $suite step does not run the leg's own configuration" }
+    }
+    $exec = @($steps | Where-Object { $_ -match '-Suite Hardware(Unit|Integration)\b' }).Count * $cfgs.Count
+    if ($exec -ne 4) { $bad += "hil: expected 4 hardware suite executions (2 suites x 2 configurations), found $exec" }
+    return $bad
+}
 $ciText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml'))
+$hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
+$ciBad = @()
 foreach ($j in 'unit-tests', 'integration-tests') {
     $b = Get-YamlJobBlock $ciText $j
     if ($null -eq $b -or $b -notmatch '(?m)^      fail-fast:\s*false\s*$') { $ciBad += "${j}: matrix fail-fast is not false" }
 }
-$hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
-# Steps are split at their '- name:' lines (a step block may end in blank lines).
-$suiteSteps = @([regex]::Split($hilText, '(?m)^      - name:') | Where-Object { $_ -match '-Suite Hardware(Unit|Integration)\b' })
-if ($suiteSteps.Count -ne 4) { $ciBad += "hil.yml: expected 4 hardware suite steps (2 suites x 2 configurations), found $($suiteSteps.Count)" }
-foreach ($s in $suiteSteps) { if ($s -notmatch "(?m)^        if:\s*\$\{\{\s*!cancelled\(\)") { $ciBad += "hil.yml: a hardware suite step does not run after an earlier failure: $((($s -split "`n")[0]).Trim())" } }
-$rel = Get-YamlJobBlock $hilText 'hil-release'
-if ($null -eq $rel -or $rel -notmatch '(?m)^    if:\s*\$\{\{\s*!cancelled\(\)') { $ciBad += 'hil.yml: hil-release does not run after a failed hil-debug' }
+$ciBad += @(Get-AvbHilContinuationViolations $hilText)
 tc_check 'TEST-HILPATH-021-STATIC-admitted-hil-run-and-test-matrices-continue-after-earlier-failures' ($ciBad.Count -eq 0) ($ciBad -join '; ')
 
 # 023 STATIC, rule (1): admission and promotion stay conditional on success.  deploy-staging needs the required test and
 #     gate jobs and has no status function in its condition (GitHub adds the implicit success(): a failed or skipped need
-#     skips staging); hil.yml is triggered by the completed CI workflow and every job that deploys or runs hardware tests
-#     requires workflow_run.conclusion == 'success' (hil-gate only reports).  The trust-boundary assertions in
+#     skips staging); hil.yml is triggered by the completed CI workflow; authorize, the hardware job 'hil' and
+#     hil-acceptance require workflow_run.conclusion == 'success', 'hil' and hil-acceptance also the authorization, and
+#     no status function lets 'hil' run past a failed or skipped authorize.  hil-gate only reports: it must still run
+#     (always()) for failed runs and never require a successful upstream.  The trust-boundary assertions in
 #     tests/unit/ci/test_hil_trust_boundary.ps1 (REAL-008, FX-023) are retained unchanged.
-$admBad = @()
-$dep = Get-YamlJobBlock $ciText 'deploy-staging'
-if ($null -eq $dep) { $admBad += 'deploy-staging missing' }
-else {
-    $needs = [regex]::Match($dep, '(?ms)^    needs:\s*(\[.*?\]|\r?\n(?:\s+-[^\r\n]*\r?\n)+)')
-    $needList = if ($needs.Success) { @([regex]::Matches($needs.Groups[1].Value, '[A-Za-z0-9_-]+') | ForEach-Object { $_.Value }) } else { @() }
-    foreach ($n in 'code-quality', 'unit-tests', 'integration-tests', 'acceptance-tests', 'security-scan') { if ($needList -notcontains $n) { $admBad += "deploy-staging does not need $n" } }
-    $depIf = [regex]::Match($dep, '(?ms)^    if:\s*\|?\s*\r?\n?(.*?)(?=^    [A-Za-z_-]+:)')
-    if (-not $depIf.Success) { $admBad += 'deploy-staging has no job condition' }
-    elseif ($depIf.Groups[1].Value -match 'always\(\)|cancelled\(\)|failure\(\)|success\(\)') { $admBad += "deploy-staging condition overrides the status check: $($depIf.Groups[1].Value.Trim() -replace '\s+', ' ')" }
+function Get-AvbHilAdmissionViolations([string]$HilText, [string]$CiText) {
+    $bad = @()
+    $dep = Get-YamlJobBlock $CiText 'deploy-staging'
+    if ($null -eq $dep) { $bad += 'deploy-staging missing' }
+    else {
+        $needList = Get-YamlJobNeeds $dep
+        foreach ($n in 'code-quality', 'unit-tests', 'integration-tests', 'acceptance-tests', 'security-scan') { if ($needList -notcontains $n) { $bad += "deploy-staging does not need $n" } }
+        $depIf = [regex]::Match($dep, '(?ms)^    if:\s*\|?\s*\r?\n?(.*?)(?=^    [A-Za-z_-]+:)')
+        if (-not $depIf.Success) { $bad += 'deploy-staging has no job condition' }
+        elseif ($depIf.Groups[1].Value -match 'always\(\)|cancelled\(\)|failure\(\)|success\(\)') { $bad += "deploy-staging condition overrides the status check: $($depIf.Groups[1].Value.Trim() -replace '\s+', ' ')" }
+    }
+    if ($HilText -notmatch "(?ms)workflow_run:\s*\r?\n\s+workflows:\s*\[\s*`"CI - Standards Compliance & Quality Gates`"\s*\]\s*\r?\n\s+types:\s*\[\s*completed\s*\]") { $bad += "hil.yml is not triggered by the completed 'CI - Standards Compliance & Quality Gates' workflow" }
+    $concl = 'github\.event\.workflow_run\.conclusion\s*==\s*''success'''
+    $authz = 'needs\.authorize\.outputs\.authorized\s*==\s*''true'''
+    foreach ($j in 'authorize', 'hil', 'hil-acceptance') {
+        $b = Get-YamlJobBlock $HilText $j
+        $if = Get-YamlJobIf $b
+        if ($null -eq $if -or $if -notmatch $concl) { $bad += "hil.yml ${j}: does not require workflow_run.conclusion == 'success'" }
+        if ($j -ne 'authorize') {
+            if ($null -eq $if -or $if -notmatch $authz) { $bad += "hil.yml ${j}: does not require needs.authorize.outputs.authorized == 'true'" }
+            if ((Get-YamlJobNeeds $b) -notcontains 'authorize') { $bad += "hil.yml ${j}: does not need authorize" }
+        }
+    }
+    $hilIf = Get-YamlJobIf (Get-YamlJobBlock $HilText 'hil')
+    if ($hilIf -and $hilIf -match 'always\(\)|cancelled\(\)|failure\(\)') { $bad += "hil.yml hil: condition overrides the status of authorize: $hilIf" }
+    $g = Get-YamlJobBlock $HilText 'hil-gate'
+    if ($null -eq $g) { $bad += 'hil.yml: hil-gate missing' }
+    else {
+        $gIf = Get-YamlJobIf $g
+        if ($null -eq $gIf -or $gIf -notmatch '^\$\{\{\s*always\(\)\s*&&') { $bad += 'hil-gate: does not run after failed or skipped needs (no leading always())' }
+        if ($gIf -and $gIf -match $concl) { $bad += 'hil-gate: requires a successful upstream CI, so a failed run is never reported' }
+        $gNeeds = Get-YamlJobNeeds $g
+        foreach ($n in 'authorize', 'hil', 'hil-acceptance') { if ($gNeeds -notcontains $n) { $bad += "hil-gate: does not need $n (cannot report its result)" } }
+        if ($g -notmatch '(?m)^    runs-on:\s*ubuntu-latest\s*$') { $bad += 'hil-gate: not GitHub-hosted (reporting only)' }
+        if ($g -match 'actions/checkout') { $bad += 'hil-gate: checks out repository code (reporting only)' }
+    }
+    return $bad
 }
-if ($hilText -notmatch "(?ms)workflow_run:\s*\r?\n\s+workflows:\s*\[\s*`"CI - Standards Compliance & Quality Gates`"\s*\]\s*\r?\n\s+types:\s*\[\s*completed\s*\]") { $admBad += "hil.yml is not triggered by the completed 'CI - Standards Compliance & Quality Gates' workflow" }
-foreach ($j in 'authorize', 'hil-debug', 'hil-release', 'hil-acceptance') {
-    $b = Get-YamlJobBlock $hilText $j
-    $if = if ($b) { [regex]::Match($b, '(?m)^    if:\s*(.+)$') } else { $null }
-    if (-not $if -or -not $if.Success -or $if.Groups[1].Value -notmatch "github\.event\.workflow_run\.conclusion == 'success'") { $admBad += "hil.yml ${j}: does not require workflow_run.conclusion == 'success'" }
-}
+$admBad = @(Get-AvbHilAdmissionViolations $hilText $ciText)
 tc_check 'TEST-HILPATH-023-STATIC-failed-unit-or-integration-cannot-stage-or-start-automated-hil' ($admBad.Count -eq 0) ($admBad -join '; ')
+
+# 024 negative controls for 021/023 (synthetic: each fixture is the real workflow text with ONE deliberate weakening of
+#     one job; nothing is written to disk).  Every fixture must change the text and be rejected with the named violation.
+function New-AvbJobMutation([string]$Text, [string]$Job, [string]$Pattern, [string]$To) {
+    $b = Get-YamlJobBlock $Text $Job
+    if ($null -eq $b) { return $null }
+    $rx = [regex]::new($Pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    if (-not $rx.IsMatch($b)) { return $null }
+    $nb = $rx.Replace($b, [System.Text.RegularExpressions.MatchEvaluator] { param($m) $To }.GetNewClosure(), 1)
+    return $Text.Replace($b, $nb)
+}
+$ncBad = @()
+$ifOk = '\$\{\{ !cancelled\(\) && steps\.deploy\.outcome == ''success'' \}\}'
+$controls = @(
+    @{ n = 'configuration Release missing';         k = 'C'; j = 'hil';       p = 'configuration: \[Debug, Release\]';                 t = 'configuration: [Debug]';      e = 'matrix configuration Release missing' }
+    @{ n = 'configuration Debug missing';           k = 'C'; j = 'hil';       p = 'configuration: \[Debug, Release\]';                 t = 'configuration: [Release]';    e = 'matrix configuration Debug missing' }
+    @{ n = 'fail-fast true cancels the sibling';    k = 'C'; j = 'hil';       p = 'fail-fast: false';                                  t = 'fail-fast: true';             e = 'fail-fast is not false' }
+    @{ n = 'fail-fast absent (default cancels)';    k = 'C'; j = 'hil';       p = '^      fail-fast: false\s*\r?\n';                   t = '';                            e = 'fail-fast is not false' }
+    @{ n = 'Integration without !cancelled()';      k = 'C'; j = 'hil';       p = "(- name: Run HardwareIntegration\r?\n\s+if: )$ifOk"; t = $null;                        e = 'HardwareIntegration step does not run after an earlier failure' }
+    @{ n = 'Unit without the deployment condition'; k = 'C'; j = 'hil';       p = "(- name: Run HardwareUnit\r?\n\s+if: )$ifOk";        t = $null;                        e = 'HardwareUnit step does not run after an earlier failure' }
+    @{ n = 'Integration step removed';              k = 'C'; j = 'hil';       p = '(?s)^      - name: Run HardwareIntegration\r?\n.*?(?=^      - name:)'; t = '';      e = 'expected one HardwareIntegration step definition, found 0' }
+    @{ n = 'hil without the CI conclusion guard';   k = 'A'; j = 'hil';       p = "github\.event\.workflow_run\.conclusion == 'success' && "; t = '';                     e = "hil.yml hil: does not require workflow_run.conclusion" }
+    @{ n = 'hil without the authorization guard';   k = 'A'; j = 'hil';       p = " && needs\.authorize\.outputs\.authorized == 'true'"; t = '';                          e = "hil.yml hil: does not require needs.authorize.outputs.authorized" }
+    @{ n = 'hil runs past a failed authorize';      k = 'A'; j = 'hil';       p = '^    if: ';                                          t = '    if: always() && ';       e = 'hil.yml hil: condition overrides the status of authorize' }
+    @{ n = 'authorize without the CI conclusion';   k = 'A'; j = 'authorize'; p = "github\.event\.workflow_run\.conclusion == 'success' && "; t = '';                     e = "hil.yml authorize: does not require workflow_run.conclusion" }
+    @{ n = 'acceptance without the authorization';  k = 'A'; j = 'hil-acceptance'; p = " && needs\.authorize\.outputs\.authorized == 'true'"; t = '';                     e = "hil.yml hil-acceptance: does not require needs.authorize.outputs.authorized" }
+    @{ n = 'hil-gate without always()';             k = 'A'; j = 'hil-gate';  p = 'always\(\) && ';                                   t = '';                            e = 'hil-gate: does not run after failed or skipped needs' }
+    @{ n = 'hil-gate requires a successful CI';     k = 'A'; j = 'hil-gate';  p = "github\.event\.workflow_run\.event == 'pull_request'"; t = "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'"; e = 'hil-gate: requires a successful upstream CI' }
+    @{ n = 'staging without unit-tests';            k = 'S'; j = 'deploy-staging'; p = '^\s+unit-tests,\r?\n';                          t = '';                            e = 'deploy-staging does not need unit-tests' }
+    @{ n = 'staging past failed needs';             k = 'S'; j = 'deploy-staging'; p = '^    if: \|\r?\n';                               t = "    if: |`r`n      always() &&`r`n"; e = 'deploy-staging condition overrides the status check' }
+)
+foreach ($c in $controls) {
+    $src = if ($c.k -eq 'S') { $ciText } else { $hilText }
+    $to = $c.t
+    if ($null -eq $to) {
+        # keep the step header, replace only its condition: Integration loses !cancelled(), Unit loses the deployment
+        $to = $null; $m = [regex]::Match((Get-YamlJobBlock $src $c.j), $c.p)
+        if ($m.Success) { $to = $m.Groups[1].Value + $(if ($c.n -like 'Integration*') { "`${{ steps.deploy.outcome == 'success' }}" } else { '${{ !cancelled() }}' }) }
+    }
+    $mut = if ($null -ne $to) { New-AvbJobMutation $src $c.j $c.p $to } else { $null }
+    if ($null -eq $mut -or $mut -eq $src) { $ncBad += "$($c.n): fixture did not apply to the real workflow text"; continue }
+    $v = switch ($c.k) {
+        'C' { @(Get-AvbHilContinuationViolations $mut) }
+        'A' { @(Get-AvbHilAdmissionViolations $mut $ciText) }
+        'S' { @(Get-AvbHilAdmissionViolations $hilText $mut) }
+    }
+    if (@($v | Where-Object { $_ -like "*$($c.e)*" }).Count -eq 0) { $ncBad += "$($c.n): not rejected (violations: $($v -join ' | '))" }
+}
+tc_check 'TEST-HILPATH-024-negative-controls-reject-missing-configurations-sibling-cancellation-missing-continuation-weakened-admission' ($ncBad.Count -eq 0) ($ncBad -join '; ')
 
 # 022 STATIC: Run-Tests.ps1 (needs elevation, so it is not executed offline) records a failed precondition check or a
 #     missing/empty test directory and still dispatches every suite; the only exit before dispatch is the elevation check.

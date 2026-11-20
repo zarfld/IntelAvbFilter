@@ -214,19 +214,45 @@ tc_check 'TEST-CIDEPLOY-019-nonzero-netcfg-exit-or-unresolved-state-after-uninst
 # ---------------------------------------------------------------------------------------------------------
 $lp = Join-Path $Tmp 'hil.lock'
 $alive = { param($Id) $true }; $dead = { param($Id) $false }; $noSleep = { param($s) }
-$env:GITHUB_RUN_ID = '500'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = 'hil-debug'
+$env:GITHUB_RUN_ID = '500'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = 'hil'; $env:HIL_CONFIGURATION = 'Debug'
 $a = Enter-AvbHilLock -Kind 'ci' -Label 'hil Debug' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
 $env:GITHUB_RUN_ID = ''; $env:GITHUB_JOB = ''
 $b = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites' -Path $lp -WaitSeconds 30 -IsProcessAlive $dead -IsCiJobActive { $true } -Sleep $noSleep
-tc_check 'TEST-CIDEPLOY-020-operator-run-cannot-enter-while-a-ci-job-holds-the-machine' ($a.Ok -and -not $b.Ok -and $b.Why -match 'is executing on this runner' -and $b.Waited -eq 30) ("ci={0} local={1} why={2} waited={3}" -f $a.Ok, $b.Ok, $b.Why, $b.Waited)
-$env:GITHUB_RUN_ID = '500'; $env:GITHUB_JOB = 'hil-release'
-$c = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
-tc_check 'TEST-CIDEPLOY-021-lock-left-by-a-dead-ci-job-is-taken-over-with-the-previous-owner-recorded' `
-    ($c.Ok -and $null -ne $c.PreviousOwner -and $c.PreviousOwner.owner.job -eq 'hil-debug' -and $c.PreviousOwner.why -match 'did not release') ("ok={0} prev={1}" -f $c.Ok, $(if ($c.PreviousOwner) { $c.PreviousOwner.why }))
+tc_check 'TEST-CIDEPLOY-020-operator-run-cannot-enter-while-a-ci-job-holds-the-machine' ($a.Ok -and -not $b.Ok -and $b.Why -match 'may still own this runner|is executing on this runner' -and $b.Waited -eq 30) ("ci={0} local={1} why={2} waited={3}" -f $a.Ok, $b.Ok, $b.Why, $b.Waited)
+
+# RED regression: GitHub's matrix legs have the SAME GITHUB_JOB but must never share lock ownership.
+# A live worker on a second runner instance is not a stale CI owner, even on the same physical host.
+$env:GITHUB_RUN_ID = '500'; $env:GITHUB_JOB = 'hil'; $env:HIL_CONFIGURATION = 'Release'
+$originalBytes = [IO.File]::ReadAllBytes($lp)
+$live = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -IsCiJobActive { param($owner) $true } -Sleep $noSleep
+$stillOwned = (Test-Path -LiteralPath $lp) -and
+    ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lp)) -eq [Convert]::ToBase64String($originalBytes))
+tc_check 'TEST-CIDEPLOY-021a-live-matrix-leg-lock-cannot-be-stolen-by-another-leg' `
+    ($a.Ok -and -not $live.Ok -and $stillOwned -and $null -eq $live.PreviousOwner) `
+    ("acquired={0} stolen={1} unchanged={2} reason={3}" -f $a.Ok, $live.Ok, $stillOwned, $live.Why)
+$alienCtx = Resolve-AvbHilLockContext -Path $lp -GitHub @{ runId = '500'; runAttempt = '1'; job = 'hil'; configuration = 'Release' } -Ancestors @()
+tc_check 'TEST-CIDEPLOY-021b-matrix-legs-with-the-same-job-name-have-distinct-lock-ownership' `
+    (-not $alienCtx.Owned) ("foreign lock owned={0} how={1}" -f $alienCtx.Owned, $alienCtx.How)
+
+# Different workflow runs targeting the same physical host must also keep a live owner intact.
+$env:GITHUB_RUN_ID = '501'
+$crossRun = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release in other run' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -IsCiJobActive { param($owner) $true } -Sleep $noSleep
+tc_check 'TEST-CIDEPLOY-021d-a-second-workflow-run-cannot-steal-a-live-ci-lock' `
+    (-not $crossRun.Ok -and (Test-Path -LiteralPath $lp) -and
+     ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lp)) -eq [Convert]::ToBase64String($originalBytes))) `
+    ("stolen={0} reason={1}" -f $crossRun.Ok, $crossRun.Why)
+$env:GITHUB_RUN_ID = '500'
+
+# Proven interrupted owner: only a conclusive worker-exited check permits recorded stale takeover.
+$c = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -WaitSeconds 0 -IsProcessAlive $dead -IsCiJobActive { param($owner) $false } -Sleep $noSleep
+tc_check 'TEST-CIDEPLOY-021c-confirmed-dead-ci-owner-can-be-replaced-with-incident-evidence' `
+    ($c.Ok -and $null -ne $c.PreviousOwner -and $c.PreviousOwner.owner.job -eq 'hil' -and
+     $c.PreviousOwner.why -match 'did not release|no longer running|confirmed') `
+    ("ok={0} prev={1}" -f $c.Ok, $(if ($c.PreviousOwner) { $c.PreviousOwner.why }))
 $x = Exit-AvbHilLock -Owner $a.Owner -Path $lp
 $y = Exit-AvbHilLock -Owner $c.Owner -Path $lp
 tc_check 'TEST-CIDEPLOY-022-only-the-owner-releases' ((-not $x.Ok) -and $y.Ok -and -not (Test-Path -LiteralPath $lp)) ("foreign={0} own={1}" -f $x.Why, $y.Ok)
-$env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''
+$env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''; $env:HIL_CONFIGURATION = ''
 $l1 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites A' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
 $l2 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites B' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -Sleep $noSleep
 $l3 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites C' -Path $lp -WaitSeconds 0 -IsProcessAlive $dead -Sleep $noSleep
@@ -246,6 +272,62 @@ foreach ($p in $procs) { $p.WaitForExit(60000) | Out-Null }
 $codes = @($procs | ForEach-Object { $_.ExitCode } | Sort-Object)
 tc_check 'TEST-CIDEPLOY-024-concurrent-processes-exactly-one-acquires' (($codes -join ',') -eq '0,7,7,7') "exit codes: $($codes -join ',')"
 
+
+# Every lock mutation (create, stale reclaim, release) must respect the same named mutex.
+# These tests use a separate real process holding that mutex, not a simulated boolean.
+$mutexWorker = Join-Path $Tmp 'hold-mutex.ps1'
+@'
+param([string]$Ready)
+$gate = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
+$held = $false
+try {
+    $held = $gate.WaitOne(10000)
+    if (-not $held) { exit 2 }
+    [IO.File]::WriteAllText($Ready, 'held')
+    Start-Sleep -Milliseconds 2200
+} finally {
+    if ($held) { $gate.ReleaseMutex() }
+    $gate.Dispose()
+}
+'@ | Set-Content -LiteralPath $mutexWorker -Encoding UTF8
+$mutexFailures = @()
+foreach ($operation in @('create', 'release')) {
+    $mp = Join-Path $Tmp "mutex-$operation.lock"
+    $ready = Join-Path $Tmp "mutex-$operation.ready"
+    $owned = $null
+    if ($operation -eq 'release') {
+        $owned = Enter-AvbHilLock -Kind 'local' -Label 'release target' -Path $mp -WaitSeconds 0
+        if (-not $owned.Ok) { $mutexFailures += 'could not establish release target' }
+    }
+    $child = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $mutexWorker, $ready -PassThru -WindowStyle Hidden
+    try {
+        $readySeen = $false
+        for ($i = 0; $i -lt 200; $i++) {
+            if (Test-Path -LiteralPath $ready) { $readySeen = $true; break }
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $readySeen) { $mutexFailures += "${operation}: mutex not acquired by child" }
+        else {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $result = if ($operation -eq 'create') {
+                Enter-AvbHilLock -Kind 'local' -Label 'create target' -Path $mp -WaitSeconds 0
+            } else {
+                Exit-AvbHilLock -Owner $owned.Owner -Path $mp
+            }
+            $sw.Stop()
+            if (-not $result.Ok -or $sw.ElapsedMilliseconds -lt 1100) {
+                $mutexFailures += "${operation}: result=$($result.Ok) elapsed=$($sw.ElapsedMilliseconds)ms; did not wait for mutex"
+            }
+            if ($operation -eq 'create' -and $result.Ok) { $null = Exit-AvbHilLock -Owner $result.Owner -Path $mp }
+        }
+    } finally {
+        $null = $child.WaitForExit(20000)
+        if (-not $child.HasExited) { $child.Kill() }
+        $child.Dispose()
+        if (Test-Path -LiteralPath $mp) { Remove-Item -LiteralPath $mp -Force }
+    }
+}
+tc_check 'TEST-CIDEPLOY-024a-create-and-release-share-the-stale-recovery-mutex' ($mutexFailures.Count -eq 0) ($mutexFailures -join '; ')
 # Build exclusion: a build writes the artifacts a HIL run verifies and executes (LocalSuites_20261029_005219: a build
 # outside the run overwrote them mid-run - 12 SHA256 mismatches, a failed relink of a running test).
 $bl = Join-Path $Tmp 'build.lock'
@@ -391,22 +473,68 @@ tc_check 'TEST-CIDEPLOY-046-skiptrustcheck-seam-is-refused-under-github-actions-
 # A job lost during installation (runner connection interrupted by netcfg, #328): its lock and IN_FLIGHT record stay
 # on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.
 $lostLock = Join-Path $Tmp 'lost.lock'
-[System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil-debug'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
+[System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil'; configuration = 'Debug'; runnerWorkerPid = 999999; runnerWorkerStartedUtc = '2026-10-28T23:52:19.0000000Z'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
 [System.IO.File]::WriteAllText("$lostLock.inflight.json", ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started' } | ConvertTo-Json))
 $oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock
 $after = Get-Content -LiteralPath "$lostLock.inflight.json" -Raw | ConvertFrom-Json
-tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by-the-next-deployment' `
-    (($null -ne $oLost.Dep) -and ($oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT') -and ($oLost.Dep.lock.previousOwner.owner.runId -eq '590') -and
-     ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
-    ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
+tc_check 'TEST-CIDEPLOY-044-lost-job-in-flight-record-blocks-new-install-and-is-preserved' (
+    $null -ne $oLost.Dep -and $oLost.Exit -eq 3 -and $oLost.Dep.verdict -eq 'NEEDS_OPERATOR' -and
+    $oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT' -and $oLost.Dep.lock.previousOwner.owner.runId -eq '590' -and
+    $oLost.Dep.lock.previousOwner.owner.runnerWorkerPid -eq 999999 -and $after.verdict -eq 'IN_FLIGHT' -and
+    $oLost.Calls.Count -eq 0 -and $oLost.Dep.machineOk -eq $false
+) ("exit={0} current={1} prev={2} persisted={3} calls={4}" -f $oLost.Exit, $oLost.Dep.verdict, $oLost.Dep.previousDeployment.verdict, $after.verdict, $oLost.Calls.Count)
+
+# A previous unsafe/unreadable record remains untouched and blocks deployment before package verification.
+$unsafePrevious = @(
+    @{ Name = 'prior_needs_operator'; Body = '{"schema":"avb-hil-deployment/1","configuration":"Debug","verdict":"NEEDS_OPERATOR","machineOk":false,"reason":"native installer still running"}' },
+    @{ Name = 'prior_unreadable'; Body = '{ invalid json' }
+)
+$unsafeFailures = @()
+foreach ($case in $unsafePrevious) {
+    $lpPrevious = Join-Path $Tmp "$($case.Name).lock"
+    [IO.File]::WriteAllText("$lpPrevious.inflight.json", $case.Body)
+    $o = Invoke-Orch $case.Name $pOk -LockFile $lpPrevious
+    $persisted = [IO.File]::ReadAllText("$lpPrevious.inflight.json")
+    if ($o.Exit -ne 3 -or $o.Dep.verdict -ne 'NEEDS_OPERATOR' -or $o.Calls.Count -ne 0 -or
+        $persisted -cne $case.Body -or $o.Dep.machineOk -ne $false) {
+        $unsafeFailures += "$($case.Name): exit=$($o.Exit) verdict=$($o.Dep.verdict) calls=$($o.Calls.Count) preserved=$($persisted -ceq $case.Body)"
+    }
+}
+tc_check 'TEST-CIDEPLOY-044a-needs-operator-and-unreadable-predecessors-block-without-erasing-evidence' ($unsafeFailures.Count -eq 0) ($unsafeFailures -join '; ')
+
+# Do not impose a permanent hold after a completed previous deployment with affirmative machineOk.
+$priorSafeLock = Join-Path $Tmp 'prior_safe.lock'
+[IO.File]::WriteAllText("$priorSafeLock.inflight.json", '{"schema":"avb-hil-deployment/1","configuration":"Debug","verdict":"DEPLOYED","machineOk":true,"reason":"verified"}')
+$oPriorSafe = Invoke-Orch 'prior_safe' $pOk -LockFile $priorSafeLock
+tc_check 'TEST-CIDEPLOY-044b-previous-verified-deployment-still-reaches-package-checks' (
+    $oPriorSafe.Dep.previousDeployment.verdict -eq 'DEPLOYED' -and $oPriorSafe.Dep.verdict -eq 'REJECTED_PACKAGE' -and $oPriorSafe.Exit -eq 1
+) ("previous={0} current={1} exit={2}" -f $oPriorSafe.Dep.previousDeployment.verdict, $oPriorSafe.Dep.verdict, $oPriorSafe.Exit)
 $hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
-# Both physical jobs take machine_ok from the record's machineOk (Get-AvbMachineOk, TEST-CIDEPLOY-047), never from the
-# verdict name alone; a record without machineOk (IN_FLIGHT: job lost during installation) is not usable.
+# Each Debug/Release matrix leg reads the machine state of ITS OWN assigned runner.
+# One physical job definition expands into two legs; a remote leg's machine_ok must never govern this leg.
+# IN_FLIGHT / NEEDS_OPERATOR / NOT_EXECUTED_BUSY must not become machineOk=true from verdict names alone.
+$hilLf = $hilSrc -replace "`r`n", "`n"
+$hilStart = $hilLf.IndexOf("`n  hil:`n")
+$hilEnd = $hilLf.IndexOf("`n  hil-acceptance:`n")
+$hilPhysical = if ($hilStart -ge 0 -and $hilEnd -gt $hilStart) { $hilLf.Substring($hilStart, $hilEnd - $hilStart) } else { '' }
 $mokLine = "elseif (`$d.PSObject.Properties['machineOk'] -and `$d.machineOk -eq `$true) { 'true' } else { 'false' }"
 $mokStates = @(if (Get-Command Get-AvbMachineOk -ErrorAction SilentlyContinue) { foreach ($v in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { if ((Get-AvbMachineOk -Record ([pscustomobject]@{ verdict = $v })).Ok) { $v } } } else { 'Get-AvbMachineOk missing' })
-tc_check 'TEST-CIDEPLOY-045-in-flight-or-operator-states-stop-the-next-configuration' `
-    (([regex]::Matches($hilSrc, [regex]::Escape($mokLine)).Count -eq 2) -and ($hilSrc -notmatch [regex]::Escape("`$v -in 'NEEDS_OPERATOR'")) -and ($mokStates.Count -eq 0)) `
-    "machine_ok not derived from the recorded machineOk in both physical jobs, or usable after: $($mokStates -join ', ')"
+$matrixLocalMachine = (
+    $hilPhysical -match '(?m)^      matrix:\s*\r?\n        configuration: \[Debug, Release\]' -and
+    $hilPhysical -match '(?m)^    needs: \[authorize\]$' -and
+    $hilPhysical -match '(?m)^        id: machine\s*\r?\n        if: always\(\)' -and
+    $hilPhysical.Contains("Join-Path `$env:RUNNER_TEMP 'hil-evidence\deployment.json'") -and
+    $hilPhysical.Contains("`$d.PSObject.Properties['machineOk']") -and
+    $hilPhysical.Contains('Invoke-HilDeployment.ps1 -Action Deploy') -and
+    $hilPhysical.Contains('Invoke-HilDeployment.ps1 -Action Release') -and
+    $hilPhysical -notmatch 'needs\.hil-(debug|release)\.' -and
+    $hilPhysical -notmatch 'needs\.hil\.outputs\.machine_ok'
+)
+tc_check 'TEST-CIDEPLOY-045-in-flight-or-operator-states-remain-unsafe-per-independent-matrix-leg' `
+    (($hilPhysical.Length -gt 0) -and ([regex]::Matches($hilPhysical, [regex]::Escape($mokLine)).Count -eq 1) -and
+     ([regex]::Matches($hilLf, [regex]::Escape($mokLine)).Count -eq 1) -and
+     $matrixLocalMachine -and ($hilLf -notmatch [regex]::Escape("`$v -in 'NEEDS_OPERATOR'")) -and ($mokStates.Count -eq 0)) `
+    "matrix-local machine_ok contract missing, bypassed, or unsafe record accepted: $($mokStates -join ', ')"
 
 # machine_ok after a partially completed deployment: a failed deployment leaves the machine usable for the next
 # configuration only when the state recorded after the failure is settled and known (CI run 41500818916 recorded
