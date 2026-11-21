@@ -123,7 +123,9 @@
  *              canonical verdict of the raw NTSTATUS (avb_verdict.h); BLOCKED when not sent.
  *   RESIDUE    after the activation committed the verified set: a readable query observing TSN on must not report restoration
  *              COMPLETE (#361 AC2). Only this TSN-on non-restored state is exercised. After an activation sent but not
- *              committed the query still runs: COMPLETE with TSN on observed is FAIL, anything else is BLOCKED "COVERAGE
+ *              committed the query still runs: an invalid reply takes its canonical raw-NTSTATUS verdict as a missing
+ *              measurement (no buffer field is reported); a valid reply's COMPLETE with a restoration input invalid or TSN not
+ *              off is FAIL (#365 12.5), each measurement judged by its own validity; anything else is BLOCKED "COVERAGE
  *              MISSING" (the non-restored state was not established); REPORTED keeps its rules (1) and (3) as FAIL and is
  *              otherwise BLOCKED "COVERAGE MISSING"; PHC stays INCONCLUSIVE with its measurements; a COVERAGE line names it.
  *   CLEANUP, RESTORE   the owned NIC cycle and the test's own restoration verdict, as below.
@@ -2585,35 +2587,60 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     }
 
     /* RESIDUE: an observed non-restored state (TSN on) never reports COMPLETE (#361 AC2). After an activation that was sent but
-     * not committed the query still runs: COMPLETE with TSN on observed is FAIL whatever the activation did; otherwise the
-     * non-restored state was not established, which is missing coverage, never a pass */
+     * not committed the query still runs. Order (PR #497 r4647772016, r4647772002):
+     *   1. an invalid reply is a query failure with its canonical raw-NTSTATUS verdict (avb_verdict.h; SKIP_NOT_IMPLEMENTED stays
+     *      SKIP_NOT_IMPLEMENTED) and a missing measurement: none of its buffer fields is reported as an observation;
+     *   2. a valid reply's COMPLETE is FAIL with a committed schedule, and in any case when #365 12.5 forbids it: a restoration
+     *      input invalid (UNKNOWN is required then) or TSN not off. Each measurement is judged by its own validity, so an unread
+     *      unrelated register never hides a measured contradiction;
+     *   3. otherwise, without a commit, the non-restored state was not established: missing coverage, never a pass, with any
+     *      missing measurement named separately */
     if (!sent) {
         sprintf_s(reason, sizeof(reason), "not observed: %s", stop != NULL ? stop : "no activation");
         verdict("BLOCKED", "RESIDUE", index, did, reason);
     } else {
         query(h, &q1);
         print_query(committed ? "committed" : "after the uncommitted activation", &q1);
-        observed = restoration_set_valid(&q1) && q1.q.hw_mode == AVB_TAS_HWMODE_TSN;
-        if (query_valid(&q1) && q1.q.restoration == AVB_TAS_RESTORE_COMPLETE && (committed || observed)) {
-            sprintf_s(reason, sizeof(reason), "COMPLETE reported with %s (restoration set valid %d, hw_mode %u, %u restoration-set "
-                      "registers differ from the pre-test capture)", committed ? "a committed schedule" : "TSN on observed",
-                      restoration_set_valid(&q1), q1.q.hw_mode, restoration_set_differing(&q0.q.regs, &q1.q.regs));
-            verdict("FAIL", "RESIDUE", index, did, reason);
-        } else if (!committed) {
-            sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed schedule, the non-restored state was not established; the "
-                      "query after the uncommitted activation: ntstatus=0x%08lX, reported restoration=%s (%u), hw_mode %u, restoration "
-                      "set valid %d (observation only)", (unsigned long)q1.status, restoration_name(q1.q.restoration),
-                      q1.q.restoration, q1.q.hw_mode, restoration_set_valid(&q1));
-            verdict("BLOCKED", "RESIDUE", index, did, reason);
-        } else if (observed) {
-            sprintf_s(reason, sizeof(reason), "TSN on observed (%u restoration-set registers differ from the pre-test capture); reported "
-                      "restoration=%s (%u), not COMPLETE", restoration_set_differing(&q0.q.regs, &q1.q.regs),
-                      restoration_name(q1.q.restoration), q1.q.restoration);
-            verdict("PASS", "RESIDUE", index, did, reason);
+        if (!query_valid(&q1)) {
+            AVB_VERDICT qv = avb_verdict_from_status((NTSTATUS)q1.status, AVB_CAP_PRESENT, FALSE, TRUE);
+            sprintf_s(reason, sizeof(reason), "MEASUREMENT MISSING: the query after the %s activation gave no valid v1 reply "
+                      "(ntstatus=%s0x%08lX information=%lu); no field of it is an observation%s",
+                      committed ? "committed" : "uncommitted",
+                      q1.status == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "", (unsigned long)q1.status, q1.got,
+                      committed ? "" : "; separately, COVERAGE MISSING: no committed schedule");
+            verdict(avb_verdict_tag(qv), "RESIDUE", index, did, reason);
         } else {
-            sprintf_s(reason, sizeof(reason), "the committed state was not observed as non-restored: query ntstatus=0x%08lX restoration "
-                      "set valid %d hw_mode %u", (unsigned long)q1.status, restoration_set_valid(&q1), q1.q.hw_mode);
-            verdict("BLOCKED", "RESIDUE", index, did, reason);
+            BOOL set_valid = restoration_set_valid(&q1);
+
+            observed = set_valid && q1.q.hw_mode == AVB_TAS_HWMODE_TSN;
+            if (q1.q.restoration == AVB_TAS_RESTORE_COMPLETE &&
+                (committed || !set_valid || q1.q.hw_mode != AVB_TAS_HWMODE_OFF)) {
+                sprintf_s(reason, sizeof(reason), "COMPLETE reported %s: hw_mode %u, restoration set valid %d (hw_read %u, read_failed "
+                          "0x%X); COMPLETE needs every restoration input valid (else UNKNOWN) and TSN off (#365 12.5)%s",
+                          committed ? "with a committed schedule" : "after the uncommitted activation", q1.q.hw_mode, set_valid,
+                          q1.q.hw_read, q1.q.regs.read_failed, committed ? "" : "; independent of the missing commit");
+                verdict("FAIL", "RESIDUE", index, did, reason);
+            } else if (!committed) {
+                char missing[128] = "";
+                if (!set_valid) {
+                    sprintf_s(missing, sizeof(missing), "; MEASUREMENT MISSING: restoration set not fully read (hw_read %u, read_failed "
+                              "0x%X)", q1.q.hw_read, q1.q.regs.read_failed);
+                }
+                sprintf_s(reason, sizeof(reason), "COVERAGE MISSING: no committed schedule, the non-restored state was not established; "
+                          "the valid query after the uncommitted activation reported restoration=%s (%u), hw_mode %u (observation "
+                          "only)%s", restoration_name(q1.q.restoration), q1.q.restoration, q1.q.hw_mode, missing);
+                verdict("BLOCKED", "RESIDUE", index, did, reason);
+            } else if (observed) {
+                sprintf_s(reason, sizeof(reason), "TSN on observed (%u restoration-set registers differ from the pre-test capture); "
+                          "reported restoration=%s (%u), not COMPLETE", restoration_set_differing(&q0.q.regs, &q1.q.regs),
+                          restoration_name(q1.q.restoration), q1.q.restoration);
+                verdict("PASS", "RESIDUE", index, did, reason);
+            } else {
+                sprintf_s(reason, sizeof(reason), "the committed state was not observed as non-restored: valid query, hw_mode %u, "
+                          "restoration set valid %d%s (hw_read %u, read_failed 0x%X)", q1.q.hw_mode, set_valid,
+                          set_valid ? "" : " - MEASUREMENT MISSING", q1.q.hw_read, q1.q.regs.read_failed);
+                verdict("BLOCKED", "RESIDUE", index, did, reason);
+            }
         }
     }
 
