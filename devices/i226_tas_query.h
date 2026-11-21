@@ -77,12 +77,16 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
     int phc_before_ok = 0, phc_after_ok = 0, read_done = 0, tsn = 0, s1;
 
     /* Constants of v1 (#365 12.2): one window per queue; cycle limits not reported (the SSOT field carries no units); the
-     * lead the driver enforces now, not established; tiers not reported until the #351 table, PASS not implemented (#363) */
+     * lead the driver enforces now, not established; PASS not implemented (#363); HOLD IMPLEMENTED_UNVERIFIED (D-A
+     * 2026-11-21, #351 R2/R4); the other tiers not reported until the #351 table */
     q->limits.queues = AVB_TAS_QUEUES;
     q->limits.windows_per_queue = 1u;
     q->limits.min_margin_ns = AVB_TAS_MIN_LEAD_NS;
     q->limits.min_margin_state = AVB_TAS_LIMIT_NOT_ESTABLISHED;
     q->limits.tier_pass = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    /* HOLD is implemented without qualifying evidence (#351 R2/R4, D-A 2026-11-21): the device-owned tier that R7 step 8 of
+     * the activation applies, from the same source (i226_tas_tier_hold) */
+    q->limits.tier_hold = i226_tas_tier_hold();
     q->next_commit.state = AVB_TAS_COMMIT_NONE;
 
     if (!running) {

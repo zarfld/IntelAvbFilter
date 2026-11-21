@@ -365,6 +365,20 @@ typedef struct _AVB_DEVICE_CONTEXT {
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
     struct tsn_tas_config last_tas_config;
+
+    /* TAS metadata of this adapter context (#352 R1 L1-L5, L11-L13; #365 13.3, R7 step 4). The epoch is a non-zero value from
+     * the kernel cryptographic random source, distinct from the epochs of all live contexts of this driver load, set once at
+     * creation (AvbCreateMinimalContext) and constant afterwards; 0 means metadata unavailable (bounded random-generation
+     * failure), and then generation stays 0 too. The generation starts at 1 and advances exactly once per logical TAS mutation
+     * that attempted a register write (L7, L9), never wraps (L12), under tas_op_claim, published before the claim is released
+     * (L8). The query reads both without waiting (avb_tas_meta_read). Interlocked access only. */
+    avb_u64 tas_context_epoch;
+    volatile LONG64 tas_generation;
+
+    /* A schedule committed under explicit unverified acceptance (#365 R4, #362 amendment) is retained: the query reports
+     * AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE. Set when such a commit leaves a schedule; cleared only when the retained state is
+     * actually removed (a successful disarm), not because another request failed. A new context starts with 0. Interlocked. */
+    volatile LONG tas_unverified_active;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*

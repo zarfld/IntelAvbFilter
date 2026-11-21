@@ -78,9 +78,15 @@
  *                       measurement missing is INCONCLUSIVE, each missing measurement named; observed violations are kept
  *                       even when other measurements are missing. STATE, REFUSE and WIRE do not apply.
  *            No link is required by the request (it carries no link speed); the cleanup's TX probe still needs one.
- *   --fault  the failed-rollback path of #357 (PR #397 review), case TC-TASACT-FAULT-001. Debug drivers fail schedule write
- *            13 and the first restore write on request (devices/i226_tas_activate.h); Release drivers must refuse that request.
- *            LEGACY function-71 regression, kept executable until the producer's atomic cutover (#482, #357).
+ *   --fault  function-71 WITHDRAWAL check, case TC-TASACT-FAULT-001 (D-C, Q 2026-11-21, supplementary resolution on #482 and
+ *            #357; formerly the legacy failed-rollback regression of PR #397, kept executable until the atomic cutover). The
+ *            request it always sent (the verified HOLD set with the fault selector 13, 80 bytes) goes to the withdrawn function 71:
+ *              WITHDRAWN  STATUS_INVALID_DEVICE_REQUEST with no output is PASS; a served request is FAIL; an uncaptured status
+ *                         INCONCLUSIVE.
+ *              UNCHANGED  the restoration set register by register against the pre-state query and the record CLEAN; a measured
+ *                         change is FAIL, a missing measurement INCONCLUSIVE.
+ *            It proves only that function 71 is refused: never fault/rollback evidence, which is --fault-versioned's. No link is
+ *            required; the cleanup's TX probe still needs one. Expected RED before the cutover: function 71 is still served.
  *   --fault-versioned  TEST-TASACT-FAULT-001 (#482, Verifies #357 and #352), cases TC-TASACT-FAULT-001-F1 and -F2 on the 144-byte
  *            version-1 AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): HOLD, the bound NET_LUID, a distinct non-zero
  *            client_op_id, generation and epoch from the test's own query (0 printed "(not reported)", never fabricated),
@@ -172,7 +178,8 @@
  * OBSERVER (#369 amendment, #463): no fixed observer model and no execution veto. Every other enumerated adapter is tried,
  * without a count limit and one evidence line each, as the passive capture until one receives the baseline frames the adapter
  * under test sends. Without one, or without a link and an IPv4 address, WIRE and the cleanup's TX probe are not measured and the
- * other checks still run (--pass and --fault still need a connected link: their legacy request carries a caller link speed).
+ * other checks still run (no mode needs a connected link for its request: --fault's withdrawn legacy request is refused
+ * whatever caller link speed it carries).
  * The PCI revision and the loaded driver image with its SHA256 are printed as evidence, never used for selection.
  *
  * Mutations: TAS_ACTIVATE, bounded broadcast UDP and ICMP on the adapter under test, and the NIC cycle of that adapter
@@ -669,7 +676,7 @@ static BOOL activate(HANDLE h, AVB_TAS_ACTIVATE_REQUEST *r, DWORD *error)
 {
     DWORD br = 0;
     *error = ERROR_SUCCESS;
-    if (!DeviceIoControl(h, IOCTL_AVB_TAS_ACTIVATE, r, sizeof(*r), r, sizeof(*r), &br, NULL)) {
+    if (!DeviceIoControl(h, IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, r, sizeof(*r), r, sizeof(*r), &br, NULL)) {
         *error = GetLastError();
         return FALSE;
     }
@@ -1361,12 +1368,6 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     mbps = has_link ? (avb_u32)(row.TransmitLinkSpeed / 1000000ULL) : 0u;
     frame = (avb_u32)row.Mtu + FRAME_OVERHEAD_BYTES;
     printf("    link=%s %u Mbit/s ipv4=%s mtu=%lu frameOnWire=%u\n", has_link ? "up" : "down", mbps, has_ip ? "yes" : "no", row.Mtu, frame);
-    if (g_mode == MODE_FAULT && mbps == 0) {   /* the legacy function-71 request of --fault carries a caller link speed */
-        verdict("BLOCKED", "COMMIT", index, id->device_id, "no connected link: the legacy function-71 request of this mode carries a caller "
-                "link speed");
-        CloseHandle(h);
-        return;
-    }
     if (g_mode == MODE_HOLD || g_mode == MODE_PASS) {   /* #370 amendment: --pass no longer calls function 71 */
         check_access_80c(index, id);
     }
@@ -1428,49 +1429,53 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     InterlockedExchange(&g_pending_adapter, (LONG)index);
 
     if (g_mode == MODE_FAULT) {
-        AVB_TAS_ACTIVATE_REQUEST again;
-        DWORD error, error2;
-        BOOL ok, ok2, debug_driver = FALSE;
-        IOCTL_VERSION version = {0};
-        DWORD br = 0;
+        /* Function-71 withdrawal check (D-C, Q 2026-11-21, supplementary resolution on #482/#357): the request this legacy
+         * regression always sent (the verified HOLD set with the fault selector FAULT_WRITE) on the withdrawn 80-byte function
+         * 71 must be refused as an unserved code, with no output and nothing changed. This proves only that function 71 is
+         * refused; it is never fault/rollback evidence, which is --fault-versioned's alone. Each measurement keeps its own
+         * validity: a missing one is named, a measured change stays FAIL whatever else is missing */
+        QUERY_READ qa;
+        DWORD information = 0;
+        LONG st;
+        BOOL state_ok;
+        unsigned differing = 0, unread = 0;
 
-        BOOL build_known = DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) &&
-                           br >= sizeof(version);   /* only a complete reply carries Flags */
-        if (build_known) {
-            debug_driver = (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) != 0;
-        }
         if (wire) { wire_stop(); }
         if (sock != INVALID_SOCKET) { closesocket(sock); }
         CloseHandle(h2);
-        if (!build_known) {
-            verdict("BLOCKED", "RESULT", index, id->device_id, "GET_VERSION gave no complete reply: Debug or Release is unknown, so the fault "
-                    "request is not sent");
-            (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
-            return;
-        }
         req.reserved = FAULT_WRITE;
-        printf("\n  --- TAS_ACTIVATE with the fault selector %u (%s driver) ---\n", FAULT_WRITE, debug_driver ? "Debug" : "Release");
-        ok = activate(h, &req, &error);
-        print_call("fault request", ok, error, &req);
-        if (!debug_driver) {
-            BOOL refused = ok && req.result == AVB_TAS_ACT_INVALID && read_state(h, &s) && s.armed == AVB_TAS_STATE_CLEAN;
-            verdict(refused ? "PASS" : "FAIL", "RELEASE", index, id->device_id,
-                    refused ? NULL : "a Release driver must refuse a nonzero reserved word as INVALID and stay CLEAN");
+        printf("\n  --- function-71 withdrawal: the legacy 80-byte request (fault selector %u) on IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 0x%08lX ---\n",
+               FAULT_WRITE, (unsigned long)IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71);
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, &req, (DWORD)sizeof(req), &req, (DWORD)sizeof(req), &information);
+        printf("    [EVIDENCE] function-71 reply: ntstatus=%s0x%08lX information=%lu%s\n", st == (LONG)AVB_NTSTATUS_UNAVAILABLE ? "unavailable " : "",
+               (unsigned long)st, information, information == (DWORD)sizeof(req) ? " (the legacy request was served)" : "");
+        if (information == (DWORD)sizeof(req)) {
+            print_call("served legacy reply", TRUE, ERROR_SUCCESS, &req);
+        }
+        if (st == (LONG)AVB_NTSTATUS_UNAVAILABLE) {
+            verdict("INCONCLUSIVE", "WITHDRAWN", index, id->device_id, "the raw NTSTATUS of the function-71 request was not captured");
+        } else if (st == (LONG)STATUS_INVALID_DEVICE_REQUEST && information == 0) {
+            verdict("PASS", "WITHDRAWN", index, id->device_id, "function 71 refused as an unserved code (STATUS_INVALID_DEVICE_REQUEST, no output)");
         } else {
-            BOOL state_ok;
-            verdict(ok && req.result == AVB_TAS_ACT_FAILED_NOT_RESTORED ? "PASS" : "FAIL", "RESULT", index, id->device_id,
-                    ok && req.result == AVB_TAS_ACT_FAILED_NOT_RESTORED ? NULL : "the injected failure is not reported as FAILED_NOT_RESTORED");
-            state_ok = read_state(h, &s);
-            if (state_ok) { print_state("after the failure", &s); }
-            verdict(state_ok && s.armed == AVB_TAS_STATE_DIRTY ? "PASS" : "FAIL", "STATE", index, id->device_id,
-                    state_ok && s.armed == AVB_TAS_STATE_DIRTY ? NULL : "GET_TAS_STATE does not report DIRTY (2)");
-            build_request(&again, AVB_TAS_PRE_HOLD, base + CYCLE_NS, mbps, frame);
-            ok2 = activate(h, &again, &error2);
-            print_call("activation on the dirty adapter", ok2, error2, &again);
-            state_ok = read_state(h, &s);
-            verdict(ok2 && again.result == AVB_TAS_ACT_NOT_CLEAN && state_ok && s.armed == AVB_TAS_STATE_DIRTY ? "PASS" : "FAIL", "REFUSE", index,
-                    id->device_id, ok2 && again.result == AVB_TAS_ACT_NOT_CLEAN && state_ok && s.armed == AVB_TAS_STATE_DIRTY ? NULL
-                                   : "a dirty adapter must refuse activation as NOT_CLEAN and stay DIRTY until recovered");
+            sprintf_s(why, sizeof(why), "function 71 must be withdrawn (STATUS_INVALID_DEVICE_REQUEST, no output); ntstatus=0x%08lX "
+                      "information=%lu%s", (unsigned long)st, information, information != 0 ? ": the legacy request was served" : "");
+            verdict("FAIL", "WITHDRAWN", index, id->device_id, why);
+        }
+        /* UNCHANGED: the restoration set against the test's own pre-state query, register by register, and the TAS record */
+        query_lookup(h, 0, &qa);
+        restoration_set_compare(&qbefore, &qa, &differing, &unread);
+        state_ok = read_state(h, &s);
+        if (state_ok) { print_state("after the function-71 request", &s); }
+        if (differing != 0 || (state_ok && s.armed != AVB_TAS_STATE_CLEAN)) {
+            sprintf_s(why, sizeof(why), "a function-71 request must change nothing: %u restoration-set register(s) differ from the pre-state "
+                      "query, record %s", differing, state_ok ? (s.armed == AVB_TAS_STATE_CLEAN ? "CLEAN" : "not CLEAN") : "unread");
+            verdict("FAIL", "UNCHANGED", index, id->device_id, why);
+        } else if (unread != 0 || !state_ok) {
+            sprintf_s(why, sizeof(why), "no change measured, but %u of 17 restoration-set register(s) unread and the record %s: missing "
+                      "measurement, not a pass", unread, state_ok ? "read" : "unread");
+            verdict("INCONCLUSIVE", "UNCHANGED", index, id->device_id, why);
+        } else {
+            verdict("PASS", "UNCHANGED", index, id->device_id, "17 of 17 restoration-set registers as in the pre-state query, record CLEAN");
         }
         (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         return;

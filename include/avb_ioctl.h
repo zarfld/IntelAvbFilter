@@ -16,8 +16,12 @@ extern "C" {
  * ABI 2.1: IOCTL_AVB_TAS_QUERY_HW (0x0017602C) is served (#350). A compatible addition, so the minor version rises
  *          (#64, DES-C-TAS-010 3.3); no existing structure or code changes. The query's own structure is
  *          AVB_TAS_QUERY_VERSION 2 (#365 Amendment 1, a semantic change of hw_read PARTIAL), 536 bytes; it carries its
- *          own version (3.4), so the ABI version does not change with it. */
-#define AVB_IOCTL_ABI_VERSION 0x00020001u
+ *          own version (3.4), so the ABI version does not change with it.
+ * ABI 2.2: IOCTL_AVB_TAS_ACTIVATE is served as the versioned 0x80C request AVB_TAS_OP_REQUEST (#357 atomic cutover, #365
+ *          13.1, R4: "API service-version changes happen when the operation is served"). Function 71 (0x0017811C, 80-byte
+ *          request) is withdrawn in the same change, never served alongside 0x80C; it was never released. The query layout and
+ *          AVB_TAS_OP_VERSION 1 are unchanged. */
+#define AVB_IOCTL_ABI_VERSION 0x00020002u
 
 /* Bring in SSOT TSN/PTM types */
 /* Relative include path (header lives in include/, external path is sibling) */
@@ -190,21 +194,21 @@ typedef struct _IOCTL_VERSION {
  * provisional until DES-C-TAS-010 (#365) is accepted. */
 #define IOCTL_AVB_TAS_QUERY_HW          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS)  /* 0x0017602C (#350, #362) */
 
-/* First gate schedule on a clean adapter at a future PHC time (#357). Unlike IOCTL_AVB_SETUP_TAS, it applies a schedule.
- * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
- * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
- * status. COMMITTED, COMMITTED_UNTIMED and BASE_PASSED leave a schedule behind; FAILED_NOT_RESTORED leaves hardware state unknown.
- * Exception: until ADR-TSN-003 is accepted (#357, #363 interim Option C), a valid PASS request completes with
- * STATUS_NOT_IMPLEMENTED and no output, before any register access; a malformed one is still INVALID. */
-/* A mutating operation, so FILE_WRITE_ACCESS: the I/O manager delivers it only on a handle opened with write access (CTL_CODE
- * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
-#define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
+/* First gate schedule on a clean adapter at a future PHC time (#357): the versioned activation code of #362 decision 1, request
+ * AVB_TAS_OP_REQUEST below, contract #365 13.1-13.5 with its 2026-11-19 resolution (R1/R2/R4/R5/R7/R8). One 144-byte
+ * METHOD_BUFFERED structure: only COMMITTED completes STATUS_SUCCESS with the structure (Information 144, out_flags written);
+ * every other result completes with its error status and no output (#365 13.4, R5). pre_activation has no default; PASS is
+ * NOT_IMPLEMENTED until #363 is accepted. A mutating operation, so FILE_WRITE_ACCESS: the I/O manager delivers it only on a
+ * handle opened with write access (CTL_CODE RequiredAccess, Microsoft "Defining I/O Control Codes").
+ * Canonical since the #357 atomic cutover; IOCTL_AVB_TAS_ACTIVATE_80C is the transitional name of the same code, kept for
+ * existing clients. */
+#define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A030 (#357, #362, #365 13.1) */
+#define IOCTL_AVB_TAS_ACTIVATE_80C      IOCTL_AVB_TAS_ACTIVATE   /* transitional name (#357 declaration step, 2026-11-18) */
 
-/* The versioned activation code of #362 decision 1 (#365 13.1), request AVB_TAS_OP_REQUEST below. DECLARATION ONLY (#357,
- * 2026-11-18): no handler is added for it, and its declaration states no driver behaviour. Transitional name: IOCTL_AVB_TAS_ACTIVATE
- * keeps function 71 and its existing dispatch until the coordinated producer PR moves the canonical name to this code and
- * withdraws function 71; the two protocols are never served together. FILE_WRITE_ACCESS: a mutating operation. */
-#define IOCTL_AVB_TAS_ACTIVATE_80C      CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A030 (#357, #362, #365 13.1) */
+/* WITHDRAWN: function 71, the former 80-byte activation request (AVB_TAS_ACTIVATE_REQUEST). Withdrawn by the #357 atomic cutover
+ * and never served alongside 0x80C (#365 13.1); the driver completes it STATUS_INVALID_DEVICE_REQUEST like any unknown code.
+ * Declared only so tests can probe that withdrawal (#368 LEGACY_FUNCTION_71, the --fault withdrawal check of D-C on #482/#357). */
+#define IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C, withdrawn */
 
 /* Debug-only test control of the #412 initialization fault mechanism (UT-DEV-LIFECYCLE-002): ARM, DISARM and
  * CLEAR_UNCONSUMED, performed by a Debug (DBG) driver under the lock that admits an initialization attempt. Request layout,
@@ -229,7 +233,18 @@ typedef struct _IOCTL_VERSION {
 #define AVB_TAS_ACT_BASE_PASSED         5u  /* schedule written, but the PHC had passed BaseT at the read after commit */
 #define AVB_TAS_ACT_COMMITTED_UNTIMED   6u  /* schedule written, but the PHC read after the commit failed: whether BaseT was still ahead is unknown */
 #define AVB_TAS_ACT_BUSY                7u  /* refused: another TAS operation holds this adapter. Nothing read or written */
+/* Further results of the versioned request (#365 13.4); each completes with its error status and no output */
+#define AVB_TAS_ACT_READ_FAILED           8u  /* STATUS_IO_DEVICE_ERROR: a required read (clean state, PHC) failed. Nothing written */
+#define AVB_TAS_ACT_NOT_HARDWARE_VERIFIED 9u  /* STATUS_REQUEST_NOT_ACCEPTED: unverified tier without explicit acceptance (#351 R4) */
+#define AVB_TAS_ACT_NOT_SUPPORTED        10u  /* STATUS_NOT_SUPPORTED: the capability is evidenced absent */
+#define AVB_TAS_ACT_NOT_IMPLEMENTED      11u  /* STATUS_NOT_IMPLEMENTED: PASS (#363), Strict (D-D 2026-11-20), or no device operation */
+#define AVB_TAS_ACT_STATE_CONFLICT       12u  /* STATUS_INVALID_DEVICE_STATE: zero, stale or unavailable metadata (#352 R1) */
+#define AVB_TAS_ACT_NOT_READY            13u  /* STATUS_DEVICE_NOT_READY: link speed unknown (#351 R2) or the PTP clock not ready */
+#define AVB_TAS_ACT_NOT_BOUND            15u  /* STATUS_INVALID_DEVICE_STATE: the open instance is not bound */
+#define AVB_TAS_ACT_ADAPTER_MISMATCH     16u  /* STATUS_INVALID_DEVICE_STATE: net_luid is not the bound adapter */
 
+/* WITHDRAWN 80-byte request of function 71 (IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71). No driver serves it since the #357 cutover;
+ * kept so withdrawal probes can send it and the offline cases of the former device sequence still compile */
 typedef struct AVB_TAS_ACTIVATE_REQUEST {
     avb_u32 version;                          /* in: AVB_TAS_ACTIVATE_VERSION */
     avb_u32 pre_activation;                   /* in: AVB_TAS_PRE_HOLD or AVB_TAS_PRE_PASS */
@@ -299,7 +314,8 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
 #define AVB_TAS_RESTORE_NO_SSOT_BASELINE 6u  /* the family's SSOT has no observed baselines */
 
 #define AVB_TAS_FLAG_OP_IN_PROGRESS           0x00000001u
-#define AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE 0x00000002u  /* never set in v1: no opt-in exists */
+#define AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE 0x00000002u  /* a schedule committed under explicit unverified acceptance is
+                                                               retained; cleared only when that state is removed (#365 R4) */
 #define AVB_TAS_FLAG_PHC_RESET_SEEN           0x00000004u  /* sticky in the adapter context */
 
 #define AVB_TAS_LOOKUP_NOT_REQUESTED   1u
@@ -440,14 +456,14 @@ C_ASSERT(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536);
 static_assert(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "TAS query v1 size changed");
 #endif
 
-/* ---- IOCTL_AVB_TAS_ACTIVATE_80C request (#357; layout and values published in #365 13.1-13.3 and DES-C-TAS-010 3.5) ----
- * DECLARATION ONLY: no handler serves this request yet; the comments below cite the published contract, not observed driver
- * behaviour. A later semantic change raises AVB_TAS_OP_VERSION, never a silent re-layout. One 144-byte METHOD_BUFFERED structure (#365 13.1): bytes 0-135 are input, bytes 136-143 output, written only on
- * STATUS_SUCCESS. There is no separate response layout; an operation's outcome detail is its AVB_TAS_OP_RECORD (#352).
- * Behaviour is published, not declared here: #365's coordinated 2026-11-19 resolution (R1/R2/R4/R5/R7/R8) with #352 (metadata
- * lifecycle), #351 (admission, link speed) and #362 (scoped acceptance). Its version decision (R4) finalizes this
- * not-yet-served version-1 contract: AVB_TAS_OP_VERSION, the 144-byte layout and the query layout are unchanged, and the
- * service version changes when the operation is served, not with a declaration. */
+/* ---- IOCTL_AVB_TAS_ACTIVATE request (#357; layout and values published in #365 13.1-13.3 and DES-C-TAS-010 3.5) ----
+ * Served since the #357 atomic cutover (ABI 2.2). The comments below cite the published contract; hardware evidence is the
+ * tests' own. A later semantic change raises AVB_TAS_OP_VERSION, never a silent re-layout. One 144-byte METHOD_BUFFERED
+ * structure (#365 13.1): bytes 0-135 are input, bytes 136-143 output, written only on STATUS_SUCCESS. There is no separate
+ * response layout; an operation's outcome detail is its AVB_TAS_OP_RECORD (#352), whose store does not exist yet (P2).
+ * Behaviour: #365's coordinated 2026-11-19 resolution (R1/R2/R4/R5/R7/R8) with #352 (metadata lifecycle), #351 (admission,
+ * link speed) and #362 (scoped acceptance); the HOLD tier reported as IMPLEMENTED_UNVERIFIED (D-A, 2026-11-21) and Strict
+ * NOT_IMPLEMENTED at R7 step 8 (D-D, 2026-11-20). AVB_TAS_OP_VERSION, the 144-byte layout and the query layout are unchanged. */
 #define AVB_TAS_OP_VERSION 1u
 
 #define AVB_TAS_F_ACCEPT_UNVERIFIED 0x00000001u  /* flags bit 0 (#365 13.2, 13.6 D.4) */

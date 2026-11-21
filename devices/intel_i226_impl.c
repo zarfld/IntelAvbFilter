@@ -634,25 +634,22 @@ static int activate_phc(void *ctx, avb_u64 *ns)
     return read_systime((device_t *)ctx, ns);   /* under the TAS register lock: no logging (#350) */
 }
 
-/** First gate schedule on a clean adapter (#357). The sequence and its refusals are in i226_tas_activate.h */
-static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written)
+/** First gate schedule on a clean adapter, HOLD, the versioned IOCTL_AVB_TAS_ACTIVATE (#357 producer). R7 steps 6-9, the D-8
+ * writes with the R8 PHC recheck, commit, read-back and rollback are in i226_tas_activate.h (i226_tas_op_hold). debug_fault
+ * arrives header-validated: the handler refuses a non-zero value on a Release driver (#365 13.3) */
+static void activate_tas_hold(device_t *dev, const struct AVB_TAS_SCHEDULE *schedule, uint32_t link_mbps, uint32_t flags,
+                              uint32_t debug_fault, uint64_t min_margin_ns, int armed, struct AVB_TAS_OP_OUTCOME *outcome)
 {
     I226_TAS_IO io;
-    int outcome;
 
     io.ctx = dev;
     io.read = activate_read;
     io.write = activate_write;
     io.phc = activate_phc;
-#if DBG
-    io.fault_injection = 1;   /* the #357 HIL fault path; a Release driver refuses a nonzero reserved word */
-#else
-    io.fault_injection = 0;
-#endif
+    io.fault_injection = 0;   /* the former request's injection; the versioned one is debug_fault (i226_tas_op_hold) */
     /* Called with the adapter's TAS register lock held: no logging here; IOCTL_AVB_TAS_ACTIVATE logs the outcome after
      * the release (#350) */
-    outcome = i226_tas_activate(&io, request, armed, tsn_mode_written);
-    return outcome;
+    i226_tas_op_hold(&io, schedule, link_mbps, flags, debug_fault, min_margin_ns, armed, outcome);
 }
 
 /** Read-only TAS hardware query (#350, contract #365). Reads only: the I/O carries no write function. Called at
@@ -1715,7 +1712,7 @@ const intel_device_ops_t i226_ops = {
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
-    .activate_tas = activate_tas,
+    .activate_tas_hold = activate_tas_hold,
     .query_tas = query_tas,
     .disable_tas = disable_tas,
 #if DBG

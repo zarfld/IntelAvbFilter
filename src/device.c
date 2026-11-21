@@ -749,7 +749,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_TIMESTAMP:
         case IOCTL_AVB_SET_TIMESTAMP:
         case IOCTL_AVB_SETUP_TAS:
-        case IOCTL_AVB_TAS_ACTIVATE:      // Implements #357
+        case IOCTL_AVB_TAS_ACTIVATE:      // Implements #357: the versioned 0x80C request; function 71 is withdrawn (not routed)
         case IOCTL_AVB_SETUP_FP:
         case IOCTL_AVB_SETUP_PTM:
         case IOCTL_AVB_SETUP_QAV:         // Implements #8 (REQ-F-QAV-001: Credit-Based Shaper Configuration)
@@ -814,6 +814,12 @@ IntelAvbFilterDeviceIoControl(
                 /* The TAS query is exact-target only (#365 12.1 row 1, #353, #367): an unbound handle is refused here,
                  * before the fallback adapter search, lazy initialization, context use or MMIO */
                 if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_TAS_QUERY_HW) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+                /* The activation needs a bound open instance (#365 13.3: NOT_BOUND, STATUS_INVALID_DEVICE_STATE, before the
+                 * length checks): refused here, before the fallback adapter search, lazy initialization or any MMIO */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_TAS_ACTIVATE) {
                     Status = STATUS_INVALID_DEVICE_STATE;
                     break;
                 }

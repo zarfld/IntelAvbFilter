@@ -266,3 +266,322 @@ static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_RE
     }
     return AVB_TAS_ACTIVATE_RAN;
 }
+
+/* ===================================================================================================================
+ * Versioned HOLD activation (#357 producer; IOCTL_AVB_TAS_ACTIVATE 0x80C, AVB_TAS_OP_REQUEST; contract #365 13.3-13.5 and
+ * its 2026-11-19 resolution R4/R7/R8, D-D 2026-11-20, D-A 2026-11-21). The generic handler has done R7 steps 1-5 (header,
+ * pre_activation, claim, metadata, link speed); this is the device-owned part: steps 6-9, the D-8 writes with the R8 PHC
+ * recheck, the commit, the post-commit classification, the read-back, and the numbered-write fault injection of 13.3.
+ * The sequence above (i226_tas_activate, the withdrawn 80-byte request) stays for its offline cases only.
+ * =================================================================================================================== */
+
+/* The I226's HOLD tier (#351 R2/R4, D-A 2026-11-21): implemented without qualifying evidence. One source for the query's
+ * limits.tier_hold and for R7 step 8, so the two never differ */
+static __inline avb_u32 i226_tas_tier_hold(void)
+{
+    return AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED;
+}
+
+/* TAS-DR-07: BaseT seconds fit the 32-bit BASET_H register (the SSOT defines its offset only) */
+#define I226_TAS_BASET_H_MAX ((avb_u64)INTEL_MASK_32BIT)
+
+typedef AVB_TAS_OP_OUTCOME I226_TAS_OP_OUTCOME;   /* src/avb_tas_activate_state.h */
+
+/* Step 6, TAS-DR-03 to TAS-DR-07 in numeric order (TAS-DR-08's PHC margin is step 7, TAS-DR-09's Strict flags step 8), only
+ * device and SSOT ranges, at the driver-owned link speed sampled once under the claim (#351 R2). Reads no hardware */
+static __inline avb_u32 i226_tas_op_validate(const AVB_TAS_SCHEDULE *s, avb_u32 link_mbps)
+{
+    avb_u32 q;
+
+    /* TAS-DR-03: one window per queue, no gate list: the layout carries exactly that */
+    /* TAS-DR-04: cycle within QBVCYCLET.QBV_CYCLE_TIME (SSOT field), 64-bit arithmetic */
+    if (s->cycle_ns == 0 || (avb_u64)s->cycle_ns > (avb_u64)(I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT)) {
+        return AVB_TAS_ACT_INVALID;
+    }
+    /* TAS-DR-05: frame size within the device range, start < end <= cycle, window above 1.1 x the transmit time of
+     * max(512 bytes, max_frame_bytes) at the current link speed (DOC 8.12.12), widened arithmetic */
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        const AVB_TAS_QUEUE_WINDOW *w = &s->queue[q];
+        avb_u32 floor_bytes;
+
+        if (w->max_frame_bytes < I226_TAS_MIN_FRAME_BYTES || w->max_frame_bytes > I226_TAS_MAX_FRAME_BYTES) {
+            return AVB_TAS_ACT_INVALID;
+        }
+        if (w->start_ns >= w->end_ns || w->end_ns > s->cycle_ns) {
+            return AVB_TAS_ACT_INVALID;
+        }
+        floor_bytes = w->max_frame_bytes > I226_TAS_WINDOW_FLOOR ? w->max_frame_bytes : I226_TAS_WINDOW_FLOOR;
+        if ((avb_u64)(w->end_ns - w->start_ns) * (avb_u64)link_mbps <= (avb_u64)floor_bytes * I226_TAS_WINDOW_FACTOR) {
+            return AVB_TAS_ACT_INVALID;
+        }
+    }
+    /* TAS-DR-06: end < cycle with a gap (OPEN_ALL is REPLACE only and refused in the header checks) */
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        if (s->queue[q].end_ns >= s->cycle_ns) {
+            return AVB_TAS_ACT_INVALID;
+        }
+    }
+    /* TAS-DR-07: BaseT seconds fit BASET_H; the nanoseconds part (< 10^9) fits the 30-bit BASET_L field; base + n x cycle
+     * does not overflow 64 bits */
+    if (s->base_time_ns / NSEC_PER_SEC > I226_TAS_BASET_H_MAX ||
+        (avb_u64)(s->base_time_ns % NSEC_PER_SEC) > (avb_u64)(I226_BASET_L_BASE_TIME_L_MASK >> I226_BASET_L_BASE_TIME_L_SHIFT) ||
+        s->base_time_ns > ~(avb_u64)0 - (avb_u64)s->cycle_ns) {
+        return AVB_TAS_ACT_INVALID;
+    }
+    /* GET_TAS_STATE must be able to report what is written: more intervals than gate-list entries is refused before any
+     * write (carried from the former request, avb_tas_gcl_from_schedule) */
+    {
+        struct tsn_tas_config gcl;
+        if (!avb_tas_gcl_from_schedule(s, &gcl)) {
+            return AVB_TAS_ACT_INVALID;
+        }
+    }
+    return AVB_TAS_ACT_COMMITTED;
+}
+
+/* Step 9: readable clean hardware. 0 clean, 1 not clean (schedule state present), 2 a read failed. Fills saved[] in the
+ * order of i226_tas_read_clean (TQAVCTRL, STQT/ENDQT per queue, QBVCYCLET_S, QBVCYCLET, BASET_H, BASET_L) */
+static __inline int i226_tas_op_read_clean(const I226_TAS_IO *io, I226_TAS_SAVED *saved)
+{
+    static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
+    static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+    avb_u32 i = 0, q;
+    int dirty = 0;
+
+    saved[i++].offset = I226_TQAVCTRL;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        saved[i++].offset = start[q];
+        saved[i++].offset = end[q];
+    }
+    saved[i++].offset = I226_QBVCYCLET_S;
+    saved[i++].offset = I226_QBVCYCLET;
+    saved[i++].offset = I226_BASET_H;
+    saved[i++].offset = I226_BASET_L;
+    for (i = 0; i < I226_TAS_SAVED_COUNT; i++) {
+        if (io->read(io->ctx, saved[i].offset, &saved[i].old_value) != 0) {
+            return 2;
+        }
+        if (saved[i].offset != I226_QBVCYCLET && saved[i].offset != I226_QBVCYCLET_S && saved[i].old_value != 0) {
+            dirty = 1;
+        }
+    }
+    return dirty;
+}
+
+/* The numbered-write injection of #365 13.3 (Debug drivers only; the handler refuses a non-zero debug_fault on Release):
+ * bits 0-7 N fail schedule write N (1 = the first), bit 8 also fails the first restore write. An injected failure does not
+ * reach the hardware. Every other access passes through */
+typedef struct {
+    const I226_TAS_IO *inner;
+    avb_u32 fail_write;       /* N, 0 = none */
+    int fail_restore;         /* fail the first restore write */
+    avb_u32 writes;           /* schedule writes attempted so far */
+    int restoring;            /* writes now are restore writes */
+    avb_u32 restore_writes;   /* restore writes attempted so far */
+} I226_TAS_OP_FAULT;
+
+static __inline int i226_tas_op_write(I226_TAS_OP_FAULT *f, avb_u32 offset, avb_u32 value)
+{
+    if (f->restoring) {
+        f->restore_writes++;
+        if (f->fail_restore && f->restore_writes == 1u) {
+            return -1;
+        }
+    } else {
+        f->writes++;
+        if (f->fail_write != 0 && f->writes == f->fail_write) {
+            return -1;
+        }
+    }
+    return f->inner->write(f->inner->ctx, offset, value);
+}
+
+/* Pre-commit rollback (R8): the registers whose write was attempted, last first, back to the values read in step 9, each
+ * read back. BASET_L, the commit register, is never written here: writing it would commit. When its own write was attempted
+ * and failed, it is only read back. FAILED_RESTORED when every one reads back its old value, otherwise FAILED_NOT_RESTORED */
+static __inline avb_u32 i226_tas_op_rollback(I226_TAS_OP_FAULT *f, const I226_TAS_SAVED *saved, avb_u32 attempted)
+{
+    avb_u32 i = attempted, ok = 1;
+
+    f->restoring = 1;
+    while (i-- != 0) {
+        avb_u32 now = 0;
+
+        if (saved[i].offset != I226_BASET_L && i226_tas_op_write(f, saved[i].offset, saved[i].old_value) != 0) {
+            ok = 0;
+            continue;
+        }
+        if (f->inner->read(f->inner->ctx, saved[i].offset, &now) != 0 || now != saved[i].old_value) {
+            ok = 0;
+        }
+    }
+    return ok ? AVB_TAS_ACT_FAILED_RESTORED : AVB_TAS_ACT_FAILED_NOT_RESTORED;
+}
+
+/* After the commit (R8): every register written, read back and compared on the fields written (SSOT masks), never on
+ * unrelated or reserved bits. TQAVCTRL: the transmit-mode and enhanced-QAV bits set. 0 when all match */
+static __inline int i226_tas_op_readback(const I226_TAS_IO *io, const AVB_TAS_SCHEDULE *s)
+{
+    static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
+    static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+    const avb_u32 mode_bits = (avb_u32)I226_TQAVCTRL_TRANSMIT_MODE_MASK | (avb_u32)I226_TQAVCTRL_ENHANCED_QAV_MASK;
+    avb_u32 v = 0, q;
+
+    if (io->read(io->ctx, I226_TQAVCTRL, &v) != 0 || (v & mode_bits) != mode_bits) {
+        return 1;
+    }
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        if (io->read(io->ctx, start[q], &v) != 0 ||
+            (v & (avb_u32)I226_STQT_START_TIME_MASK) != I226_TAS_FIELD(I226_STQT, START_TIME, s->queue[q].start_ns)) {
+            return 1;
+        }
+        if (io->read(io->ctx, end[q], &v) != 0 ||
+            (v & (avb_u32)I226_ENDQT_END_TIME_MASK) != I226_TAS_FIELD(I226_ENDQT, END_TIME, s->queue[q].end_ns)) {
+            return 1;
+        }
+    }
+    if (io->read(io->ctx, I226_QBVCYCLET_S, &v) != 0 ||
+        (v & (avb_u32)I226_QBVCYCLET_S_SHADOW_QBVCYCLE_MASK) != I226_TAS_FIELD(I226_QBVCYCLET_S, SHADOW_QBVCYCLE, s->cycle_ns)) {
+        return 1;
+    }
+    if (io->read(io->ctx, I226_QBVCYCLET, &v) != 0 ||
+        (v & (avb_u32)I226_QBVCYCLET_QBV_CYCLE_TIME_MASK) != I226_TAS_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, s->cycle_ns)) {
+        return 1;
+    }
+    if (io->read(io->ctx, I226_BASET_H, &v) != 0 || v != (avb_u32)(s->base_time_ns / NSEC_PER_SEC)) {
+        return 1;
+    }
+    if (io->read(io->ctx, I226_BASET_L, &v) != 0 ||
+        (v & (avb_u32)I226_BASET_L_BASE_TIME_L_MASK) != I226_TAS_FIELD(I226_BASET_L, BASE_TIME_L, (avb_u32)(s->base_time_ns % NSEC_PER_SEC))) {
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * R7 steps 6-9 and the operation, under the claim and the TAS register lock. armed: the driver record is not CLEAN.
+ * flags: the request's flags (AVB_TAS_F_ACCEPT_UNVERIFIED). debug_fault: already validated by the header checks (Release: 0).
+ * min_margin_ns: the published enforced lead (AVB_TAS_MIN_LEAD_NS, NOT_ESTABLISHED). Never logs (called under the lock).
+ */
+static __inline void i226_tas_op_hold(const I226_TAS_IO *io, const AVB_TAS_SCHEDULE *s, avb_u32 link_mbps, avb_u32 flags,
+                                      avb_u32 debug_fault, avb_u64 min_margin_ns, int armed, I226_TAS_OP_OUTCOME *out)
+{
+    static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
+    static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+    I226_TAS_SAVED saved[I226_TAS_SAVED_COUNT];
+    I226_TAS_OP_FAULT f;
+    avb_u64 phc = 0, recheck = 0, after = 0;
+    avb_u32 mode, q, attempted = 0, strict = 0;
+    int clean;
+
+    RtlZeroMemory(out, sizeof(*out));
+    f.inner = io;
+    f.fail_write = debug_fault & AVB_TAS_DEBUG_FAULT_WRITE_MASK;
+    f.fail_restore = (debug_fault & AVB_TAS_DEBUG_FAULT_RESTORE) != 0;
+    f.writes = 0;
+    f.restoring = 0;
+    f.restore_writes = 0;
+
+    /* Step 6 */
+    out->result = i226_tas_op_validate(s, link_mbps);
+    if (out->result != AVB_TAS_ACT_COMMITTED) {
+        return;
+    }
+    /* Step 7: PHC read and the published minimum BaseT margin (TAS-DR-08; 100 ms enforced, NOT_ESTABLISHED, D.3) */
+    if (io->phc(io->ctx, &phc) != 0) {
+        out->result = AVB_TAS_ACT_READ_FAILED;
+        return;
+    }
+    out->phc_before_ns = phc;
+    if (s->base_time_ns < phc || s->base_time_ns - phc < min_margin_ns) {
+        out->result = AVB_TAS_ACT_INVALID;
+        return;
+    }
+    /* Step 8: feature and tier policy. Strict (TAS-DR-09) is not implemented (D-D: NOT_IMPLEMENTED, acceptance does not
+     * enable it); the HOLD tier is IMPLEMENTED_UNVERIFIED, so it executes only under explicit acceptance (#365 R4) */
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        strict |= s->queue[q].flags & (AVB_TAS_Q_STRICT_END | AVB_TAS_Q_STRICT_CYCLE);
+    }
+    if (strict != 0) {
+        out->result = AVB_TAS_ACT_NOT_IMPLEMENTED;
+        return;
+    }
+    if (i226_tas_tier_hold() != AVB_TAS_TIER_IMPLEMENTED_VERIFIED && (flags & AVB_TAS_F_ACCEPT_UNVERIFIED) == 0) {
+        out->result = AVB_TAS_ACT_NOT_HARDWARE_VERIFIED;
+        return;
+    }
+    /* Step 9: the record and readable clean hardware */
+    if (armed) {
+        out->result = AVB_TAS_ACT_NOT_CLEAN;
+        return;
+    }
+    clean = i226_tas_op_read_clean(io, saved);
+    if (clean == 2) {
+        out->result = AVB_TAS_ACT_READ_FAILED;
+        return;
+    }
+    if (clean != 0) {
+        out->result = AVB_TAS_ACT_NOT_CLEAN;
+        return;
+    }
+
+    /* The D-8 writes (#365 13.5): TQAVCTRL (transmit mode, enhanced QAV, other bits preserved), STQTq then ENDQTq, QBVCYCLET_S,
+     * QBVCYCLET; the R8 PHC recheck; BASET_H; BASET_L (commit). attempted counts the registers whose write was attempted, in
+     * saved[] order, which is this write order */
+    out->write_attempted = 1;
+    mode = saved[0].old_value | (avb_u32)I226_TQAVCTRL_TRANSMIT_MODE_MASK | (avb_u32)I226_TQAVCTRL_ENHANCED_QAV_MASK;
+    attempted = 1;
+    if (i226_tas_op_write(&f, I226_TQAVCTRL, mode) != 0) {
+        goto rollback;
+    }
+    out->mode_written = 1;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        attempted++;
+        if (i226_tas_op_write(&f, start[q], I226_TAS_FIELD(I226_STQT, START_TIME, s->queue[q].start_ns)) != 0) {
+            goto rollback;
+        }
+        attempted++;
+        if (i226_tas_op_write(&f, end[q], I226_TAS_FIELD(I226_ENDQT, END_TIME, s->queue[q].end_ns)) != 0) {
+            goto rollback;
+        }
+    }
+    attempted++;
+    if (i226_tas_op_write(&f, I226_QBVCYCLET_S, I226_TAS_FIELD(I226_QBVCYCLET_S, SHADOW_QBVCYCLE, s->cycle_ns)) != 0) {
+        goto rollback;
+    }
+    attempted++;
+    if (i226_tas_op_write(&f, I226_QBVCYCLET, I226_TAS_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, s->cycle_ns)) != 0) {
+        goto rollback;
+    }
+    /* R8: PHC re-read immediately before the BaseT commit writes; BaseT must still satisfy the margin, else no commit */
+    if (io->phc(io->ctx, &recheck) != 0 || s->base_time_ns < recheck || s->base_time_ns - recheck < min_margin_ns) {
+        out->result = i226_tas_op_rollback(&f, saved, attempted);   /* no write failed: failed_write stays 0 */
+        return;
+    }
+    attempted++;
+    if (i226_tas_op_write(&f, I226_BASET_H, (avb_u32)(s->base_time_ns / NSEC_PER_SEC)) != 0) {
+        goto rollback;
+    }
+    attempted++;
+    if (i226_tas_op_write(&f, I226_BASET_L, I226_TAS_FIELD(I226_BASET_L, BASE_TIME_L, (avb_u32)(s->base_time_ns % NSEC_PER_SEC))) != 0) {
+        goto rollback;
+    }
+
+    /* Committed. R5: the post-commit PHC classifies the commit; a missing or late reading never rolls a schedule back */
+    out->acceptance_acted = (flags & AVB_TAS_F_ACCEPT_UNVERIFIED) != 0 && i226_tas_tier_hold() == AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED;
+    if (io->phc(io->ctx, &after) != 0) {
+        out->result = AVB_TAS_ACT_COMMITTED_UNTIMED;
+    } else {
+        out->phc_at_commit_ns = after;
+        out->result = after >= s->base_time_ns ? AVB_TAS_ACT_BASE_PASSED : AVB_TAS_ACT_COMMITTED;
+    }
+    /* R8 read-back after the commit and its classification: a failed read or a mismatch overrides it, with no second commit */
+    if (i226_tas_op_readback(io, s) != 0) {
+        out->result = AVB_TAS_ACT_FAILED_NOT_RESTORED;
+    }
+    return;
+
+rollback:
+    out->failed_write = f.writes;
+    out->result = i226_tas_op_rollback(&f, saved, attempted);
+}

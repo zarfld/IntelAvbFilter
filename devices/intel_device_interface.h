@@ -21,6 +21,8 @@ typedef struct _device_t device_t;
 struct tsn_tas_config;
 struct tsn_fp_config;
 struct ptm_config;
+struct AVB_TAS_SCHEDULE;      /* include/avb_ioctl.h */
+struct AVB_TAS_OP_OUTCOME;    /* src/avb_tas_activate_state.h (#357 producer) */
 
 /**
  * @brief Intel device-specific operations interface
@@ -80,11 +82,13 @@ typedef struct _intel_device_ops {
     
     // TSN operations (optional - can be NULL for basic devices)
     int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
-    /* First gate schedule on a clean adapter (#357). Returns AVB_TAS_ACTIVATE_RAN when request->result says what happened,
-     * AVB_TAS_ACTIVATE_NOT_IMPLEMENTED for a valid request it refused without any register access (src/avb_tas_activate_state.h).
-     * *tsn_mode_written: the transmit-mode write reached the adapter, for avb_tas_state_after.
+    /* First gate schedule on a clean adapter, HOLD, the versioned IOCTL_AVB_TAS_ACTIVATE (#357 producer; #365 R7 steps 6-9,
+     * R8). Called under the TAS claim and the TAS register lock (no logging). link_mbps: the driver-owned K8 speed sampled
+     * once under the claim (#351 R2, non-zero); flags and debug_fault: from the request, header-validated; min_margin_ns: the
+     * published enforced lead; armed: the driver record is not CLEAN. Fills *outcome (src/avb_tas_activate_state.h).
      * NULL on TAS-capable hardware means not implemented, never unsupported. */
-    int (*activate_tas)(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written);
+    void (*activate_tas_hold)(device_t *dev, const struct AVB_TAS_SCHEDULE *schedule, uint32_t link_mbps, uint32_t flags,
+                              uint32_t debug_fault, uint64_t min_margin_ns, int armed, struct AVB_TAS_OP_OUTCOME *outcome);
     /* Read-only TAS hardware query (#350, contract #365 "Query v1 contract"): fills the hardware fields of reply (registers,
      * PHC bracket, decoding, slot statuses, advisory restoration) for this family. running: the filter is Running; mmio:
      * BAR mapped and INTEL_CAP_MMIO; record: AVB_TAS_STATE_*; op_in_progress: the TAS claim is held; contended: the TAS

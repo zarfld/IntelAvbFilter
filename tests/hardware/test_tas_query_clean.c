@@ -2124,10 +2124,10 @@ static HANDLE inv_legacy_phase(HANDLE h, HANDLE *hw, UINT32 index, const AVB_ADA
     req.status = 0xFFFFFFFFu;
     g_pending_did = id->device_id;
     InterlockedExchange(&g_pending_adapter, (LONG)index);   /* an accepted request commits a schedule: the cleanup owes a cycle */
-    st = avb_ioctl_ntstatus(*hw, IOCTL_AVB_TAS_ACTIVATE, &req, (DWORD)sizeof(req), &req, (DWORD)sizeof(req), &got);
+    st = avb_ioctl_ntstatus(*hw, IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, &req, (DWORD)sizeof(req), &req, (DWORD)sizeof(req), &got);
     reply = st == 0 && got == sizeof(req);
-    printf("    [EVIDENCE] LEGACY_FUNCTION_71 request: IOCTL_AVB_TAS_ACTIVATE 0x%08lX 80 bytes base=%llu (PHC %llu); reply ntstatus=0x%08lX "
-           "information=%lu result=%s (%u)\n", (unsigned long)IOCTL_AVB_TAS_ACTIVATE, req.base_time_ns, p.phc, (unsigned long)st, got,
+    printf("    [EVIDENCE] LEGACY_FUNCTION_71 request: IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 0x%08lX 80 bytes base=%llu (PHC %llu); reply ntstatus=0x%08lX "
+           "information=%lu result=%s (%u)\n", (unsigned long)IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, req.base_time_ns, p.phc, (unsigned long)st, got,
            reply ? act_result_name(req.result) : "not delivered", reply ? req.result : 0u);
     if (st == (LONG)STATUS_INVALID_DEVICE_REQUEST && got == 0) {
         verdict("PASS", "LEGACY_FUNCTION_71", index, id->device_id, "function 71 withdrawn: STATUS_INVALID_DEVICE_REQUEST, no output");

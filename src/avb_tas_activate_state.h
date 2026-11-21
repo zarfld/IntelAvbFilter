@@ -16,6 +16,18 @@
 #define AVB_TAS_ACTIVATE_RAN             0
 #define AVB_TAS_ACTIVATE_NOT_IMPLEMENTED 1
 
+/* What the device operation of the versioned HOLD activation reports to the generic handler (#357 producer; #365 R7 steps
+ * 6-9, R8). Driver-internal, never part of the request ABI */
+typedef struct AVB_TAS_OP_OUTCOME {
+    avb_u32 result;             /* AVB_TAS_ACT_* */
+    int write_attempted;        /* a register write was attempted, also an injected or failed one (#352 R1 L7) */
+    int mode_written;           /* the transmit-mode write reached the adapter (#362 decision 4, R8) */
+    int acceptance_acted;       /* the commit executed under explicit unverified acceptance (#365 R4: out_flags bit 0) */
+    avb_u64 phc_before_ns;      /* step 7 PHC read, 0 if none */
+    avb_u64 phc_at_commit_ns;   /* PHC read after the commit write, 0 if none */
+    avb_u32 failed_write;       /* number of the schedule write that failed, 0 if none */
+} AVB_TAS_OP_OUTCOME;
+
 /*
  * How IOCTL_AVB_TAS_ACTIVATE completes once the device code returned. When it ran: STATUS_SUCCESS with the whole request as
  * output, because METHOD_BUFFERED drops the output on an error status and the caller needs request->result. When it refused
@@ -62,9 +74,46 @@ static __inline avb_u32 avb_tas_state_after(avb_u32 result, avb_u32 previous, in
     case AVB_TAS_ACT_INVALID:
     case AVB_TAS_ACT_NOT_CLEAN:
     case AVB_TAS_ACT_BUSY:
+    /* The further refusals of the versioned request (#365 13.4): each completes before any register write */
+    case AVB_TAS_ACT_READ_FAILED:
+    case AVB_TAS_ACT_NOT_HARDWARE_VERIFIED:
+    case AVB_TAS_ACT_NOT_SUPPORTED:
+    case AVB_TAS_ACT_NOT_IMPLEMENTED:
+    case AVB_TAS_ACT_STATE_CONFLICT:
+    case AVB_TAS_ACT_NOT_READY:
+    case AVB_TAS_ACT_NOT_BOUND:
+    case AVB_TAS_ACT_ADAPTER_MISMATCH:
         return previous;
     default:
         return AVB_TAS_STATE_DIRTY;
+    }
+}
+
+/*
+ * How the versioned IOCTL_AVB_TAS_ACTIVATE completes (#365 13.4 with R5): only COMMITTED returns the structure (STATUS_SUCCESS,
+ * Information 144); every other result completes with its NTSTATUS and no output. BASE_PASSED and COMMITTED_UNTIMED leave a
+ * schedule (R5); a shared status does not establish which outcome occurred. An unknown result is never a success.
+ */
+static __inline LONG avb_tas_op_completion(avb_u32 result)
+{
+    switch (result) {
+    case AVB_TAS_ACT_COMMITTED:             return STATUS_SUCCESS;
+    case AVB_TAS_ACT_INVALID:               return STATUS_INVALID_PARAMETER;
+    case AVB_TAS_ACT_NOT_CLEAN:             return STATUS_INVALID_DEVICE_STATE;
+    case AVB_TAS_ACT_FAILED_RESTORED:       return STATUS_IO_DEVICE_ERROR;
+    case AVB_TAS_ACT_FAILED_NOT_RESTORED:   return STATUS_UNSUCCESSFUL;
+    case AVB_TAS_ACT_BASE_PASSED:           return STATUS_IO_TIMEOUT;
+    case AVB_TAS_ACT_COMMITTED_UNTIMED:     return STATUS_IO_DEVICE_ERROR;
+    case AVB_TAS_ACT_BUSY:                  return STATUS_DEVICE_BUSY;
+    case AVB_TAS_ACT_READ_FAILED:           return STATUS_IO_DEVICE_ERROR;
+    case AVB_TAS_ACT_NOT_HARDWARE_VERIFIED: return STATUS_REQUEST_NOT_ACCEPTED;
+    case AVB_TAS_ACT_NOT_SUPPORTED:         return STATUS_NOT_SUPPORTED;
+    case AVB_TAS_ACT_NOT_IMPLEMENTED:       return STATUS_NOT_IMPLEMENTED;
+    case AVB_TAS_ACT_STATE_CONFLICT:        return STATUS_INVALID_DEVICE_STATE;
+    case AVB_TAS_ACT_NOT_READY:             return STATUS_DEVICE_NOT_READY;
+    case AVB_TAS_ACT_NOT_BOUND:             return STATUS_INVALID_DEVICE_STATE;
+    case AVB_TAS_ACT_ADAPTER_MISMATCH:      return STATUS_INVALID_DEVICE_STATE;
+    default:                                return STATUS_UNSUCCESSFUL;
     }
 }
 
@@ -74,22 +123,23 @@ static __inline avb_u32 avb_tas_state_after(avb_u32 result, avb_u32 previous, in
  * so a request whose state cannot be reported truthfully is refused before any write. Expects a request whose windows lie
  * inside the cycle.
  */
-static __inline BOOLEAN avb_tas_gcl_from_windows(const AVB_TAS_ACTIVATE_REQUEST *r, struct tsn_tas_config *c)
+static __inline BOOLEAN avb_tas_gcl_from_edges(avb_u64 base_time_ns, avb_u32 cycle_ns, const avb_u32 *start, const avb_u32 *end,
+                                               struct tsn_tas_config *c)
 {
     avb_u32 edge[2u * AVB_TAS_QUEUES + 2u], n = 0, i, j, q, entries = 0;
 
     RtlZeroMemory(c, sizeof(*c));
-    c->base_time_s = r->base_time_ns / NSEC_PER_SEC;
-    c->base_time_ns = (avb_u32)(r->base_time_ns % NSEC_PER_SEC);
-    c->cycle_time_s = (avb_u32)(r->cycle_ns / NSEC_PER_SEC);
-    c->cycle_time_ns = (avb_u32)(r->cycle_ns % NSEC_PER_SEC);
+    c->base_time_s = base_time_ns / NSEC_PER_SEC;
+    c->base_time_ns = (avb_u32)(base_time_ns % NSEC_PER_SEC);
+    c->cycle_time_s = (avb_u32)(cycle_ns / NSEC_PER_SEC);
+    c->cycle_time_ns = (avb_u32)(cycle_ns % NSEC_PER_SEC);
 
     /* Every edge in [0, cycle], sorted, without duplicates */
     edge[n++] = 0;
-    edge[n++] = r->cycle_ns;
+    edge[n++] = cycle_ns;
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
-        edge[n++] = r->window_start_ns[q];
-        edge[n++] = r->window_end_ns[q];
+        edge[n++] = start[q];
+        edge[n++] = end[q];
     }
     for (i = 1; i < n; i++) {
         avb_u32 v = edge[i];
@@ -109,7 +159,7 @@ static __inline BOOLEAN avb_tas_gcl_from_windows(const AVB_TAS_ACTIVATE_REQUEST 
             return FALSE;
         }
         for (q = 0; q < AVB_TAS_QUEUES; q++) {
-            if (r->window_start_ns[q] <= from && to <= r->window_end_ns[q]) {
+            if (start[q] <= from && to <= end[q]) {
                 gates |= 1u << q;
             }
         }
@@ -118,4 +168,23 @@ static __inline BOOLEAN avb_tas_gcl_from_windows(const AVB_TAS_ACTIVATE_REQUEST 
         entries++;
     }
     return TRUE;
+}
+
+/* The gate list of the withdrawn 80-byte request (kept for its offline cases, TC-MOCK-048) */
+static __inline BOOLEAN avb_tas_gcl_from_windows(const AVB_TAS_ACTIVATE_REQUEST *r, struct tsn_tas_config *c)
+{
+    return avb_tas_gcl_from_edges(r->base_time_ns, r->cycle_ns, r->window_start_ns, r->window_end_ns, c);
+}
+
+/* The gate list of a versioned schedule (#365 13.2): start_ns and end_ns are relative to BaseT within the cycle, as the
+ * former windows were relative to the cycle start, so the same intervals result */
+static __inline BOOLEAN avb_tas_gcl_from_schedule(const AVB_TAS_SCHEDULE *s, struct tsn_tas_config *c)
+{
+    avb_u32 start[AVB_TAS_QUEUES], end[AVB_TAS_QUEUES], q;
+
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        start[q] = s->queue[q].start_ns;
+        end[q] = s->queue[q].end_ns;
+    }
+    return avb_tas_gcl_from_edges(s->base_time_ns, s->cycle_ns, start, end, c);
 }

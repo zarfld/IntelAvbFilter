@@ -89,8 +89,8 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_GET_TIMESTAMP,
         IOCTL_AVB_SET_TIMESTAMP,
         IOCTL_AVB_SETUP_TAS,
-        IOCTL_AVB_TAS_ACTIVATE,
-        IOCTL_AVB_TAS_ACTIVATE_80C,
+        IOCTL_AVB_TAS_ACTIVATE,               /* 0x80C; IOCTL_AVB_TAS_ACTIVATE_80C is the same code (TC-ABI-028) */
+        IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,   /* function 71, withdrawn (TC-ABI-024) */
         IOCTL_AVB_TAS_QUERY_HW,
         IOCTL_AVB_SETUP_FP,
         IOCTL_AVB_SETUP_PTM,
@@ -153,8 +153,9 @@ static void test_abi_version(void)
                 "AVB_IOCTL_ABI_VERSION is non-zero");
     TEST_ASSERT((AVB_IOCTL_ABI_VERSION & 0xFFFF0000u) != 0u,
                 "AVB_IOCTL_ABI_VERSION major field (high 16 bits) is non-zero");
-    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020001u,
-                "AVB_IOCTL_ABI_VERSION == 0x00020001 (v2.1 - IOCTL_AVB_TAS_QUERY_HW served, #350; v2.0 stats struct 192 bytes)");
+    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020002u,
+                "AVB_IOCTL_ABI_VERSION == 0x00020002 (v2.2 - IOCTL_AVB_TAS_ACTIVATE served on 0x80C, function 71 withdrawn, #357; "
+                "v2.1 IOCTL_AVB_TAS_QUERY_HW served, #350; v2.0 stats struct 192 bytes)");
 }
 
 /* ---------------------------------------------------------------------------
@@ -325,11 +326,13 @@ static void test_struct_sizes(void)
     TEST_ASSERT(IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110u, "IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110");
     TEST_ASSERT(IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114u, "IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114");
     TEST_ASSERT(IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118u, "IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118");
-    TEST_CASE("TC-ABI-024: IOCTL_AVB_TAS_ACTIVATE function 71, write access, sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80");
-    /* A mutating operation: FILE_WRITE_ACCESS in CTL_CODE, so the I/O manager delivers it only on a handle opened for writing (#357, #362) */
-    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE == 0x0017811Cu, "IOCTL_AVB_TAS_ACTIVATE == 0x0017811C");
-    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE requires FILE_WRITE_ACCESS");
-    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 2) & 0xFFFu) == 71u && (IOCTL_AVB_TAS_ACTIVATE >> 16) == FILE_DEVICE_PHYSICAL_NETCARD, "function 71, device type unchanged");
+    /* Since the #357 atomic cutover function 71 is WITHDRAWN (never served alongside 0x80C, #365 13.1). Its code and 80-byte
+     * request stay declared, under IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, only so tests can probe the withdrawal; unchanged values */
+    TEST_CASE("TC-ABI-024: IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 function 71 (withdrawn), write access, sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 == 0x0017811Cu, "IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 == 0x0017811C");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 requires FILE_WRITE_ACCESS");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 2) & 0xFFFu) == 71u && (IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 71, device type unchanged");
     TEST_ASSERT(((IOCTL_AVB_SETUP_TAS >> 14) & 3u) == FILE_ANY_ACCESS, "IOCTL_AVB_SETUP_TAS keeps FILE_ANY_ACCESS: existing codes unchanged");
     TEST_ASSERT(sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80, "sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80");
     TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, base_time_ns) == 8, "offsetof(base_time_ns) == 8");
@@ -467,19 +470,20 @@ static void test_struct_sizes(void)
                 AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT == 0x0400u && AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED == 0x0800u &&
                 AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED == 0x1000u, "slot reasons 0x0001 .. 0x1000");
 
-    /* Verifies: #357 (REQ-F-TAS-ACTIVATE-001), declaration only. The versioned activation code of #362 decision 1 and
-     * #365 13.1: CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0017A030. It is
-     * declared under the transitional name IOCTL_AVB_TAS_ACTIVATE_80C: IOCTL_AVB_TAS_ACTIVATE keeps function 71 and its
-     * existing dispatch (TC-ABI-024) until the producer PR moves the canonical name and withdraws function 71 (#357,
-     * 2026-11-18). No handler serves 0x80C; this pins the code only. */
-    TEST_CASE("TC-ABI-028: IOCTL_AVB_TAS_ACTIVATE_80C function 0x80C, write access, buffered; function 71 kept (#357, #362, #365 13.1)");
-    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_80C == 0x0017A030u, "IOCTL_AVB_TAS_ACTIVATE_80C == 0x0017A030");
-    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_80C >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE_80C requires FILE_WRITE_ACCESS");
-    TEST_ASSERT((IOCTL_AVB_TAS_ACTIVATE_80C & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_ACTIVATE_80C is METHOD_BUFFERED");
-    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_80C >> 2) & 0xFFFu) == 0x80Cu && (IOCTL_AVB_TAS_ACTIVATE_80C >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+    /* Verifies: #357 (REQ-F-TAS-ACTIVATE-001). The versioned activation code of #362 decision 1 and #365 13.1:
+     * CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0017A030. The #357 atomic cutover
+     * moved the canonical name IOCTL_AVB_TAS_ACTIVATE to this code and withdrew function 71 (TC-ABI-024); the transitional
+     * name IOCTL_AVB_TAS_ACTIVATE_80C (declaration step, 2026-11-18) names the same code. Static values only: what the driver
+     * serves is the hardware tests' evidence */
+    TEST_CASE("TC-ABI-028: IOCTL_AVB_TAS_ACTIVATE function 0x80C, write access, buffered; function 71 withdrawn (#357, #362, #365 13.1)");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE == 0x0017A030u, "IOCTL_AVB_TAS_ACTIVATE == 0x0017A030");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE requires FILE_WRITE_ACCESS");
+    TEST_ASSERT((IOCTL_AVB_TAS_ACTIVATE & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_ACTIVATE is METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 2) & 0xFFFu) == 0x80Cu && (IOCTL_AVB_TAS_ACTIVATE >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
                 "function 0x80C (vendor range), device type unchanged");
-    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE == 0x0017811Cu && IOCTL_AVB_TAS_ACTIVATE != IOCTL_AVB_TAS_ACTIVATE_80C,
-                "IOCTL_AVB_TAS_ACTIVATE still names function 71 (0x0017811C), a different code: the existing handler is not redirected");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_80C == IOCTL_AVB_TAS_ACTIVATE, "the transitional name IOCTL_AVB_TAS_ACTIVATE_80C is the same code");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 != IOCTL_AVB_TAS_ACTIVATE,
+                "the withdrawn function 71 (0x0017811C) is a different code: the canonical name no longer names it");
 
     /* Verifies: #357, declaration only. The AVB_TAS_OP_REQUEST layout published in #365 13.2: one 144-byte METHOD_BUFFERED
      * structure, inputs at 0-135, success-only outputs at 136-143, the 80-byte AVB_TAS_SCHEDULE shared with the query at 56.
@@ -558,6 +562,16 @@ static void test_struct_sizes(void)
     TEST_ASSERT(AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE == 0x00000001u, "out_flags: bit 0 AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE (0x1)");
     TEST_ASSERT(AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE == 0x00000002u,
                 "query flags.UNVERIFIED_CONFIG_ACTIVE keeps 0x2: a separate namespace, not reinterpreted by the operation bit");
+
+    /* Verifies: #357. The result values of #365 13.4 (also the AVB_TAS_OP_RECORD result of 12.2), declared with the producer:
+     * 0-7 kept, 8-13 and 15-16 added, 14 unassigned. Static values only */
+    TEST_CASE("TC-ABI-032: AVB_TAS_ACT_* result values 0-16 as published in #365 13.4 (#357)");
+    TEST_ASSERT(AVB_TAS_ACT_COMMITTED == 0u && AVB_TAS_ACT_INVALID == 1u && AVB_TAS_ACT_NOT_CLEAN == 2u &&
+                AVB_TAS_ACT_FAILED_RESTORED == 3u && AVB_TAS_ACT_FAILED_NOT_RESTORED == 4u && AVB_TAS_ACT_BASE_PASSED == 5u &&
+                AVB_TAS_ACT_COMMITTED_UNTIMED == 6u && AVB_TAS_ACT_BUSY == 7u, "results 0-7 unchanged");
+    TEST_ASSERT(AVB_TAS_ACT_READ_FAILED == 8u && AVB_TAS_ACT_NOT_HARDWARE_VERIFIED == 9u && AVB_TAS_ACT_NOT_SUPPORTED == 10u &&
+                AVB_TAS_ACT_NOT_IMPLEMENTED == 11u && AVB_TAS_ACT_STATE_CONFLICT == 12u && AVB_TAS_ACT_NOT_READY == 13u &&
+                AVB_TAS_ACT_NOT_BOUND == 15u && AVB_TAS_ACT_ADAPTER_MISMATCH == 16u, "results 8-13, 15, 16 as published");
 }
 
 int main(void)
