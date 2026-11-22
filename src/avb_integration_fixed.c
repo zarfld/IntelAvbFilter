@@ -4611,7 +4611,27 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 /* METHOD_BUFFERED: buf is the kernel system buffer.  ProbeFor* accepts user addresses only and would
                  * raise an access violation here, so this IOCTL must never probe it. */
                 PAVB_HW_SNAPSHOT_REQUEST snap = (PAVB_HW_SNAPSHOT_REQUEST)buf;
-                if (snap->version != AVB_HW_SNAPSHOT_VERSION) {
+                if (snap->version == AVB_HW_SNAPSHOT_VERSION_2) {
+                    /* Version 2 (#503, opt-in): ids 1..AVB_HWREG_COUNT_V2 (adds SYSTIML/SYSTIMH) in the 312-byte request.
+                     * Too short for version 2 is STATUS_BUFFER_TOO_SMALL with nothing written.  Same identity, MMIO and
+                     * read-only rules as version 1; no caller-supplied offset, no write. */
+                    if (inLen < sizeof(AVB_HW_SNAPSHOT_REQUEST_V2) || outLen < sizeof(AVB_HW_SNAPSHOT_REQUEST_V2)) {
+                        status = STATUS_BUFFER_TOO_SMALL;
+                    } else {
+                        PAVB_HW_SNAPSHOT_REQUEST_V2 snap2 = (PAVB_HW_SNAPSHOT_REQUEST_V2)buf;
+                        UINT32 mmioCaps2 = (currentContext->hw_state >= AVB_HW_BAR_MAPPED) ? (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) : 0u;
+                        RtlZeroMemory(snap2, sizeof(*snap2));
+                        snap2->version = AVB_HW_SNAPSHOT_VERSION_2;
+                        snap2->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+                        snap2->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
+                        snap2->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
+                        AvbFillHwSnapshotV2(intel_get_device_ops(currentContext->intel_device.device_type), &currentContext->intel_device,
+                                            mmioCaps2, ndis_platform_ops.mmio_read, snap2);
+                        snap2->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                        info = sizeof(*snap2);
+                        status = STATUS_SUCCESS;
+                    }
+                } else if (snap->version != AVB_HW_SNAPSHOT_VERSION) {
                     status = STATUS_REVISION_MISMATCH;
                 } else {
                     /* MMIO is usable only with a mapped BAR and INTEL_CAP_MMIO (same rule as GET_CLOCK_CONFIG). */

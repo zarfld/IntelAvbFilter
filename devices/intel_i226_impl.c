@@ -1652,6 +1652,8 @@ static int i226_hil_register_offset(uint32_t reg_id, uint32_t *offset)
     case AVB_HWREG_TRGTTIMH1:  *offset = I226_TRGTTIMH1; return 0;
     case AVB_HWREG_RAL0:       *offset = I226_RAL0; return 0;
     case AVB_HWREG_RAH0:       *offset = I226_RAH0; return 0;
+    case AVB_HWREG_SYSTIML:    *offset = I226_SYSTIML; return 0;   /* version 2 only (#503) */
+    case AVB_HWREG_SYSTIMH:    *offset = I226_SYSTIMH; return 0;
     default: return -1;
     }
 }

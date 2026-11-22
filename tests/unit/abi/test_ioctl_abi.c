@@ -322,6 +322,21 @@ static void test_struct_sizes(void)
     TEST_ASSERT(sizeof(AVB_HWREG_ENTRY) == 16, "sizeof(AVB_HWREG_ENTRY) == 16");
     TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST) == 24 + 16 * AVB_HWREG_COUNT, "sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280");
     TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST, entries) == 24, "offsetof(entries) == 24");
+    TEST_CASE("TC-ABI-033: QUERY_HW_SNAPSHOT version 2 (#503): 312 bytes, ids 17/18, count 18; version 1 unchanged (280, 16)");
+    TEST_ASSERT(AVB_HW_SNAPSHOT_VERSION == 1u, "AVB_HW_SNAPSHOT_VERSION == 1 (unchanged)");
+    TEST_ASSERT(AVB_HWREG_COUNT == 16u, "AVB_HWREG_COUNT == 16 (version 1, unchanged)");
+    TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280, "sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280 (unchanged)");
+    TEST_ASSERT(AVB_HW_SNAPSHOT_VERSION_2 == 2u, "AVB_HW_SNAPSHOT_VERSION_2 == 2");
+    TEST_ASSERT(AVB_HWREG_SYSTIML == 17u && AVB_HWREG_SYSTIMH == 18u, "AVB_HWREG_SYSTIML == 17, AVB_HWREG_SYSTIMH == 18");
+    TEST_ASSERT(AVB_HWREG_COUNT_V2 == 18u, "AVB_HWREG_COUNT_V2 == 18");
+    TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST_V2) == 312, "sizeof(AVB_HW_SNAPSHOT_REQUEST_V2) == 312");
+    TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, entries) == 24, "version 2 offsetof(entries) == 24");
+    TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, count) == offsetof(AVB_HW_SNAPSHOT_REQUEST, count) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, net_luid) == offsetof(AVB_HW_SNAPSHOT_REQUEST, net_luid) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, vendor_id) == offsetof(AVB_HW_SNAPSHOT_REQUEST, vendor_id) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, device_id) == offsetof(AVB_HW_SNAPSHOT_REQUEST, device_id) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, status) == offsetof(AVB_HW_SNAPSHOT_REQUEST, status),
+                "version 2 header fields at the version-1 offsets");
     TEST_CASE("TC-ABI-023: HIL state IOCTL function numbers 68/69/70");
     TEST_ASSERT(IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110u, "IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110");
     TEST_ASSERT(IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114u, "IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114");

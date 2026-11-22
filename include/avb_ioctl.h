@@ -546,7 +546,10 @@ typedef struct AVB_OPEN_BY_LUID_REQUEST {
 #define AVB_HWREG_TQAVCTRL    14u   /* TAS / QAV */
 #define AVB_HWREG_RAL0        15u   /* identity corroboration (MAC address filter 0) */
 #define AVB_HWREG_RAH0        16u
-#define AVB_HWREG_COUNT       16u
+#define AVB_HWREG_COUNT       16u   /* version 1: ids 1..16 (unchanged) */
+#define AVB_HWREG_SYSTIML     17u   /* PHC_TIME, version 2 only (#503) */
+#define AVB_HWREG_SYSTIMH     18u   /* PHC_TIME, version 2 only (#503) */
+#define AVB_HWREG_COUNT_V2    18u   /* version 2: ids 1..18 */
 
 #define AVB_HWREG_STATE_VALID        1u   /* value read from the family's SSOT offset */
 #define AVB_HWREG_STATE_NOT_IN_SSOT  2u   /* intel-ethernet-regs defines no such register for this family */
@@ -571,6 +574,19 @@ typedef struct AVB_HW_SNAPSHOT_REQUEST {
     avb_u32 status;        /* out: NDIS_STATUS */
     AVB_HWREG_ENTRY entries[AVB_HWREG_COUNT];   /* out: one per AVB_HWREG_* id 1..AVB_HWREG_COUNT, in id order */
 } AVB_HW_SNAPSHOT_REQUEST, *PAVB_HW_SNAPSHOT_REQUEST;           /* 24 + 16*16 = 280 bytes */
+
+/* Version 2 (#503, opt-in): the same 24-byte header and entry layout with ids 1..AVB_HWREG_COUNT_V2.  Version 1 above
+ * stays unchanged for existing callers.  Read-only like version 1; consecutive entries are not one coherent PHC sample. */
+#define AVB_HW_SNAPSHOT_VERSION_2 2u
+typedef struct AVB_HW_SNAPSHOT_REQUEST_V2 {
+    avb_u32 version;       /* in: AVB_HW_SNAPSHOT_VERSION_2 */
+    avb_u32 count;         /* out: entries filled (AVB_HWREG_COUNT_V2) */
+    avb_u64 net_luid;      /* out: NET_LUID.Value of the adapter this handle is bound to */
+    avb_u16 vendor_id;     /* out */
+    avb_u16 device_id;     /* out */
+    avb_u32 status;        /* out: NDIS_STATUS */
+    AVB_HWREG_ENTRY entries[AVB_HWREG_COUNT_V2];   /* out: one per AVB_HWREG_* id 1..AVB_HWREG_COUNT_V2, in id order */
+} AVB_HW_SNAPSHOT_REQUEST_V2, *PAVB_HW_SNAPSHOT_REQUEST_V2;     /* 24 + 18*16 = 312 bytes */
 
 /* Request/response structures (mirror of avb_integration.h) */
 #define AVB_DEVICE_INFO_MAX 1024u

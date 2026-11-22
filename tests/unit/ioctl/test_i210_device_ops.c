@@ -894,11 +894,13 @@ int main(void)
             CHECK("all NO_HAL, zero reads", s.entries[0].state == AVB_HWREG_STATE_NO_HAL && s.entries[AVB_HWREG_COUNT - 1].state == AVB_HWREG_STATE_NO_HAL && hw.reads == 0);
         }
 
+        /* #503: ids 17/18 (SYSTIML/SYSTIMH) are defined since version 2; the first undefined id above the highest
+         * defined one is AVB_HWREG_COUNT_V2 + 1 (19).  Rejection and the untouched output offset are unchanged. */
         printf("\n[I-014] unknown register id -> not defined\n");
         {
             uint32_t off = 0x12345u;
-            CHECK("id 0 and id AVB_HWREG_COUNT+1 are not defined, offset untouched",
-                  i210_ops.hil_register_offset(0u, &off) != 0 && i210_ops.hil_register_offset(AVB_HWREG_COUNT + 1u, &off) != 0 && off == 0x12345u);
+            CHECK("id 0 and id AVB_HWREG_COUNT_V2+1 (19) are not defined, offset untouched",
+                  i210_ops.hil_register_offset(0u, &off) != 0 && i210_ops.hil_register_offset(AVB_HWREG_COUNT_V2 + 1u, &off) != 0 && off == 0x12345u);
         }
 
         printf("\n[I-015] NULL output buffer is ignored safely\n");
@@ -916,6 +918,50 @@ int main(void)
               s.net_luid == 0x0006008006000000ULL && s.vendor_id == 0x8086 && s.device_id == 0x125B);
         CHECK("version, count and entries still written",
               s.version == AVB_HW_SNAPSHOT_VERSION && s.count == AVB_HWREG_COUNT && s.entries[0].id == AVB_HWREG_TIMINCA);
+
+        /* #503: SYSTIML/SYSTIMH map to the I210 SSOT definitions (positive coverage of the new ids) */
+        printf("\n[I-017] ids 17/18 map to the I210 SSOT SYSTIML/SYSTIMH\n");
+        {
+            uint32_t offL = 0u, offH = 0u;
+            CHECK("AVB_HWREG_SYSTIML -> I210_SYSTIML, AVB_HWREG_SYSTIMH -> I210_SYSTIMH",
+                  i210_ops.hil_register_offset(AVB_HWREG_SYSTIML, &offL) == 0 && offL == I210_SYSTIML &&
+                  i210_ops.hil_register_offset(AVB_HWREG_SYSTIMH, &offH) == 0 && offH == I210_SYSTIMH);
+        }
+
+        /* #503: the separate version-2 builder fills 18 entries; the version-1 builder keeps its 16 */
+        printf("\n[I-018] version-2 builder: ids 1..18, SYSTIM VALID; version 1 unchanged\n");
+        {
+            AVB_HW_SNAPSHOT_REQUEST_V2 s2;
+            AVB_HW_SNAPSHOT_REQUEST s1;
+            hw_configured();
+            memset(&s2, 0, sizeof(s2));
+            s2.net_luid = 0x0006008005000000ULL; s2.vendor_id = 0x8086; s2.device_id = 0x1533;
+            AvbFillHwSnapshotV2(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s2);
+            CHECK("version 2, count AVB_HWREG_COUNT_V2, ids 1..18 in order",
+                  s2.version == AVB_HW_SNAPSHOT_VERSION_2 && s2.count == AVB_HWREG_COUNT_V2 &&
+                  s2.entries[0].id == AVB_HWREG_TIMINCA && s2.entries[AVB_HWREG_RAH0 - 1].id == AVB_HWREG_RAH0 &&
+                  s2.entries[AVB_HWREG_SYSTIML - 1].id == AVB_HWREG_SYSTIML && s2.entries[AVB_HWREG_COUNT_V2 - 1].id == AVB_HWREG_SYSTIMH);
+            CHECK("SYSTIML/SYSTIMH VALID at the I210 SSOT offsets with the register values",
+                  s2.entries[AVB_HWREG_SYSTIML - 1].state == AVB_HWREG_STATE_VALID && s2.entries[AVB_HWREG_SYSTIML - 1].offset == I210_SYSTIML &&
+                  s2.entries[AVB_HWREG_SYSTIML - 1].value == 123456u &&
+                  s2.entries[AVB_HWREG_SYSTIMH - 1].state == AVB_HWREG_STATE_VALID && s2.entries[AVB_HWREG_SYSTIMH - 1].offset == I210_SYSTIMH &&
+                  s2.entries[AVB_HWREG_SYSTIMH - 1].value == 5u);
+            CHECK("ids 1..16 as in version 1 (TSYNCTXCTL VALID at its SSOT offset, SRRCTL0 NOT_IN_SSOT)",
+                  s2.entries[AVB_HWREG_TSYNCTXCTL - 1].state == AVB_HWREG_STATE_VALID && s2.entries[AVB_HWREG_TSYNCTXCTL - 1].offset == I210_TSYNCTXCTL &&
+                  s2.entries[AVB_HWREG_SRRCTL0 - 1].state == AVB_HWREG_STATE_NOT_IN_SSOT);
+            CHECK("caller identity survives, read-only (zero writes)",
+                  s2.net_luid == 0x0006008005000000ULL && s2.vendor_id == 0x8086 && s2.device_id == 0x1533 && hw.writes == 0);
+            AvbFillHwSnapshotV2(&i210_ops, &dev, 0u, ndis_platform_ops.mmio_read, &s2);
+            CHECK("without MMIO every version-2 entry is NO_MMIO, ids 17/18 included",
+                  s2.entries[0].state == AVB_HWREG_STATE_NO_MMIO && s2.entries[AVB_HWREG_COUNT_V2 - 1].state == AVB_HWREG_STATE_NO_MMIO);
+            hw_configured();
+            memset(&s1, 0, sizeof(s1));
+            AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s1);
+            CHECK("version-1 builder unchanged: version 1, count 16, last entry RAH0",
+                  s1.version == AVB_HW_SNAPSHOT_VERSION && s1.count == AVB_HWREG_COUNT && s1.entries[AVB_HWREG_COUNT - 1].id == AVB_HWREG_RAH0);
+            AvbFillHwSnapshotV2(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, NULL);
+            CHECK("NULL version-2 output buffer is ignored without dereferencing", TRUE);
+        }
     }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);
