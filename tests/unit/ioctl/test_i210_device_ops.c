@@ -904,6 +904,18 @@ int main(void)
         printf("\n[I-015] NULL output buffer is ignored safely\n");
         AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, NULL);
         CHECK("NULL snapshot output buffer is ignored without dereferencing", TRUE);
+
+        /* The IOCTL handler writes the identity first: a builder that replaced the whole struct returned did=0 luid=0
+         * on real hardware (2026-11-05, 0x125B, 0x1533, 0x15BB, Debug and Release). */
+        printf("\n[I-016] the adapter identity written by the caller survives the builder\n");
+        hw_configured();
+        memset(&s, 0, sizeof(s));
+        s.net_luid = 0x0006008006000000ULL; s.vendor_id = 0x8086; s.device_id = 0x125B;
+        AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
+        CHECK("net_luid, vendor_id and device_id unchanged",
+              s.net_luid == 0x0006008006000000ULL && s.vendor_id == 0x8086 && s.device_id == 0x125B);
+        CHECK("version, count and entries still written",
+              s.version == AVB_HW_SNAPSHOT_VERSION && s.count == AVB_HWREG_COUNT && s.entries[0].id == AVB_HWREG_TIMINCA);
     }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);
