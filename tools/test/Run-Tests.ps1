@@ -236,8 +236,11 @@ if (Test-Path $precondScript) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $precondScript -ForTest
     $precondExit = $LASTEXITCODE
     if ($precondExit -eq 1) {
-        Write-Host "[PRECONDITIONS] Critical checks failed. Fix issues above before running tests." -ForegroundColor Red
-        exit 1
+        # #458 (comment 7008463710): recorded as a failure (the run is nonpassing), never a stop - every suite still runs
+        # and each test attempts its own setup and reports its actual outcome.
+        Write-Host "[PRECONDITIONS] Critical checks failed (see above) --- recorded as a failure; every suite still runs and each test attempts its own setup" -ForegroundColor Red
+        $script:totalTests++; $script:failedTests++
+        $script:testResults += [PSCustomObject]@{ Name = 'Test-Preconditions.ps1 -ForTest'; Status = 'FAILED(PRECONDITIONS)'; ExitCode = $precondExit }
     }
     # Exit code 2 (warnings only) -- continue with caution
 } else {
@@ -442,16 +445,21 @@ try {
 # ===========================
 Write-Step "Locating Test Executables"
 
+# #458: a missing or empty test directory is recorded (nonpassing) and dispatch continues - the runner reports each
+# missing binary as FAILED(BUILD) without pretending it ran, and script entries that need no binary still run.
+$availableTests = @()
 if (-not (Test-Path $testExeDir)) {
-    Write-Failure "Test directory not found: $testExeDir"
+    Write-Failure "Test directory not found: $testExeDir --- recorded as a failure; every suite still runs and reports each missing binary"
     Write-Info "Build tests first: .\tools\build\Build-Driver.ps1 -Configuration $Configuration -BuildTests"
-    exit 1
-}
-
-$availableTests = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
-if (-not $availableTests) {
-    Write-Failure "No test executables found in: $testExeDir"
-    exit 1
+    $script:totalTests++; $script:failedTests++
+    $script:testResults += [PSCustomObject]@{ Name = $testExeDir; Status = 'FAILED(BUILD): test directory not found'; ExitCode = 'N/A' }
+} else {
+    $availableTests = @(Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue)
+    if ($availableTests.Count -eq 0) {
+        Write-Failure "No test executables found in: $testExeDir --- recorded as a failure; every suite still runs and reports each missing binary"
+        $script:totalTests++; $script:failedTests++
+        $script:testResults += [PSCustomObject]@{ Name = $testExeDir; Status = 'FAILED(BUILD): no test executables'; ExitCode = 'N/A' }
+    }
 }
 
 Write-Success "Found $($availableTests.Count) test executable(s)"

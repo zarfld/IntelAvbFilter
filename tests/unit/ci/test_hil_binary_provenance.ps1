@@ -518,14 +518,11 @@ Write-Manifest @(
     (New-MEntry 'test_sbprov_halter' 'built' $true (Get-Sha $pHalter)),
     (New-MEntry 'test_sbprov_disabled' 'disabled' $false $null 'KM placeholder only (mirrors Build-Tests.ps1 test_tsn_ioctl_handlers)')
 )
-# Q 2026-10-28: a cleanup difference (the halter's adapter change) no longer halts, so the active halt of this replica
-# comes from a machine record HALTED by a genuine loss of controlled execution (LOCK_LOST), placed where the sandbox
-# runner reads its safety record (logs\sandbox-hil-safety.json).
-. (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
-$aLogs = Join-Path $Tmp 'runA\logs'; New-Item -ItemType Directory -Path $aLogs -Force | Out-Null
-$null = Initialize-AvbHilSafetyRecord -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -Operator 'test' -Reason 'TEST-HILPROV-000'
-$null = Add-AvbHilSafetyEvent -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -SafetyEvent ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
-$rA = Invoke-Sandbox 'runA' @((Get-Entry $pHalter), (Get-Entry $pDisabled))
+# Q 2026-10-28: a cleanup difference (the halter's adapter change) no longer halts.  #458 (comment 7008463710,
+# 2026-11-19): a machine record HALTED by an EARLIER run's loss of control is history, no halt either (was the source of
+# this replica's halt).  The active halt now comes from a current run-level condition the runner still halts for: a
+# non-elevated token (AVB_TEST_SANDBOX_ELEVATED = '0').  What 001 tests is unchanged: provenance blocks first.
+$rA = Invoke-Sandbox 'runA' @((Get-Entry $pHalter), (Get-Entry $pDisabled)) -ExtraEnv @{ AVB_TEST_SANDBOX_ELEVATED = '0' }
 tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' ($rA.Out -match '\[HALT\] state-integrity halt') (Tail $rA)
 tc_check 'TEST-HILPROV-001-disabled-build-entry-blocks-dispatch-even-readonly-during-halt' (Test-ProvBlocked $rA 'test_sbprov_disabled' 'Disabled') (Show-Prov $rA 'test_sbprov_disabled')
 
@@ -676,10 +673,8 @@ tc_check 'TEST-HILPROV-063-local-diagnostic-records-verified-provenance-without-
 
 # Hardware safety is not relaxed: during a halt an Init item of unverified provenance stays BLOCKED(SAFETY); ReadOnly runs.
 $pDInit = New-Fake 'test_sbprov_diag_init'
-$sLogs = Join-Path $Tmp 'runS\logs'; New-Item -ItemType Directory -Path $sLogs -Force | Out-Null
-$null = Initialize-AvbHilSafetyRecord -Path (Join-Path $sLogs 'sandbox-hil-safety.json') -Operator 'test' -Reason 'TEST-HILPROV-064'
-$null = Add-AvbHilSafetyEvent -Path (Join-Path $sLogs 'sandbox-hil-safety.json') -SafetyEvent ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
-$rS = Invoke-Sandbox 'runS' @((Get-Entry $pDInit), (Get-Entry $pDStale)) -SourceRevision 'sandbox-rev-NEXT' -RunnerArgs '-LocalDiagnostic'
+# The halt is a current run-level condition (non-elevated token); since #458 an earlier run's HALTED record is no halt.
+$rS = Invoke-Sandbox 'runS' @((Get-Entry $pDInit), (Get-Entry $pDStale)) -SourceRevision 'sandbox-rev-NEXT' -RunnerArgs '-LocalDiagnostic' -ExtraEnv @{ AVB_TEST_SANDBOX_ELEVATED = '0' }
 $recSI = Get-Rec $rS 'test_sbprov_diag_init'
 tc_check 'TEST-HILPROV-064-local-diagnostic-keeps-safety-class-and-halt-rules' `
     (((Get-RanCount $rS 'test_sbprov_diag_init') -eq 0) -and ((P $recSI 'verdict') -eq 'BLOCKED(SAFETY)') -and ((Get-RanCount $rS 'test_sbprov_diag_stale') -eq 1) -and ($rS.Exit -ne 0)) `
