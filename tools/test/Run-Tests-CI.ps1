@@ -562,12 +562,12 @@ $HardwareIntegrationTests = @(
     # Phase G: built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29); classes in $HilTestSafety
     "avb_capability_validation",      # nmake: capability reporting vs device; exit = validation failures
     "avb_device_separation",          # nmake: per-device separation; exit 1 on failure
-    "avb_test_i226",                  # avb_test_um.c (default command); SETUP_TAS/FP/PTM-capable -> #328 hold
-    "avb_test_i210",                  # avb_test_um.c as avb_test_i210_um.exe; #328 hold
-    "avb_test_project",               # nmake: avb_test_um.c as avb_test_i210.exe; #328 hold
-    "tsn_hardware_activation",        # nmake: SETUP_TAS/FP activation; #328 hold
-    "comprehensive_ioctl_test",       # every IOCTL incl. SETUP_TAS/FP/PTM; #328 hold
-    "avb_i226_test",                  # nmake: SETUP_TAS/FP + WRITE_REGISTER; #328 hold
+    "avb_test_i226",                  # avb_test_um.c (default command); SETUP_TAS/FP/PTM-capable
+    "avb_test_i210",                  # avb_test_um.c as avb_test_i210_um.exe
+    "avb_test_project",               # nmake: avb_test_um.c as avb_test_i210.exe
+    "tsn_hardware_activation",        # nmake: SETUP_TAS/FP activation
+    "comprehensive_ioctl_test",       # every IOCTL incl. SETUP_TAS/FP/PTM
+    "avb_i226_test",                  # nmake: SETUP_TAS/FP + WRITE_REGISTER
     "avb_multi_adapter",              # nmake: WRITE_REGISTER + INIT_DEVICE per adapter
     "avb_i226_advanced",              # nmake: WRITE_REGISTER + INIT_DEVICE
     "chatgpt5_i226_tas",              # nmake: raw TAS register programming
@@ -652,33 +652,6 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 # exclusion for GitHub Actions is removed).  INIT_DEVICE re-initializes the targeted adapter's PTP block (I226:
 # SYSTIM := 1, TIMINCA rewritten; I219: TIMINCA rewritten), unbound-handle callers hit whichever adapter the previous
 # test opened, and the post-test state check does not detect a PHC time discontinuity.
-
-# #328 hazard annotations (Q 2026-11-03: retained as hazard descriptions, no longer a dispatch block - these entries
-# execute to expose and reproduce their real failures; the runner does not read this table at dispatch).
-# Key = registry key.  Removed only when the defect is hardware-verified fixed.
-$Hold328Tsn = '#328 SETUP_TAS/FP/PTM put the e2fn-owned I226 into TSN transmit mode without a restorable gate schedule, driver setup_tas defect, TQAVCTRL 0x00000009 read back 2026-10-22 13:44 before I226 send completions stopped and the next driver unload hung, investigations/issue-328-release-reinstall-hang-20261022.md; leaving TSN mode needs an adapter reset, held until the driver TAS/FP restore is fixed and hardware-verified'
-$HilHazardHolds = @{
-    'avb_test_portability'       = $Hold328Tsn
-    'avb_test_i217'              = $Hold328Tsn
-    'avb_test_i225'              = $Hold328Tsn
-    'avb_test_i226_um'           = $Hold328Tsn
-    'test_ioctl_tas'             = $Hold328Tsn
-    'test_tas_isolated_arm'      = $Hold328Tsn
-    'test_tas_isolated_arm --armed-period-ms 200' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 64' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 512' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 1400' = $Hold328Tsn
-    'test_ioctl_fp_ptm'          = $Hold328Tsn
-    'test_tsn_ioctl_handlers_um' = $Hold328Tsn
-    'test_tsn_ioctl_handlers'    = $Hold328Tsn
-    'tsn_ioctl_test'             = $Hold328Tsn
-    'avb_test_i226'              = $Hold328Tsn
-    'avb_test_i210'              = $Hold328Tsn
-    'avb_test_project'           = $Hold328Tsn
-    'tsn_hardware_activation'    = $Hold328Tsn
-    'comprehensive_ioctl_test'   = $Hold328Tsn
-    'avb_i226_test'              = $Hold328Tsn
-}
 
 $HilTestSafety = @{
     # --- ReadOnly ---
@@ -773,8 +746,8 @@ $HilTestSafety = @{
     'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
-    'test_tsn_ioctl_handlers'          = 'Mutating'   # same source as test_tsn_ioctl_handlers_um; hazard-held (#328 F23: stale 2026-04-08 binary issued SETUP_TAS/FP/PTM)
-    'tsn_ioctl_test'                   = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (tsn_ioctl_test.mak); hazard-held
+    'test_tsn_ioctl_handlers'          = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (#328 F23: stale 2026-04-08 binary issued SETUP_TAS/FP/PTM)
+    'tsn_ioctl_test'                   = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (tsn_ioctl_test.mak)
     'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
     'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
     'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE

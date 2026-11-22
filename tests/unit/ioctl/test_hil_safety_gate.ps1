@@ -115,26 +115,12 @@ tc_check 'TEST-HILGATE-002-registry-values-valid-no-stale-keys' (($registry.Coun
     ("invalid: {0}; stale (not in any Hardware list or coverage-gap table): {1}" -f ($badClass -join ', '), ($stale -join ', '))
 
 # The suite lists are authoritative (Q 2026-10-22): safety is enforced at DISPATCH, never by keeping a test out of a
-# list.  Runner gate + hazard holds, both from the runner AST.
+# list.  Runner gate from the runner AST; there is no hazard-hold table (Q 2026-11-22: a hold in the infrastructure
+# violates the no-blocked-tests rule, #328 needs reproduction, not containment).
 foreach ($n in 'Get-AvbHilGateDecision', 'Get-AvbHilEffectiveGaps') {
     $f = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
     if ($f) { . ([scriptblock]::Create($f.Extent.Text)) }
 }
-$holds = @{}
-$hAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                       $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
-function Get-AstStringValue($Node) {   # string literal, or a variable assigned a string literal in the runner
-    $s = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
-    if ($s) { return $s.Value }
-    $v = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
-    if (-not $v) { return '' }
-    $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                        $x.Left.VariablePath.UserPath -eq $v.VariablePath.UserPath }, $true) | Select-Object -First 1
-    if (-not $a) { return '' }
-    $s = $a.Right.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
-    if ($s) { return $s.Value } else { return '' }
-}
-if ($hAst) { foreach ($kv in $hAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $holds[$kv.Item1.Value] = Get-AstStringValue $kv.Item2 } }
 function Get-Cls([string]$e) { $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }; if ($registry.ContainsKey($k)) { return $registry[$k] }; return '' }
 function Get-Gate([string]$e, [string]$Target, [string]$Halt = '') {
     $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }
@@ -182,23 +168,21 @@ tc_check 'TEST-HILGATE-099-ownership-halt-blocks-every-non-readonly-class-alike-
     ($null -ne $gateCmd -and $gateInputs.Count -eq 0 -and $ownBad.Count -eq 0) `
     ("attendance/authorization inputs: [{0}]; decided against the rule: {1}" -f ($gateInputs -join ','), ($ownBad -join '; '))
 
-# 081: #328 hazard annotations (Q 2026-11-03): an entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM keeps its
-#      #328 record in $HilHazardHolds and stays listed, but the record no longer prohibits dispatch - the runner never
-#      reads the table at dispatch, and the gate runs the entry whatever its target or attendance.
+# 081: TSN configuration entries (Q 2026-11-22, replacing the 2026-11-03 #328 hazard annotations): an entry whose
+#      source can issue SETUP_TAS/SETUP_FP/SETUP_PTM stays listed and is dispatched whatever its target or attendance,
+#      and the runner keeps no hazard-hold table at all - #328 must be reproduced by these entries, never contained.
 $tsnEntries = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_tsn_ioctl_handlers_um', 'test_tsn_ioctl_handlers')
 $holdBad = @()
 foreach ($e in $tsnEntries) {
-    if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hazard record"; continue }
     if ($hwKeys0 -notcontains $e) { $holdBad += "${e}: no longer listed" }
     foreach ($tgt in '', '0x125B') {
         $d = Get-Gate $e $tgt
         if ($d.Action -ne 'Run') { $holdBad += "${e}: target='$tgt' -> $($d.Action) $($d.Reason)" }
     }
 }
-$holdReads = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) |
-               Where-Object { -not ($_.Parent -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Parent.Left -eq $_) })
-if ($holdReads.Count -gt 0) { $holdBad += "runner reads `$HilHazardHolds at line(s) $(@($holdReads | ForEach-Object { $_.Extent.StartLineNumber }) -join ',')" }
-tc_check 'TEST-HILGATE-081-hazard-annotated-entries-keep-their-328-record-and-are-dispatched' ($holdBad.Count -eq 0) ($holdBad -join '; ')
+$holdVars = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -match '^(HilHazardHolds|Hold\d+\w*)$' }, $true))
+if ($holdVars.Count -gt 0) { $holdBad += "runner keeps a hazard-hold table: $(@($holdVars | ForEach-Object { '$' + $_.VariablePath.UserPath + ' line ' + $_.Extent.StartLineNumber }) -join ', ')" }
+tc_check 'TEST-HILGATE-081-tsn-configuration-entries-are-listed-and-dispatched-with-no-hazard-hold-table' ($holdBad.Count -eq 0) ($holdBad -join '; ')
 
 # 080: a listed entry is executed (or gate-blocked with its reason) - never ALSO reported as a NOT EXECUTED coverage gap.
 $effBad = @()
@@ -243,8 +227,8 @@ $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_
               HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
 # Lists are authoritative (Q 2026-10-22): each entry is either a declared gap or listed and dispatched.  Since the static
 # dispatch blocks were removed (Q 2026-11-03) nothing contains the TSN configuration entries at dispatch: they execute
-# unattended (actual gate decision, no target, GitHub Actions) and keep their #328 hazard record only as documentation
-# (081) - it is no containment and the runner does not observe TAS/FP/PTM restoration.  test_ptp_freq_complete (I226
+# unattended (actual gate decision, no target, GitHub Actions) with no hazard hold (081, Q 2026-11-22); the runner does
+# not observe TAS/FP/PTM restoration, the tests' own cleanup verdicts do.  test_ptp_freq_complete (I226
 # TIMINCA CLEANUP_FAILED 2026-10-20) is exact-target with TIMINCA among the runner-verified states, so a repeat is an
 # observed cleanup FAILED, never hidden.
 $notGap = @()
@@ -253,10 +237,10 @@ foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) {
     $isGap = ($null -ne $gapTables[$s] -and $gapTables[$s].Contains($e))
     $listed = (@($hwLists["${s}Tests"]) | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } }) -contains $e
     $dispatched = (Get-Gate $e '').Action -eq 'Run'
-    $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) -and $holds[$e] -match '#328' }
+    $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $true }   # listed and dispatched suffice (no hold, 081)
     if (-not ($isGap -or ($listed -and $dispatched -and $accounted))) { $notGap += "${s}: $e (gap=$isGap listed=$listed dispatched=$dispatched accounted=$accounted)" }
 } }
-tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-dispatched-with-hazard-record-or-observed-restoration' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
+tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-dispatched-phc-with-observed-restoration' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
 
 # Coverage restored (Q 2026-10-22: repair, do not exclude).  test_ptp_phc_stability without arguments runs only
 # UT-CORR-007/008 (main(): run_009 needs --case UT-CORR-009 or --allow-lifecycle, both runner-controlled); the
@@ -421,15 +405,18 @@ tc_check 'TEST-HILGATE-005-target-aware-entries-select-the-exact-target' ($regis
 tc_check 'TEST-HILGATE-006-readonly-entries-contain-no-mutating-ioctl' ($registry.Count -gt 0 -and $bad006.Count -eq 0) ("mutating code in ReadOnly: {0}" -f ($bad006 -join ', '))
 tc_check 'TEST-HILGATE-007-init-entries-only-init' ($registry.Count -gt 0 -and $bad007.Count -eq 0) ("Init misclassified: {0}" -f ($bad007 -join ', '))
 tc_check 'TEST-HILGATE-008-mutating-entries-really-mutate' ($registry.Count -gt 0 -and $bad008.Count -eq 0) ("Mutating without mutating code: {0}" -f ($bad008 -join ', '))
-# 093: the #328 hold derived from the source, not from a fixed name list (081): every classified entry whose
-#      program can issue SETUP_TAS / SETUP_FP / SETUP_PTM carries the #328 hold, so a newly registered TSN
-#      configuration program cannot be dispatched before the TAS/FP restore defect is hardware-verified fixed.
-$tsnNoHold = @(foreach ($k in @($registry.Keys)) {
+# 093: derived from the source, not from a fixed name list (081), Q 2026-11-22: every classified entry whose program
+#      can issue SETUP_TAS / SETUP_FP / SETUP_PTM is dispatched by the gate (no target) - no hold, no block, so a newly
+#      registered TSN configuration program executes and reproduces #328 instead of hiding it.
+$tsnNotRun = @(foreach ($k in @($registry.Keys)) {
     if ($roExceptions.ContainsKey($k)) { continue }   # documented: the codes are data, never passed to DeviceIoControl
     $c = Get-StrippedSource (($k -split '\s+', 2)[0]) $false
-    if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b') -and -not ($holds.ContainsKey($k) -and $holds[$k] -match '#328')) { $k }
+    if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b')) {
+        $d = Get-AvbHilGateDecision -Entry $k -Class $registry[$k] -Target '' -Halt ''
+        if ($d.Action -ne 'Run') { "$k -> $($d.Action) $($d.Reason)" }
+    }
 })
-tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held' ($tsnNoHold.Count -eq 0) ("SETUP_TAS/FP/PTM in source without a #328 hold: {0}" -f ($tsnNoHold -join ', '))
+tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-dispatched-without-hold' ($tsnNotRun.Count -eq 0) ("SETUP_TAS/FP/PTM in source but not dispatched: {0}" -f ($tsnNotRun -join ', '))
 # 095: this test's own per-test timeout (Q 2026-10-29: test-specific, measured budget, no issue-level requirement; 750 s
 #      since #458 round 2: 484 s standalone + 48 %)
 #      is selected for this entry only - every other Unit entry keeps the suite timeout and the global Unit default

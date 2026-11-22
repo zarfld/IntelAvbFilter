@@ -92,13 +92,13 @@ $disabledListed = @($staticDisabled.Keys | Where-Object { $suiteEntries.Contains
 tc_check 'TEST-HILPROV-010-no-suite-entry-resolves-to-a-disabled-build-entry' ($staticDisabled.Count -gt 0 -and $disabledListed.Count -eq 0) `
     ("statically Disabled yet dispatchable: {0}" -f ($disabledListed -join '; '))
 # 011 (lists authoritative, Q 2026-10-22): the listed test_tsn_ioctl_handlers is classified (HILGATE-001) but never again
-# as a runnable class - #328 F23: as ReadOnly its stale binary issued SETUP_TAS/FP/PTM - and it is hazard-held at
-# dispatch; the UM variant stays Mutating.
-$hhLine = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1')), "(?m)^\s*'test_tsn_ioctl_handlers'\s*=\s*\`$Hold328Tsn")
-tc_check 'TEST-HILPROV-011-tsn-placeholder-never-runnable-class-hazard-held-um-variant-stays-mutating' `
-    (($registry.ContainsKey('test_tsn_ioctl_handlers') -and $registry['test_tsn_ioctl_handlers'] -notin @('ReadOnly', 'Init', 'Mutating:Target')) -and $hhLine.Success -and
+# as ReadOnly/Init/Mutating:Target - #328 F23: as ReadOnly its stale binary issued SETUP_TAS/FP/PTM; the UM variant stays
+# Mutating.  No hazard hold (Q 2026-11-22): the runner keeps no hold table, so a listed entry is never held at dispatch.
+$hhLine = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1')), '(?m)^\s*\$(HilHazardHolds|Hold\d+\w*)\s*=')
+tc_check 'TEST-HILPROV-011-tsn-placeholder-never-readonly-class-no-hazard-hold-um-variant-stays-mutating' `
+    (($registry.ContainsKey('test_tsn_ioctl_handlers') -and $registry['test_tsn_ioctl_handlers'] -notin @('ReadOnly', 'Init', 'Mutating:Target')) -and -not $hhLine.Success -and
      ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
-    ("registry: test_tsn_ioctl_handlers={0}; test_tsn_ioctl_handlers_um={1}" -f $(if ($registry.ContainsKey('test_tsn_ioctl_handlers')) { $registry['test_tsn_ioctl_handlers'] } else { '<absent>' }), $registry['test_tsn_ioctl_handlers_um'])
+    ("registry: test_tsn_ioctl_handlers={0}; test_tsn_ioctl_handlers_um={1}; hazard-hold table in the runner: {2}" -f $(if ($registry.ContainsKey('test_tsn_ioctl_handlers')) { $registry['test_tsn_ioctl_handlers'] } else { '<absent>' }), $registry['test_tsn_ioctl_handlers_um'], $(if ($hhLine.Success) { "present (line text '$($hhLine.Value.Trim())')" } else { 'absent' }))
 $self = 'ps1:tests/unit/ci/test_hil_binary_provenance.ps1'
 tc_check 'TEST-HILPROV-012-registered-in-hosted-unit-suite' (((Get-RunnerList 'UnitTests') -contains $self) -and (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\unit\ci\test_hil_binary_provenance.ps1'))) `
     "$self not listed in `$UnitTests"
