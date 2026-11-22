@@ -67,5 +67,6 @@ function Stop-AvbProcessTree {
     }
     $detail = "root pid $($Process.Id) $(if ($rootGone) { 'exited' } else { "still running after ${WaitSeconds}s" }); descendants: " +
               $(if ($tree.Count -eq 0) { 'none' } elseif ($alive.Count -eq 0) { "$($tree -join ',') terminated" } else { "STILL RUNNING $($alive -join ',')" })
-    return @{ Ok = ($rootGone -and $alive.Count -eq 0); Detail = $detail }
+    # Alive: the PIDs still running after the kill (root first) - current evidence of a live competing operation (#458).
+    return @{ Ok = ($rootGone -and $alive.Count -eq 0); Detail = $detail; Alive = @(@($(if (-not $rootGone) { $Process.Id })) + @($alive) | Where-Object { $_ }) }
 }

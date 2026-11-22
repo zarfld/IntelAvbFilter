@@ -152,7 +152,7 @@ if ($null -eq $gateFn) { tc_fail 'TEST-HILSUITE-000-gate-decision-available' 'Ge
 # The #328 hazard annotations ($HilHazardHolds) are no longer read at dispatch (Q 2026-11-03), so they are not part of
 # "gate-runnable".
 function Test-Runnable([string]$Entry, [string]$Class) {
-    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt '' -AuthorizedUnsafe @() -UnderGitHubActions $true
+    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt ''
     return ($d.Action -eq 'Run')
 }
 tc_pass 'TEST-HILSUITE-000-gate-decision-available'
