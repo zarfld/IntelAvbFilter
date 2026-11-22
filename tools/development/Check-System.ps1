@@ -1,5 +1,5 @@
 # Read-only system diagnostics.  Never starts a test program itself (TEST-HILPATH-009, 2026-10-29): it used to run
-# avb_test_i226.exe (avb_test_um.c, SETUP_TAS/FP/PTM-capable, #328 hold) as an incidental device check.
+# avb_test_i226.exe (avb_test_um.c, SETUP_TAS/FP/PTM-capable) as an incidental device check.
 #   -RunDeviceTest  run the registered ReadOnly test test_all_adapters through tools\test\Run-Tests-CI.ps1
 #                   (machine lock, provenance, safety gate, adapter baseline and state check apply).
 param([switch]$RunDeviceTest, [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug')
