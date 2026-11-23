@@ -431,11 +431,16 @@ function Install-Driver {
         
         Write-Host "  Installed: $($installedTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
         Write-Host "  Comparison (using newest: $($newestBuildFile.Name)):" -ForegroundColor DarkGray
-        
-        if ($buildTime -lt $installedTime) {
+        if ($ResultJson) {
+            # in CI it can happen that debug/release builds are a bit older depending on execution order of 'deploy-staging' matrix compared to HIL
+            if ($buildTime -lt $installedTime) {
+                Write-Host "    WARNING: Build is OLDER than installed version!" -ForegroundColor Yellow
+            }
+        } elseif ($buildTime -lt $installedTime) {
             Write-Host "    WARNING: Build is OLDER than installed version!" -ForegroundColor Yellow
             Write-Host "    You may be downgrading. Press Ctrl+C to cancel or Enter to continue..." -ForegroundColor Yellow
             Read-Host
+            #known issue: might leave remoteaccess disconnected until user attends machine to continue/cancel
         } elseif ($buildTime -eq $installedTime) {
             Write-Host "    Same version (timestamps match)" -ForegroundColor Cyan
         } else {
