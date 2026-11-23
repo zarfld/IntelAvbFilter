@@ -9,10 +9,12 @@
 #   - administers network adapters ONLY for the #510 quiescing (design A): immediately before netcfg -u it disables the
 #     adapters that are administratively enabled AND have an enabled MS_IntelAvbFilter binding (recorded first; adapters
 #     disabled beforehand are never touched; no name filter, no "all adapters" fallback), and after netcfg -l - or on
-#     ANY earlier exit - it re-enables every adapter a disable was sent for, then confirms each one from a fresh
-#     observation.  Every operation is bounded (Invoke-AvbAdapterAdminChange, the only code that may contain the
-#     adapter cmdlets; TEST-CIDEPLOY-016/016b).  One of these adapters can be the runner's management connection:
-#     the interruption is reported.  An unconfirmed restoration is never DEPLOYED (NEEDS_OPERATOR);
+#     ANY earlier exit, including an exception (finally) - it re-enables every adapter a disable was sent for, then
+#     confirms each one from a fresh observation AND from the helper's established completion.  Every operation is
+#     bounded (Invoke-AvbAdapterAdminChange, the only code that may contain the adapter cmdlets;
+#     TEST-CIDEPLOY-016/016b).  One of these adapters can be the runner's management connection: the interruption is
+#     reported.  An unconfirmed restoration, or a helper whose completion is not established (administrative work may
+#     still be running), is never DEPLOYED (NEEDS_OPERATOR);
 #   - every native step is bounded; a step that does not finish in time is LEFT RUNNING (killing netcfg while it
 #     holds the INetCfg write lock can corrupt the network configuration) and the machine is reported as needing
 #     the operator (exit 3); STOP_PENDING is never success;
@@ -133,7 +135,8 @@ function New-AvbRealSystem {
         }
         # @( @{ Name; Guid; AdminEnabled } ) of the visible network adapters (bounded); throws when not measurable.
         AdapterStates = { Get-AvbAdapterStates -TimeoutSeconds 60 }
-        # Bounded administrative change of one adapter (#510).  @{ Ok; Detail; ElapsedMs }
+        # Bounded administrative change of one adapter (#510).
+        # @{ Ok; Settled; Status; ExitCode; Pid; Disposition; Detail; ElapsedMs } (ConvertTo-AvbAdapterAdminResult)
         SetAdapterEnabled = { param([string]$Name, [bool]$Enabled, [int]$TimeoutSeconds) Invoke-AvbAdapterAdminChange -Name $Name -Enabled $Enabled -TimeoutSeconds $TimeoutSeconds }
     }
 }
@@ -480,24 +483,44 @@ try {
 'AVBADMIN:done'
 exit 0
 '@
-# @{ Ok; Detail; ElapsedMs }.  Ok = the cmdlet returned without error within the bound; the resulting state is
-# confirmed separately by the caller from a fresh Get-AvbAdapterStates observation.
+# Maps one Invoke-AvbBoundedPowerShell result of the administration helper to
+# @{ Ok; Settled; Status; ExitCode; Pid; Disposition; Detail; ElapsedMs }.
+#   Ok      = the cmdlet returned without error within the bound (the resulting state is confirmed separately by the
+#             caller from a fresh Get-AvbAdapterStates observation).
+#   Settled = no administrative work requested by this helper can still be in progress: the helper COMPLETED (exited,
+#             output collected) or never started.  A TIMEOUT is never settled, even when the helper was terminated:
+#             terminating it does not cancel work it requested elsewhere (see Invoke-AvbBoundedPowerShell).
+function ConvertTo-AvbAdapterAdminResult {
+    param($Helper, [bool]$Enabled)
+    $h = $Helper
+    $ok = ($h.status -eq 'COMPLETED' -and $h.exitCode -eq 0 -and ([string]$h.stdout) -match 'AVBADMIN:done')
+    $settled = (($h.status -eq 'COMPLETED') -or ($h.status -eq 'FAILED' -and $null -eq $h.pid))
+    $detail = "$(if ($Enabled) { 'enable' } else { 'disable' }) status=$($h.status) exit=$($h.exitCode) helper=$($h.disposition)$(if (-not $ok) { " err=$((([string]$h.stderr).Trim() + ' ' + $h.error).Trim())" })"
+    return @{ Ok = $ok; Settled = $settled; Status = $h.status; ExitCode = $h.exitCode; Pid = $h.pid; Disposition = $h.disposition; Detail = $detail; ElapsedMs = $h.elapsedMs }
+}
 function Invoke-AvbAdapterAdminChange {
     param([string]$Name, [bool]$Enabled, [int]$TimeoutSeconds)
     $prefix = "`$AvbName = '" + $Name.Replace("'", "''") + "'`n`$AvbEnable = `$" + $(if ($Enabled) { 'true' } else { 'false' }) + "`n"
     $h = Invoke-AvbBoundedPowerShell -Script ($prefix + $AvbHilAdapterAdminScript) -TimeoutSeconds $TimeoutSeconds
-    $ok = ($h.status -eq 'COMPLETED' -and $h.exitCode -eq 0 -and ([string]$h.stdout) -match 'AVBADMIN:done')
-    $detail = "$(if ($Enabled) { 'enable' } else { 'disable' }) status=$($h.status) exit=$($h.exitCode) helper=$($h.disposition)$(if (-not $ok) { " err=$((([string]$h.stderr).Trim() + ' ' + $h.error).Trim())" })"
-    return @{ Ok = $ok; Detail = $detail; ElapsedMs = $h.elapsedMs }
+    return (ConvertTo-AvbAdapterAdminResult -Helper $h -Enabled $Enabled)
+}
+# One disable/enable entry of the adapter record, keeping the structured helper evidence.
+function New-AvbAdapterAdminEntry {
+    param([string]$Name, $Result)
+    return [ordered]@{ name = $Name; ok = [bool]$Result['Ok']; settled = ($Result['Settled'] -eq $true); status = $Result['Status']
+                       disposition = $Result['Disposition']; detail = $Result['Detail']; elapsedMs = $Result['ElapsedMs'] }
 }
 
 # Records the targets (enabled MS_IntelAvbFilter binding AND administratively enabled), disables them sequentially and
 # confirms the disable.  Returns @{ Ok; Reason; Record; Sent } - Sent: every adapter a disable was sent for (restored
-# afterwards by Invoke-AvbAdapterRestore whatever the outcome).
+# afterwards by Invoke-AvbAdapterRestore whatever the outcome).  $Ctx.record / $Ctx.sent are written incrementally (the
+# record before the first change, each name BEFORE its disable is sent), so the caller can restore even when this
+# function throws.
 function Invoke-AvbAdapterQuiesce {
-    param([hashtable]$Sys, $Bindings, [int]$TimeoutSeconds)
+    param([hashtable]$Sys, $Bindings, [int]$TimeoutSeconds, [hashtable]$Ctx)
     $rec = [ordered]@{ targets = @(); skipped = @(); disable = @(); enable = @(); final = @(); restored = $null; error = '' }
     $out = @{ Ok = $false; Reason = ''; Record = $rec; Sent = @() }
+    $Ctx.record = $rec
     try { $states = @(& $Sys.AdapterStates) } catch { $rec.error = "adapter state query failed: $($_.Exception.Message)"; $out.Reason = $rec.error; return $out }
     foreach ($n in @($Bindings | Where-Object { $_.enabled } | ForEach-Object { [string]$_.name } | Select-Object -Unique)) {
         $a = @($states | Where-Object { $_.Name -eq $n }) | Select-Object -First 1
@@ -506,9 +529,9 @@ function Invoke-AvbAdapterQuiesce {
         $rec.targets += ,([ordered]@{ name = $n; guid = $a.Guid; originalAdminEnabled = $true })
     }
     foreach ($t in $rec.targets) {
-        $out.Sent += $t.name
+        $out.Sent += $t.name; $Ctx.sent = @($Ctx.sent) + $t.name
         $r = & $Sys.SetAdapterEnabled $t.name $false $TimeoutSeconds
-        $rec.disable += ,([ordered]@{ name = $t.name; ok = [bool]$r.Ok; detail = $r.Detail; elapsedMs = $r.ElapsedMs })
+        $rec.disable += ,(New-AvbAdapterAdminEntry -Name $t.name -Result $r)
         if (-not $r.Ok) { $out.Reason = "disable of adapter '$($t.name)' failed: $($r.Detail)"; return $out }
     }
     if ($rec.targets.Count -gt 0) {
@@ -520,29 +543,49 @@ function Invoke-AvbAdapterQuiesce {
     return $out
 }
 
-# Re-enables every adapter in $Sent (each attempt bounded, all attempted even after a failure) and confirms each one from
-# a fresh observation.  Sets $Record.enable/final/restored; returns '' or the restoration problem.
+# Re-enables every adapter in $Sent (each attempt bounded; all attempted even after one fails or throws) and confirms
+# each one.  Restored only when, for every adapter: the enable completed (Ok), every administration helper sent for it
+# (disable and enable) is settled, and a fresh observation shows it administratively enabled.  An instantaneous "Up"
+# never replaces an established helper completion (PR #511 review).  Sets $Record.enable/final/restored/error; returns ''
+# or the restoration problem.
 function Invoke-AvbAdapterRestore {
     param([hashtable]$Sys, $Record, [string[]]$Sent, [int]$TimeoutSeconds)
     foreach ($n in @($Sent)) {
-        $r = & $Sys.SetAdapterEnabled $n $true $TimeoutSeconds
-        $Record.enable += ,([ordered]@{ name = $n; ok = [bool]$r.Ok; detail = $r.Detail; elapsedMs = $r.ElapsedMs })
+        try { $r = & $Sys.SetAdapterEnabled $n $true $TimeoutSeconds }
+        catch { $r = @{ Ok = $false; Settled = $false; Status = 'EXCEPTION'; Disposition = 'unknown: the enable call threw'; Detail = "enable threw: $($_.Exception.Message)"; ElapsedMs = $null } }
+        $Record.enable += ,(New-AvbAdapterAdminEntry -Name $n -Result $r)
     }
-    try { $now = @(& $Sys.AdapterStates) } catch { $Record.restored = $false; $Record.error = "restoration not confirmed: adapter state query failed: $($_.Exception.Message)"; return $Record.error }
-    $Record.final = @(foreach ($n in @($Sent)) { $a = @($now | Where-Object { $_.Name -eq $n }) | Select-Object -First 1; [ordered]@{ name = $n; adminEnabled = $(if ($a) { [bool]$a.AdminEnabled } else { $null }) } })
-    $bad = @($Record.final | Where-Object { $_.adminEnabled -ne $true } | ForEach-Object { $_.name })
-    $Record.restored = ($bad.Count -eq 0)
-    if ($bad.Count -gt 0) { $Record.error = "adapter restoration not confirmed for $($bad -join ', ') (administratively enabled before the deployment)"; return $Record.error }
-    return ''
+    $problems = @()
+    $notDone = @(foreach ($n in @($Sent)) { $e = @($Record.enable | Where-Object { $_.name -eq $n }) | Select-Object -Last 1; if (-not ($e -and $e.ok)) { "$n ($(if ($e) { $e.detail } else { 'no enable result' }))" } })
+    if ($notDone.Count -gt 0) { $problems += "re-enable not completed for $($notDone -join '; ')" }
+    # A sent disable without a recorded result (the call threw) has no established completion either.
+    $unsettled = @(foreach ($n in @($Sent)) {
+        $d = @($Record.disable | Where-Object { $_.name -eq $n }); $e = @($Record.enable | Where-Object { $_.name -eq $n })
+        if ($d.Count -eq 0) { "$n (disable: no recorded result, completion unknown)" }
+        foreach ($x in @($d + $e) | Where-Object { $_.settled -ne $true }) { "$n ($($x.detail): administrative work may still be running)" } })
+    if ($unsettled.Count -gt 0) { $problems += "administration helper completion not established for $($unsettled -join '; ')" }
+    try {
+        $now = @(& $Sys.AdapterStates)
+        $Record.final = @(foreach ($n in @($Sent)) { $a = @($now | Where-Object { $_.Name -eq $n }) | Select-Object -First 1; [ordered]@{ name = $n; adminEnabled = $(if ($a) { [bool]$a.AdminEnabled } else { $null }) } })
+        $bad = @($Record.final | Where-Object { $_.adminEnabled -ne $true } | ForEach-Object { $_.name })
+        if ($bad.Count -gt 0) { $problems += "adapter restoration not confirmed for $($bad -join ', ') (administratively enabled before the deployment)" }
+    } catch { $problems += "restoration not confirmed: adapter state query failed: $($_.Exception.Message)" }
+    $Record.restored = ($problems.Count -eq 0)
+    $Record.error = ($problems -join ' | ')
+    return $Record.error
 }
 
 function Invoke-AvbCiDriverDeployment {
     param([hashtable]$Sys, [string]$PackageDir, [string]$ExpectedSysSha256, [int]$StepTimeoutSeconds = 180, [int]$CopyAttempts = 10,
           [int]$AdapterTimeoutSeconds = 60)
-    $res = [ordered]@{ outcome = $null; exitCode = $null; reason = ''; steps = @(); preState = $null; postState = $null; managementRisk = ''; adapters = $null }
-    # sent: adapters a disable was sent for (#510); while any is outstanding the post-failure state is taken only after
-    # the restoration (deferPost), so machine_ok judges the restored machine.
-    $ctx = @{ sent = @(); deferPost = $false }
+    # exception: an exception that ended the deployment block (the original error); restoreError: the adapter
+    # restoration problem (the cleanup error) - kept apart, never merged into one another.
+    $res = [ordered]@{ outcome = $null; exitCode = $null; reason = ''; steps = @(); preState = $null; postState = $null; managementRisk = ''; adapters = $null
+                       exception = $null; restoreError = '' }
+    # sent: adapters a disable was sent for (#510), written by Invoke-AvbAdapterQuiesce before each disable; record: its
+    # adapter record.  While any is outstanding the post-failure state is taken only after the restoration (deferPost), so
+    # machine_ok judges the restored machine.
+    $ctx = @{ sent = @(); deferPost = $false; record = $null }
     $step = { param([string]$Name, [bool]$Ok, [string]$Detail) $res.steps += ,([ordered]@{ step = $Name; ok = $Ok; detail = $Detail }) }
     $finish = { param([string]$Outcome, [string]$Reason)
         $res.outcome = $Outcome; $res.reason = $Reason
@@ -586,8 +629,8 @@ function Invoke-AvbCiDriverDeployment {
         if ($res.preState.service -ne 'NOT_FOUND' -or @($res.preState.bindings).Count -gt 0) {
             # #510 design A: quiesce the recorded adapters immediately before netcfg -u.
             $ctx.deferPost = $true
-            $q = Invoke-AvbAdapterQuiesce -Sys $Sys -Bindings $res.preState.bindings -TimeoutSeconds $AdapterTimeoutSeconds
-            $res.adapters = $q.Record; $ctx.sent = @($q.Sent)
+            $q = Invoke-AvbAdapterQuiesce -Sys $Sys -Bindings $res.preState.bindings -TimeoutSeconds $AdapterTimeoutSeconds -Ctx $ctx
+            $res.adapters = $q.Record
             & $step 'adapter-quiesce' $q.Ok ("targets=[{0}] skipped=[{1}]{2}" -f (@($q.Record.targets | ForEach-Object { $_.name }) -join ', '), (@($q.Record.skipped | ForEach-Object { "$($_.name): $($_.reason)" }) -join '; '), $(if ($q.Ok) { '' } else { " | $($q.Reason)" }))
             if (-not $q.Ok) { return (& $finish 'FAILED' "adapter quiescing before netcfg -u failed ($($q.Reason)); nothing uninstalled") }
             $u = & $Sys.Invoke 'netcfg.exe' @('-u', 'MS_IntelAvbFilter') $StepTimeoutSeconds ''
@@ -631,16 +674,28 @@ function Invoke-AvbCiDriverDeployment {
         if (-not $l.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -l did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
         if ($l.ExitCode -ne 0) { return (& $finish 'FAILED' "netcfg -l failed with rc $($l.ExitCode): $($l.Output)") }
     }
-    $null = & $core
-
-    # #510: re-enable every adapter a disable was sent for - after netcfg -l, or after any earlier exit of the block -
-    # and confirm each one.  No adapter operation happens after this point.
+    # #510: re-enable every adapter a disable was sent for - after netcfg -l, after any earlier exit of the block, and
+    # after an exception thrown inside it (finally) - and confirm each one.  No adapter operation happens after this.
     $restoreProblem = ''
-    if (@($ctx.sent).Count -gt 0) {
-        $restoreProblem = Invoke-AvbAdapterRestore -Sys $Sys -Record $res.adapters -Sent $ctx.sent -TimeoutSeconds $AdapterTimeoutSeconds
-        & $step 'adapter-restore' ([bool]$res.adapters.restored) $(if ($restoreProblem) { $restoreProblem } else { "re-enabled and confirmed: $(@($ctx.sent) -join ', ')" })
+    $coreError = $null
+    try { $null = & $core }
+    catch { $coreError = $_ }
+    finally {
+        if (@($ctx.sent).Count -gt 0) {
+            if ($null -eq $res.adapters) { $res.adapters = $ctx.record }
+            try { $restoreProblem = Invoke-AvbAdapterRestore -Sys $Sys -Record $res.adapters -Sent $ctx.sent -TimeoutSeconds $AdapterTimeoutSeconds }
+            catch { $restoreProblem = "adapter restoration threw: $($_.Exception.Message)"; $res.adapters.restored = $false; $res.adapters.error = $restoreProblem }
+            $res.restoreError = $restoreProblem
+            & $step 'adapter-restore' ([bool]$res.adapters.restored) $(if ($restoreProblem) { $restoreProblem } else { "re-enabled and confirmed: $(@($ctx.sent) -join ', ')" })
+        }
     }
     $ctx.deferPost = $false
+    if ($null -ne $coreError) {
+        # Same outcome the caller gives a thrown deployment (FAILED), now with the evidence and after the restoration.
+        $res.exception = "$($coreError.Exception.GetType().FullName): $($coreError.Exception.Message) $(([string]$coreError.InvocationInfo.PositionMessage -split "`r?`n")[0])".Trim()
+        & $step 'exception' $false $res.exception
+        $null = & $finish 'FAILED' "deployment threw inside the quiesce/uninstall/install block (see steps for how far it got): $($coreError.Exception.Message)"
+    }
     if ($null -ne $res.outcome) {
         # The block already decided a failure; an unconfirmed restoration makes it an operator case.
         if ($res.outcome -eq 'FAILED' -and $null -eq $res.postState) {

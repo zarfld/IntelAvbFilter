@@ -108,7 +108,12 @@ function New-FakeSys([hashtable]$S) {
     #     Adapters (@(@{Name;Guid;AdminEnabled}); default: one administratively enabled adapter per initial binding),
     #     DisableFails / EnableFails (names whose administrative change is reported failed),
     #     EnableNoEffect (names whose enable is reported done but leaves the adapter disabled: unconfirmed restoration)
+    #     DisableThrows / EnableThrows (names whose administrative call throws before any state change),
+    #     DisableUnsettled / EnableUnsettled (names whose change takes effect but whose helper reports TIMEOUT with
+    #     unconfirmed termination: administrative work may still be running), ManifestCopyThrows (the ETW manifest copy
+    #     throws).  $S['State'] exposes the fake's own adapter state (an oracle independent of the library's record).
     $st = @{ Service = $S.Service; Bindings = @($S.Bindings); InstalledSha = $S.InstalledSha; Copies = 0; ImageSha = $S.InstalledSha }
+    $S['State'] = $st
     $st.Adapters = @(if ($S['Adapters']) { $S['Adapters'] | ForEach-Object { @{ Name = $_.Name; Guid = $_.Guid; AdminEnabled = [bool]$_.AdminEnabled } } }
                      else { $S.Bindings | ForEach-Object { @{ Name = $_; Guid = "{$_}"; AdminEnabled = $true } } })
     $log = $S.Log; $drivers = Join-Path $Tmp ('drv_' + (Get-Random)); New-Item -ItemType Directory -Path $drivers -Force | Out-Null
@@ -127,6 +132,7 @@ function New-FakeSys([hashtable]$S) {
         PendingRenames = { @($S.Pending) }.GetNewClosure()
         FileHash = { param($Path) if ($Path -like '*\drv_*\IntelAvbFilter.sys') { $st.InstalledSha } elseif (Test-Path -LiteralPath $Path) { (Get-FileHash -LiteralPath $Path).Hash } else { $null } }.GetNewClosure()
         CopyFile = { param($Source, $Destination) $log.Add("copy $([IO.Path]::GetFileName($Source))")
+            if ($Destination -like '*IntelAvbFilter.man' -and $S['ManifestCopyThrows']) { throw 'scripted manifest copy failure' }
             if ($Destination -like '*IntelAvbFilter.sys') { $st.Copies++; if ($st.Copies -le $S.LockedCopies) { throw 'file in use' }; $st.InstalledSha = (Get-FileHash -LiteralPath $Source).Hash } }.GetNewClosure()
         TestPath = { param($Path) if ($Path -like '*\drv_*\IntelAvbFilter.man') { $st.Service -ne 'NOT_FOUND' } else { Test-Path -LiteralPath $Path } }.GetNewClosure()
         Sleep = { param($s) }
@@ -136,11 +142,18 @@ function New-FakeSys([hashtable]$S) {
         ServiceImage = { if ($S['ImageUnobservable']) { return @{ Path = $null; Sha256 = $null; Error = 'ImagePath not readable (scripted)' } }
             return @{ Path = 'C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_fake\IntelAvbFilter.sys'; Sha256 = $st.ImageSha; Error = $null } }.GetNewClosure()
         SetAdapterEnabled = { param($Name, $Enabled, $TimeoutSeconds)
-            $log.Add(('{0} {1}' -f $(if ($Enabled) { 'enable' } else { 'disable' }), $Name))
+            $verb = if ($Enabled) { 'enable' } else { 'disable' }
+            $log.Add(('{0} {1}' -f $verb, $Name))
+            $throws = if ($Enabled) { @($S['EnableThrows']) } else { @($S['DisableThrows']) }
+            if ($throws -contains $Name) { throw "scripted exception from the $verb call for $Name" }
             $fails = if ($Enabled) { @($S['EnableFails']) } else { @($S['DisableFails']) }
-            if ($fails -contains $Name) { return @{ Ok = $false; Detail = 'scripted failure'; ElapsedMs = 1 } }
+            if ($fails -contains $Name) { return @{ Ok = $false; Settled = $true; Status = 'COMPLETED'; ExitCode = 2; Pid = 4242; Disposition = 'exited'; Detail = 'scripted failure'; ElapsedMs = 1 } }
             if (-not ($Enabled -and @($S['EnableNoEffect']) -contains $Name)) { foreach ($a in $st.Adapters) { if ($a.Name -eq $Name) { $a.AdminEnabled = [bool]$Enabled } } }
-            return @{ Ok = $true; Detail = 'done'; ElapsedMs = 1 } }.GetNewClosure()
+            $unsettled = if ($Enabled) { @($S['EnableUnsettled']) } else { @($S['DisableUnsettled']) }
+            if ($unsettled -contains $Name) {
+                return @{ Ok = $false; Settled = $false; Status = 'TIMEOUT'; ExitCode = $null; Pid = 4242; Disposition = 'termination unconfirmed after 5s (helper PID 4242 may still be running)'
+                          Detail = "$verb status=TIMEOUT exit= helper=termination unconfirmed after 5s (helper PID 4242 may still be running) (scripted)"; ElapsedMs = 60000 } }
+            return @{ Ok = $true; Settled = $true; Status = 'COMPLETED'; ExitCode = 0; Pid = 4242; Disposition = 'exited'; Detail = 'done'; ElapsedMs = 1 } }.GetNewClosure()
     }
 }
 function Invoke-Deploy([hashtable]$Over = @{}, $Pkg = $pOk) {
@@ -149,8 +162,12 @@ function Invoke-Deploy([hashtable]$Over = @{}, $Pkg = $pOk) {
             UninstallResult = @{ Completed = $true; ExitCode = 0; Service = 'NOT_FOUND' }; InstallResult = @{ Completed = $true; ExitCode = 0; Service = 'RUNNING' }
             LockedCopies = 0; ImRc = 0; GpRc = 0; Log = $log }
     foreach ($k in $Over.Keys) { $S[$k] = $Over[$k] }
-    $r = Invoke-AvbCiDriverDeployment -Sys (New-FakeSys $S) -PackageDir $Pkg.Dir -ExpectedSysSha256 $Pkg.Sha -StepTimeoutSeconds 4 -CopyAttempts 3
-    return @{ R = $r; Log = @($log) }
+    # An exception escaping the deployment is recorded as outcome THREW (so one regression cannot abort the whole file).
+    try { $r = Invoke-AvbCiDriverDeployment -Sys (New-FakeSys $S) -PackageDir $Pkg.Dir -ExpectedSysSha256 $Pkg.Sha -StepTimeoutSeconds 4 -CopyAttempts 3 }
+    catch { $r = [ordered]@{ outcome = 'THREW'; exitCode = $null; reason = "deployment threw: $($_.Exception.Message)"; steps = @(); preState = $null; postState = $null
+                             managementRisk = ''; adapters = [ordered]@{ targets = @(); disable = @(); enable = @(); final = @(); restored = $null; error = '' }; exception = $null; restoreError = $null } }
+    $phys = @(if ($S['State']) { $S['State'].Adapters | ForEach-Object { '{0}={1}' -f $_.Name, $(if ($_.AdminEnabled) { 'up' } else { 'down' }) } })
+    return @{ R = $r; Log = @($log); Phys = $phys }
 }
 function Show-D($d) { return ("{0} exit={1} reason={2} | calls: {3}" -f $d.R.outcome, $d.R.exitCode, $d.R.reason, ($d.Log -join ' ; ')) }
 
@@ -240,6 +257,82 @@ tc_check 'TEST-CIDEPLOY-078-a-service-image-other-than-the-staged-package-is-nev
 $dImgU = Invoke-Deploy @{ ImageUnobservable = $true }
 tc_check 'TEST-CIDEPLOY-079-an-unobservable-service-image-is-never-deployed' `
     (($dImgU.R.outcome -eq 'FAILED') -and ($dImgU.R.reason -match '(?i)service image') -and (@($dImgU.R.steps | Where-Object { $_.step -eq 'service-image' -and -not $_.ok }).Count -eq 1)) (Show-D $dImgU)
+
+# PR #511 review (P1): restoration must survive exceptions, and a helper whose completion is not established must never
+# count as restored.  Offline orchestration only; these paths are hardware-UNVERIFIED.
+function Get-EnableLog($d) { return (@($d.Log | Where-Object { $_ -match '^enable ' }) -join ',') }
+function Get-Entry($list, [string]$Name) { return (@($list | Where-Object { $_['name'] -eq $Name }) | Select-Object -First 1) }
+function Show-R($d) { return ("{0} | phys: {1} | exception: {2} | restoreError: {3}" -f (Show-D $d), ($d.Phys -join ','), $d.R['exception'], $d.R['restoreError']) }
+$twoUpQ = @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp }
+function Join-Over([hashtable]$A, [hashtable]$B) { $o = @{}; foreach ($k in $A.Keys) { $o[$k] = $A[$k] }; foreach ($k in $B.Keys) { $o[$k] = $B[$k] }; return $o }
+
+$dX = Invoke-Deploy (Join-Over $twoUpQ @{ ManifestCopyThrows = $true })
+tc_preds 'TEST-CIDEPLOY-080-an-exception-after-quiescing-still-re-enables-every-adapter-and-keeps-the-original-error' ([ordered]@{
+    'outcome FAILED (as the caller reports a thrown deployment)' = @(($dX.R.outcome -eq 'FAILED' -and $dX.R.exitCode -eq 1), "$($dX.R.outcome)/$($dX.R.exitCode)")
+    'both adapters re-enabled after the failing manifest copy'    = @(((Get-EnableLog $dX) -eq 'enable Ethernet I226,enable Ethernet Mgmt' -and (Get-LogIndex $dX '^enable ') -gt (Get-LogIndex $dX '^copy IntelAvbFilter\.man')), (Get-EnableLog $dX))
+    'fake adapters are up again'                                  = @((($dX.Phys -join ',') -eq 'Ethernet I226=up,Ethernet Mgmt=up'), ($dX.Phys -join ','))
+    'restoration confirmed, no restoration error'                 = @(($dX.R.adapters['restored'] -eq $true -and -not $dX.R['restoreError']), "$($dX.R.adapters['restored']) / $($dX.R['restoreError'])")
+    'original exception preserved'                                = @(([string]$dX.R['exception'] -match 'scripted manifest copy failure'), $dX.R['exception'])
+    'nothing installed after the exception'                       = @((@($dX.Log | Where-Object { $_ -match '^netcfg\.exe -l' }).Count -eq 0), (Show-D $dX))
+    'post-failure state recorded after the restoration'           = @(($null -ne $dX.R.postState), $dX.R.postState) })
+
+$dXq = Invoke-Deploy (Join-Over $twoUpQ @{ DisableThrows = @('Ethernet Mgmt') })
+tc_preds 'TEST-CIDEPLOY-081-an-exception-inside-quiescing-keeps-every-sent-disable-and-re-enables-it' ([ordered]@{
+    'no uninstall'                                       = @((@($dXq.Log | Where-Object { $_ -match '^netcfg' }).Count -eq 0), (Show-D $dXq))
+    'record kept with both targets'                      = @((@($dXq.R.adapters['targets']).Count -eq 2), @($dXq.R.adapters['targets']).Count)
+    're-enable attempted for both sent disables'         = @(((Get-EnableLog $dXq) -eq 'enable Ethernet I226,enable Ethernet Mgmt'), (Get-EnableLog $dXq))
+    'fake adapters are up again'                         = @((($dXq.Phys -join ',') -eq 'Ethernet I226=up,Ethernet Mgmt=up'), ($dXq.Phys -join ','))
+    'disable completion unknown -> NEEDS_OPERATOR'       = @(($dXq.R.outcome -eq 'NEEDS_OPERATOR' -and $dXq.R.exitCode -eq 3 -and $dXq.R.adapters['restored'] -eq $false), "$($dXq.R.outcome)/$($dXq.R.adapters['restored'])")
+    'original exception preserved'                       = @(([string]$dXq.R['exception'] -match 'scripted exception from the disable call'), $dXq.R['exception'])
+    'restoration error names the adapter'                = @(([string]$dXq.R['restoreError'] -match 'Ethernet Mgmt'), $dXq.R['restoreError']) })
+
+$dXe = Invoke-Deploy (Join-Over $twoUpQ @{ EnableThrows = @('Ethernet I226') })
+tc_preds 'TEST-CIDEPLOY-082-a-throwing-re-enable-does-not-stop-the-remaining-restorations' ([ordered]@{
+    'the next adapter is still re-enabled'            = @(((Get-EnableLog $dXe) -eq 'enable Ethernet I226,enable Ethernet Mgmt'), (Get-EnableLog $dXe))
+    'fake: Mgmt up, I226 still down'                  = @((($dXe.Phys -join ',') -eq 'Ethernet I226=down,Ethernet Mgmt=up'), ($dXe.Phys -join ','))
+    'NEEDS_OPERATOR, never DEPLOYED'                  = @(($dXe.R.outcome -eq 'NEEDS_OPERATOR' -and $dXe.R.exitCode -eq 3 -and $dXe.R.adapters['restored'] -eq $false), "$($dXe.R.outcome)/$($dXe.R.adapters['restored'])")
+    'enable record: thrown call is not settled'       = @(((Get-Entry $dXe.R.adapters['enable'] 'Ethernet I226') -ne $null -and (Get-Entry $dXe.R.adapters['enable'] 'Ethernet I226')['settled'] -eq $false), (Show-R $dXe))
+    'restoration error names the adapter'             = @(([string]$dXe.R['restoreError'] -match 'Ethernet I226'), $dXe.R['restoreError'])
+    'adapter-restore step reported failed'            = @((@($dXe.R.steps | Where-Object { $_.step -eq 'adapter-restore' -and -not $_.ok }).Count -eq 1), (Show-D $dXe)) })
+
+$dX2 = Invoke-Deploy (Join-Over $twoUpQ @{ ManifestCopyThrows = $true; EnableFails = @('Ethernet Mgmt') })
+tc_preds 'TEST-CIDEPLOY-083-the-original-error-and-the-restoration-error-are-kept-separately' ([ordered]@{
+    'NEEDS_OPERATOR'                          = @(($dX2.R.outcome -eq 'NEEDS_OPERATOR' -and $dX2.R.exitCode -eq 3), "$($dX2.R.outcome)/$($dX2.R.exitCode)")
+    'exception = only the original error'     = @(([string]$dX2.R['exception'] -match 'scripted manifest copy failure' -and [string]$dX2.R['exception'] -notmatch 'Ethernet Mgmt'), $dX2.R['exception'])
+    'restoreError = only the cleanup error'   = @(([string]$dX2.R['restoreError'] -match 'Ethernet Mgmt' -and [string]$dX2.R['restoreError'] -notmatch 'manifest'), $dX2.R['restoreError'])
+    'adapter record error = cleanup error'    = @(([string]$dX2.R.adapters['error'] -match 'Ethernet Mgmt'), $dX2.R.adapters['error']) })
+
+$dU = Invoke-Deploy (Join-Over $twoUpQ @{ EnableUnsettled = @('Ethernet Mgmt') })
+$uE = Get-Entry $dU.R.adapters['enable'] 'Ethernet Mgmt'; $uF = Get-Entry $dU.R.adapters['final'] 'Ethernet Mgmt'
+tc_preds 'TEST-CIDEPLOY-084-an-enable-helper-timeout-with-unconfirmed-termination-is-not-restored-even-when-the-adapter-reads-up' ([ordered]@{
+    'precondition: the adapter reads Up (unlike TEST-076)'   = @((($dU.Phys -join ',') -eq 'Ethernet I226=up,Ethernet Mgmt=up' -and $null -ne $uF -and $uF['adminEnabled'] -eq $true), "$($dU.Phys -join ',') / final $($uF | Out-String)")
+    'NEEDS_OPERATOR, never DEPLOYED'                         = @(($dU.R.outcome -eq 'NEEDS_OPERATOR' -and $dU.R.exitCode -eq 3), "$($dU.R.outcome)/$($dU.R.exitCode)")
+    'restored false'                                         = @(($dU.R.adapters['restored'] -eq $false), $dU.R.adapters['restored'])
+    'helper evidence kept (TIMEOUT, unconfirmed, unsettled)' = @(($null -ne $uE -and $uE['status'] -eq 'TIMEOUT' -and [string]$uE['disposition'] -match 'unconfirmed' -and $uE['settled'] -eq $false), (Show-R $dU))
+    'restoration error names adapter and open helper'        = @(([string]$dU.R['restoreError'] -match 'Ethernet Mgmt' -and [string]$dU.R['restoreError'] -match '(?i)may still'), $dU.R['restoreError']) })
+
+$dUd = Invoke-Deploy (Join-Over $twoUpQ @{ DisableUnsettled = @('Ethernet Mgmt') })
+tc_preds 'TEST-CIDEPLOY-085-an-unsettled-disable-helper-keeps-needs-operator-after-a-completed-re-enable' ([ordered]@{
+    'no uninstall'                         = @((@($dUd.Log | Where-Object { $_ -match '^netcfg' }).Count -eq 0), (Show-D $dUd))
+    'both re-enabled, fake reads Up'       = @(((Get-EnableLog $dUd) -eq 'enable Ethernet I226,enable Ethernet Mgmt' -and ($dUd.Phys -join ',') -eq 'Ethernet I226=up,Ethernet Mgmt=up'), "$(Get-EnableLog $dUd) / $($dUd.Phys -join ',')")
+    'NEEDS_OPERATOR, restored false'       = @(($dUd.R.outcome -eq 'NEEDS_OPERATOR' -and $dUd.R.exitCode -eq 3 -and $dUd.R.adapters['restored'] -eq $false), "$($dUd.R.outcome)/$($dUd.R.adapters['restored'])")
+    'disable record kept unsettled'        = @(((Get-Entry $dUd.R.adapters['disable'] 'Ethernet Mgmt') -ne $null -and (Get-Entry $dUd.R.adapters['disable'] 'Ethernet Mgmt')['settled'] -eq $false), (Show-R $dUd)) })
+
+# The real helper-result mapping (the fake above bypasses it): only a helper that COMPLETED, or never started, is settled.
+$mapCases = [ordered]@{
+    'completed ok'            = @(@{ status = 'COMPLETED'; exitCode = 0; stdout = "AVBADMIN:done`n"; stderr = ''; pid = 11; disposition = 'exited'; elapsedMs = 5; error = $null }, $true, $true)
+    'completed cmdlet error'  = @(@{ status = 'COMPLETED'; exitCode = 2; stdout = ''; stderr = 'access denied'; pid = 11; disposition = 'exited'; elapsedMs = 5; error = $null }, $false, $true)
+    'timeout terminated'      = @(@{ status = 'TIMEOUT'; exitCode = $null; stdout = ''; stderr = ''; pid = 11; disposition = 'terminated'; elapsedMs = 60000; error = $null }, $false, $false)
+    'timeout unconfirmed'     = @(@{ status = 'TIMEOUT'; exitCode = $null; stdout = ''; stderr = ''; pid = 11; disposition = 'termination unconfirmed after 5s (helper PID 11 may still be running)'; elapsedMs = 65000; error = $null }, $false, $false)
+    'exited, output pending'  = @(@{ status = 'TIMEOUT'; exitCode = 0; stdout = ''; stderr = ''; pid = 11; disposition = 'exited'; elapsedMs = 60000; error = 'helper output not collected within 60s' }, $false, $false)
+    'never started'           = @(@{ status = 'FAILED'; exitCode = $null; stdout = ''; stderr = ''; pid = $null; disposition = 'not started'; elapsedMs = 1; error = 'helper could not be run: x' }, $false, $true)
+    'failed after start'      = @(@{ status = 'FAILED'; exitCode = $null; stdout = ''; stderr = ''; pid = 11; disposition = 'not started'; elapsedMs = 1; error = 'helper could not be run: y' }, $false, $false)
+}
+$mapBad = @(foreach ($k in $mapCases.Keys) {
+    try { $m = ConvertTo-AvbAdapterAdminResult -Helper $mapCases[$k][0] -Enabled $true
+          if (($m['Ok'] -ne $mapCases[$k][1]) -or ($m['Settled'] -ne $mapCases[$k][2]) -or ($m['Status'] -ne $mapCases[$k][0].status) -or ($m['Disposition'] -ne $mapCases[$k][0].disposition)) { "$k (Ok=$($m['Ok']) Settled=$($m['Settled']) Status=$($m['Status']))" } }
+    catch { "$k (threw: $($_.Exception.Message))" } })
+tc_check 'TEST-CIDEPLOY-086-helper-results-are-settled-only-when-the-helper-completed-or-never-started' ($mapBad.Count -eq 0) ("wrong: " + ($mapBad -join '; '))
 
 tc_check 'TEST-CIDEPLOY-077-management-adapter-is-quiesced-and-the-risk-names-it' `
     ((@($dQ.R.adapters.targets | Where-Object { $_.name -eq 'Ethernet Mgmt' }).Count -eq 1) -and ($dQ.R.managementRisk -match "management adapter 'Ethernet Mgmt'") -and ($dQ.R.managementRisk -match '(?i)disabled')) $dQ.R.managementRisk
