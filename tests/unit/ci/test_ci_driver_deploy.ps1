@@ -105,14 +105,19 @@ tc_check 'TEST-CIDEPLOY-005-missing-pinned-certificate-fails-closed' ((-not $pin
 function New-FakeSys([hashtable]$S) {
     # $S: Service, Bindings (names), InstalledSha, Pending, Mgmt, UninstallResult(@{Completed;ExitCode;Service}),
     #     InstallResult(@{Completed;ExitCode;Service}), LockedCopies, ImRc, GpRc, Log (List)
-    $st = @{ Service = $S.Service; Bindings = @($S.Bindings); InstalledSha = $S.InstalledSha; Copies = 0 }
+    #     Adapters (@(@{Name;Guid;AdminEnabled}); default: one administratively enabled adapter per initial binding),
+    #     DisableFails / EnableFails (names whose administrative change is reported failed),
+    #     EnableNoEffect (names whose enable is reported done but leaves the adapter disabled: unconfirmed restoration)
+    $st = @{ Service = $S.Service; Bindings = @($S.Bindings); InstalledSha = $S.InstalledSha; Copies = 0; ImageSha = $S.InstalledSha }
+    $st.Adapters = @(if ($S['Adapters']) { $S['Adapters'] | ForEach-Object { @{ Name = $_.Name; Guid = $_.Guid; AdminEnabled = [bool]$_.AdminEnabled } } }
+                     else { $S.Bindings | ForEach-Object { @{ Name = $_; Guid = "{$_}"; AdminEnabled = $true } } })
     $log = $S.Log; $drivers = Join-Path $Tmp ('drv_' + (Get-Random)); New-Item -ItemType Directory -Path $drivers -Force | Out-Null
     return @{
         DriversDir = $drivers
         Invoke = { param($File, $Arguments, $TimeoutSeconds, $WorkDir)
             $log.Add("$File $($Arguments -join ' ')")
             if ($File -eq 'netcfg.exe' -and $Arguments[0] -eq '-u') { $r = $S.UninstallResult; if ($r.Completed) { $st.Service = $r.Service; if ($r.ExitCode -eq 0) { $st.Bindings = @() } }; return @{ Completed = $r.Completed; ExitCode = $r.ExitCode; Output = '' } }
-            if ($File -eq 'netcfg.exe' -and $Arguments[0] -eq '-l') { $r = $S.InstallResult; if ($r.Completed -and $r.ExitCode -eq 0) { $st.Service = $r.Service; $st.Bindings = @('Ethernet I226', 'Ethernet Mgmt') }; return @{ Completed = $r.Completed; ExitCode = $r.ExitCode; Output = '' } }
+            if ($File -eq 'netcfg.exe' -and $Arguments[0] -eq '-l') { $r = $S.InstallResult; if ($r.Completed -and $r.ExitCode -eq 0) { $st.Service = $r.Service; $st.Bindings = @('Ethernet I226', 'Ethernet Mgmt'); $st.ImageSha = $(if ($S['SelectedImageSha']) { $S['SelectedImageSha'] } else { $st.InstalledSha }) }; return @{ Completed = $r.Completed; ExitCode = $r.ExitCode; Output = '' } }
             if ($File -eq 'wevtutil.exe' -and $Arguments[0] -eq 'im') { return @{ Completed = $true; ExitCode = $S.ImRc; Output = '' } }
             if ($File -eq 'wevtutil.exe' -and $Arguments[0] -eq 'gp') { return @{ Completed = $true; ExitCode = $S.GpRc; Output = '' } }
             return @{ Completed = $true; ExitCode = 0; Output = '' } }.GetNewClosure()
@@ -125,6 +130,17 @@ function New-FakeSys([hashtable]$S) {
             if ($Destination -like '*IntelAvbFilter.sys') { $st.Copies++; if ($st.Copies -le $S.LockedCopies) { throw 'file in use' }; $st.InstalledSha = (Get-FileHash -LiteralPath $Source).Hash } }.GetNewClosure()
         TestPath = { param($Path) if ($Path -like '*\drv_*\IntelAvbFilter.man') { $st.Service -ne 'NOT_FOUND' } else { Test-Path -LiteralPath $Path } }.GetNewClosure()
         Sleep = { param($s) }
+        AdapterStates = { @($st.Adapters | ForEach-Object { @{ Name = $_.Name; Guid = $_.Guid; AdminEnabled = $_.AdminEnabled } }) }.GetNewClosure()
+        # Service ImagePath file (#510 identity postcondition): the staged image after netcfg -l, unless SelectedImageSha
+        # scripts another store package being selected, or ImageUnobservable makes it unmeasurable.
+        ServiceImage = { if ($S['ImageUnobservable']) { return @{ Path = $null; Sha256 = $null; Error = 'ImagePath not readable (scripted)' } }
+            return @{ Path = 'C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_fake\IntelAvbFilter.sys'; Sha256 = $st.ImageSha; Error = $null } }.GetNewClosure()
+        SetAdapterEnabled = { param($Name, $Enabled, $TimeoutSeconds)
+            $log.Add(('{0} {1}' -f $(if ($Enabled) { 'enable' } else { 'disable' }), $Name))
+            $fails = if ($Enabled) { @($S['EnableFails']) } else { @($S['DisableFails']) }
+            if ($fails -contains $Name) { return @{ Ok = $false; Detail = 'scripted failure'; ElapsedMs = 1 } }
+            if (-not ($Enabled -and @($S['EnableNoEffect']) -contains $Name)) { foreach ($a in $st.Adapters) { if ($a.Name -eq $Name) { $a.AdminEnabled = [bool]$Enabled } } }
+            return @{ Ok = $true; Detail = 'done'; ElapsedMs = 1 } }.GetNewClosure()
     }
 }
 function Invoke-Deploy([hashtable]$Over = @{}, $Pkg = $pOk) {
@@ -170,6 +186,63 @@ tc_check 'TEST-CIDEPLOY-014-success-requires-running-identity-and-etw-and-a-bad-
      ($dBadPkg.R.outcome -eq 'FAILED') -and ($dBadPkg.Log.Count -eq 0)) ("stopped={0} | etw={1} | badpkg={2}" -f (Show-D $dNoRun), (Show-D $dEtw), (Show-D $dBadPkg))
 $dMgmt = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt') }
 tc_check 'TEST-CIDEPLOY-015-management-connection-risk-is-reported' (($dMgmt.R.managementRisk -match "management adapter 'Ethernet Mgmt' is bound") -and ($dMgmt.R.outcome -eq 'DEPLOYED')) $dMgmt.R.managementRisk
+
+# #510 design A: adapter quiescing before netcfg -u (offline orchestration only; hardware evidence is separate).
+function Get-LogIndex($d, [string]$Pattern) { for ($i = 0; $i -lt $d.Log.Count; $i++) { if ($d.Log[$i] -match $Pattern) { return $i } }; return -1 }
+function Get-LogLastIndex($d, [string]$Pattern) { $k = -1; for ($i = 0; $i -lt $d.Log.Count; $i++) { if ($d.Log[$i] -match $Pattern) { $k = $i } }; return $k }
+$twoUp = @(@{ Name = 'Ethernet I226'; Guid = '{a}'; AdminEnabled = $true }, @{ Name = 'Ethernet Mgmt'; Guid = '{m}'; AdminEnabled = $true })
+$dQ = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp }
+$iU = Get-LogIndex $dQ '^netcfg\.exe -u'; $iL = Get-LogIndex $dQ '^netcfg\.exe -l'
+$dis = @($dQ.Log | Where-Object { $_ -match '^disable ' }); $ena = @($dQ.Log | Where-Object { $_ -match '^enable ' })
+tc_check 'TEST-CIDEPLOY-070-bound-enabled-adapters-are-disabled-before-uninstall-and-re-enabled-after-install-with-confirmed-restoration' `
+    (($dQ.R.outcome -eq 'DEPLOYED') -and (($dis -join ',') -eq 'disable Ethernet I226,disable Ethernet Mgmt') -and (($ena -join ',') -eq 'enable Ethernet I226,enable Ethernet Mgmt') -and
+     ((Get-LogLastIndex $dQ '^disable ') -lt $iU) -and ((Get-LogIndex $dQ '^enable ') -gt $iL) -and ($null -ne $dQ.R.adapters) -and ($dQ.R.adapters.restored -eq $true) -and
+     (@($dQ.R.adapters.targets).Count -eq 2) -and (@($dQ.R.adapters.targets | Where-Object { $_.originalAdminEnabled -ne $true }).Count -eq 0) -and
+     (@($dQ.R.steps | Where-Object { $_.step -eq 'adapter-quiesce' -and $_.ok }).Count -eq 1) -and (@($dQ.R.steps | Where-Object { $_.step -eq 'adapter-restore' -and $_.ok }).Count -eq 1)) (Show-D $dQ)
+
+$mixed = @(@{ Name = 'Ethernet I226'; Guid = '{a}'; AdminEnabled = $true }, @{ Name = 'Ethernet Off'; Guid = '{o}'; AdminEnabled = $false }, @{ Name = 'Ethernet Unbound'; Guid = '{u}'; AdminEnabled = $true })
+$dMix = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Off'); Adapters = $mixed }
+tc_check 'TEST-CIDEPLOY-071-previously-disabled-and-unbound-adapters-are-never-touched' `
+    (($dMix.R.outcome -eq 'DEPLOYED') -and (@($dMix.Log | Where-Object { $_ -match '^(disable|enable) Ethernet (Off|Unbound)$' }).Count -eq 0) -and
+     (@($dMix.Log | Where-Object { $_ -match '^(disable|enable) Ethernet I226$' }).Count -eq 2) -and (@($dMix.R.adapters.targets).Count -eq 1)) (Show-D $dMix)
+
+$dNone = Invoke-Deploy @{ Service = 'NOT_FOUND'; Bindings = @(); InstalledSha = $null }
+tc_check 'TEST-CIDEPLOY-072-no-adapter-change-when-there-is-nothing-to-uninstall' `
+    (($dNone.R.outcome -eq 'DEPLOYED') -and (@($dNone.Log | Where-Object { $_ -match '^(disable|enable) ' }).Count -eq 0)) (Show-D $dNone)
+
+$dDisF = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp; DisableFails = @('Ethernet Mgmt') }
+$dDisF2 = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp; DisableFails = @('Ethernet Mgmt'); EnableFails = @('Ethernet I226') }
+tc_check 'TEST-CIDEPLOY-073-failed-disable-starts-no-uninstall-and-re-enables-what-was-disabled' `
+    (($dDisF.R.outcome -eq 'FAILED') -and (@($dDisF.Log | Where-Object { $_ -match '^netcfg' }).Count -eq 0) -and ($dDisF.Log -contains 'enable Ethernet I226') -and
+     ($dDisF.R.adapters.restored -eq $true) -and ($dDisF.R.reason -match 'Ethernet Mgmt') -and
+     ($dDisF2.R.outcome -eq 'NEEDS_OPERATOR') -and (@($dDisF2.Log | Where-Object { $_ -match '^netcfg' }).Count -eq 0) -and ($dDisF2.R.adapters.restored -eq $false) -and ($dDisF2.R.reason -match 'Ethernet I226')) `
+    ("disable-fail={0} | plus enable-fail={1}" -f (Show-D $dDisF), (Show-D $dDisF2))
+
+$dQHang = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp; UninstallResult = @{ Completed = $false; ExitCode = $null; Service = 'RUNNING' } }
+tc_check 'TEST-CIDEPLOY-074-uninstall-left-running-still-attempts-every-re-enable-and-stays-needs-operator' `
+    (($dQHang.R.outcome -eq 'NEEDS_OPERATOR') -and ($dQHang.R.reason -match 'left running') -and (@($dQHang.Log | Where-Object { $_ -match '^copy|^netcfg\.exe -l' }).Count -eq 0) -and
+     ((@($dQHang.Log | Where-Object { $_ -match '^enable ' }) -join ',') -eq 'enable Ethernet I226,enable Ethernet Mgmt') -and ((Get-LogIndex $dQHang '^enable ') -gt (Get-LogIndex $dQHang '^netcfg\.exe -u'))) (Show-D $dQHang)
+
+$dQInst = Invoke-Deploy @{ Bindings = @('Ethernet I226'); InstallResult = @{ Completed = $true; ExitCode = 1; Service = 'NOT_FOUND' } }
+tc_check 'TEST-CIDEPLOY-075-failed-installation-re-enables-adapters-and-records-the-post-restore-state' `
+    (($dQInst.R.outcome -eq 'FAILED') -and ($dQInst.Log -contains 'enable Ethernet I226') -and ($dQInst.R.adapters.restored -eq $true) -and ($null -ne $dQInst.R.postState) -and
+     ((Get-LogIndex $dQInst '^enable ') -gt (Get-LogIndex $dQInst '^netcfg\.exe -l'))) (Show-D $dQInst)
+
+$dNoRest = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt'); Adapters = $twoUp; EnableNoEffect = @('Ethernet Mgmt') }
+tc_check 'TEST-CIDEPLOY-076-unconfirmed-restoration-is-never-deployed' `
+    (($dNoRest.R.outcome -eq 'NEEDS_OPERATOR') -and ($dNoRest.R.exitCode -eq 3) -and ($dNoRest.R.adapters.restored -eq $false) -and ($dNoRest.R.reason -match 'Ethernet Mgmt') -and
+     (@($dNoRest.R.steps | Where-Object { $_.step -eq 'adapter-restore' -and -not $_.ok }).Count -eq 1)) (Show-D $dNoRest)
+
+$dSel = Invoke-Deploy @{ SelectedImageSha = ('9' * 64) }
+tc_check 'TEST-CIDEPLOY-078-a-service-image-other-than-the-staged-package-is-never-deployed' `
+    (($dSel.R.outcome -eq 'FAILED') -and ($dSel.R.reason -match 'ImagePath') -and ($dSel.R.reason -match ('9' * 64)) -and ($dSel.R.postState.serviceImageSha256 -eq ('9' * 64)) -and
+     (@($dSel.R.steps | Where-Object { $_.step -eq 'service-image' -and -not $_.ok }).Count -eq 1) -and ($dQ.R.postState.serviceImageSha256 -eq $pOk.Sha)) (Show-D $dSel)
+$dImgU = Invoke-Deploy @{ ImageUnobservable = $true }
+tc_check 'TEST-CIDEPLOY-079-an-unobservable-service-image-is-never-deployed' `
+    (($dImgU.R.outcome -eq 'FAILED') -and ($dImgU.R.reason -match '(?i)service image') -and (@($dImgU.R.steps | Where-Object { $_.step -eq 'service-image' -and -not $_.ok }).Count -eq 1)) (Show-D $dImgU)
+
+tc_check 'TEST-CIDEPLOY-077-management-adapter-is-quiesced-and-the-risk-names-it' `
+    ((@($dQ.R.adapters.targets | Where-Object { $_.name -eq 'Ethernet Mgmt' }).Count -eq 1) -and ($dQ.R.managementRisk -match "management adapter 'Ethernet Mgmt'") -and ($dQ.R.managementRisk -match '(?i)disabled')) $dQ.R.managementRisk
 
 # Process-termination policy for the unattended deployment library (AST, not text).  Violations:
 #   - Stop-Process / kill / spps, taskkill, tskill, wmic, and Invoke-CimMethod/Invoke-WmiMethod with Terminate;
@@ -222,15 +295,73 @@ function Test-AvbTerminationPolicy {
     return $v   # callers collect with @(...)
 }
 
+# Adapter-administration policy for the unattended deployment library (#510 design A, AST/tokens, not text).  The only
+# permitted Disable-NetAdapter / Enable-NetAdapter text is inside the ONE single-quoted here-string assigned to
+# $AvbHilAdapterAdminScript, and that variable is read only inside Invoke-AvbAdapterAdminChange (the bounded helper the
+# deployment calls for the recorded adapters).  Violations:
+#   - a non-comment token containing Disable-NetAdapter / Enable-NetAdapter outside that here-string;
+#   - none or more than one assignment of $AvbHilAdapterAdminScript, or one whose value is not a single-quoted here-string;
+#   - a read of $AvbHilAdapterAdminScript outside Invoke-AvbAdapterAdminChange.
+# Returns @{ Violations; AllowedExtent } (AllowedExtent: the here-string assignment's text, excluded from the text scan).
+function Test-AvbAdapterAdminPolicy {
+    param([string]$Source)
+    $tok = $null; $perr = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tok, [ref]$perr)
+    if (@($perr).Count -gt 0) { return @{ Violations = @("unparseable source: $(@($perr)[0].Message)"); AllowedExtent = $null } }
+    $v = @(); $allowed = $null
+    $assigns = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                                 $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.Left.VariablePath.UserPath -ieq 'AvbHilAdapterAdminScript' }, $true))
+    if ($assigns.Count -ne 1) { $v += "expected exactly one assignment of `$AvbHilAdapterAdminScript, found $($assigns.Count)" }
+    else {
+        $rhs = $assigns[0].Right
+        if ($rhs -is [System.Management.Automation.Language.CommandExpressionAst]) { $rhs = $rhs.Expression }
+        if ($rhs -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $rhs.StringConstantType -ne 'SingleQuotedHereString') {
+            $v += "line $($assigns[0].Extent.StartLineNumber): `$AvbHilAdapterAdminScript is not a single-quoted here-string"
+        } else { $allowed = $assigns[0].Extent }
+    }
+    foreach ($t in @($tok)) {
+        if ($t.Kind -eq 'Comment') { continue }
+        if ($t.Text -notmatch '(?i)(Disable|Enable)-NetAdapter') { continue }
+        if ($null -ne $allowed -and $t.Extent.StartOffset -ge $allowed.StartOffset -and $t.Extent.EndOffset -le $allowed.EndOffset) { continue }
+        $v += "line $($t.Extent.StartLineNumber): adapter administration outside `$AvbHilAdapterAdminScript"
+    }
+    foreach ($r in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -ieq 'AvbHilAdapterAdminScript' }, $true)) {
+        if ($assigns.Count -ge 1 -and $r.Parent -eq $assigns[0]) { continue }
+        $fn = $r.Parent; while ($null -ne $fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+        if ($null -eq $fn -or $fn.Name -ne 'Invoke-AvbAdapterAdminChange') { $v += "line $($r.Extent.StartLineNumber): `$AvbHilAdapterAdminScript read outside Invoke-AvbAdapterAdminChange" }
+    }
+    return @{ Violations = $v; AllowedExtent = $allowed }
+}
+
 $dd = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\lib\DriverDeploy.ps1'))
-$code = ($dd -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+$adminPol = if (Get-Command Test-AvbAdapterAdminPolicy -ErrorAction SilentlyContinue) { Test-AvbAdapterAdminPolicy -Source $dd } else { @{ Violations = @('Test-AvbAdapterAdminPolicy missing'); AllowedExtent = $null } }
+# The text scan covers everything except the one permitted here-string (whose content Test-AvbAdapterAdminPolicy pins).
+$ddScan = if ($null -ne $adminPol.AllowedExtent) { $dd.Remove($adminPol.AllowedExtent.StartOffset, $adminPol.AllowedExtent.EndOffset - $adminPol.AllowedExtent.StartOffset) } else { $dd }
+$code = ($ddScan -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
 # Process termination is checked STRUCTURALLY (Test-AvbTerminationPolicy below): netcfg, installers and unrelated
 # processes are never terminated; the only permitted termination is the read-only query helper that
 # Invoke-AvbBoundedPowerShell itself started (PR #494 review r4641317470, Q 2026-11-20).
 $forbiddenText = [regex]::Matches($code, '(?i)Read-Host|Restart-Computer|shutdown|Disable-NetAdapter|Enable-NetAdapter|DriverStore|Restart-Service|Stop-Service|PendingFileRenameOperations"\s*-Value|Set-ItemProperty') | ForEach-Object { $_.Value }
 $termViol = @(if (Get-Command Test-AvbTerminationPolicy -ErrorAction SilentlyContinue) { Test-AvbTerminationPolicy -Source $dd } else { 'Test-AvbTerminationPolicy missing' })
-tc_check 'TEST-CIDEPLOY-016-unattended-path-never-prompts-reboots-disables-adapters-deletes-driverstore-or-restarts-eventlog' `
-    (@($forbiddenText).Count -eq 0 -and $termViol.Count -eq 0) ("forbidden operation found in tools/lib/DriverDeploy.ps1: text=[{0}] termination=[{1}]" -f (@($forbiddenText) -join ', '), ($termViol -join '; '))
+tc_check 'TEST-CIDEPLOY-016-unattended-path-never-prompts-reboots-deletes-driverstore-or-restarts-eventlog-and-administers-adapters-only-in-the-510-helper' `
+    (@($forbiddenText).Count -eq 0 -and $termViol.Count -eq 0 -and @($adminPol.Violations).Count -eq 0) `
+    ("forbidden operation found in tools/lib/DriverDeploy.ps1: text=[{0}] termination=[{1}] adapter-admin=[{2}]" -f (@($forbiddenText) -join ', '), ($termViol -join '; '), (@($adminPol.Violations) -join '; '))
+
+# Negative and positive controls for the adapter-administration policy itself (#510).
+$adminOk = "`$AvbHilAdapterAdminScript = @'`nparam(`$n, `$e) if (`$e) { Enable-NetAdapter -Name `$n -Confirm:`$false } else { Disable-NetAdapter -Name `$n -Confirm:`$false }`n'@`n" +
+           "function Invoke-AvbAdapterAdminChange { `$s = `$AvbHilAdapterAdminScript; `$s }"
+$adminCases = [ordered]@{
+    'cmdlet called directly in a function'      = "$adminOk`nfunction Invoke-Other { Disable-NetAdapter -Name x -Confirm:`$false }"
+    'cmdlet hidden in another string'           = "$adminOk`n`$other = 'Enable-NetAdapter -Name x'"
+    'second assignment of the script variable'  = "$adminOk`n`$AvbHilAdapterAdminScript = 'Disable-NetAdapter'"
+    'script variable read outside the helper'   = "$adminOk`nfunction Invoke-Other { & ([scriptblock]::Create(`$AvbHilAdapterAdminScript)) }"
+    'script variable is a double-quoted string' = "`$AvbHilAdapterAdminScript = `"Disable-NetAdapter`"`nfunction Invoke-AvbAdapterAdminChange { `$AvbHilAdapterAdminScript }"
+}
+$adminBad = @()
+$okRes = Test-AvbAdapterAdminPolicy -Source $adminOk
+if (@($okRes.Violations).Count -ne 0) { $adminBad += "compliant source rejected: $(@($okRes.Violations) -join '; ')" }
+foreach ($k in $adminCases.Keys) { if (@((Test-AvbAdapterAdminPolicy -Source $adminCases[$k]).Violations).Count -eq 0) { $adminBad += "not rejected: $k" } }
+tc_check 'TEST-CIDEPLOY-016b-adapter-administration-policy-accepts-only-the-single-helper-script' ($adminBad.Count -eq 0) ($adminBad -join '; ')
 
 # Negative and positive controls for the termination policy itself: it must reject termination outside the helper,
 # of a different process, of a reassigned variable, through an expression, by name, or dynamically - and accept the

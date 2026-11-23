@@ -5,13 +5,20 @@
 # manifest registration / netcfg -l ... -c s -i MS_IntelAvbFilter).  This mode differs only where unattended
 # operation requires it:
 #   - never prompts, never reboots, never schedules a reboot-time file replacement (PendingFileRenameOperations);
-#   - never disables/enables network adapters (one of them can be the runner's management connection), never
-#     deletes DriverStore directories, never restarts the EventLog service;
+#   - never deletes DriverStore directories, never restarts the EventLog service;
+#   - administers network adapters ONLY for the #510 quiescing (design A): immediately before netcfg -u it disables the
+#     adapters that are administratively enabled AND have an enabled MS_IntelAvbFilter binding (recorded first; adapters
+#     disabled beforehand are never touched; no name filter, no "all adapters" fallback), and after netcfg -l - or on
+#     ANY earlier exit - it re-enables every adapter a disable was sent for, then confirms each one from a fresh
+#     observation.  Every operation is bounded (Invoke-AvbAdapterAdminChange, the only code that may contain the
+#     adapter cmdlets; TEST-CIDEPLOY-016/016b).  One of these adapters can be the runner's management connection:
+#     the interruption is reported.  An unconfirmed restoration is never DEPLOYED (NEEDS_OPERATOR);
 #   - every native step is bounded; a step that does not finish in time is LEFT RUNNING (killing netcfg while it
 #     holds the INetCfg write lock can corrupt the network configuration) and the machine is reported as needing
 #     the operator (exit 3); STOP_PENDING is never success;
 #   - pre-state and post-state are recorded; success requires service RUNNING, the filter bound, the installed .sys
-#     equal to the staged SHA256 and the ETW provider registered.
+#     AND the service ImagePath file (the image the service loads; netcfg -l may select another DriverStore package,
+#     #510) equal to the staged SHA256 and the ETW provider registered.
 # Outcomes / exit codes: DEPLOYED 0 | FAILED 1 (infrastructure failure, machine usable) | NEEDS_OPERATOR 3 (reboot or
 # manual inspection required; the record stays as the incident, and a later deployment proceeds only after
 # Invoke-AvbHilReconciliation establishes from CURRENT observations that the machine has recovered, #493).
@@ -115,6 +122,19 @@ function New-AvbRealSystem {
         CopyFile = { param([string]$Source, [string]$Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop }
         TestPath = { param([string]$Path) Test-Path -LiteralPath $Path }
         Sleep    = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
+        # File the service actually loads (#510 identity postcondition): netcfg -l can select another DriverStore package
+        # (highest DriverVer) than the staged one, so System32\drivers alone is not the identity.  @{ Path; Sha256; Error }
+        ServiceImage = {
+            try {
+                $ip = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter' -Name ImagePath -ErrorAction Stop).ImagePath
+                $f = ConvertTo-AvbServiceImageFile -ImagePath $ip
+                return @{ Path = $f; Sha256 = (Get-FileHash -LiteralPath $f -Algorithm SHA256 -ErrorAction Stop).Hash; Error = $null }
+            } catch { return @{ Path = $null; Sha256 = $null; Error = $_.Exception.Message } }
+        }
+        # @( @{ Name; Guid; AdminEnabled } ) of the visible network adapters (bounded); throws when not measurable.
+        AdapterStates = { Get-AvbAdapterStates -TimeoutSeconds 60 }
+        # Bounded administrative change of one adapter (#510).  @{ Ok; Detail; ElapsedMs }
+        SetAdapterEnabled = { param([string]$Name, [bool]$Enabled, [int]$TimeoutSeconds) Invoke-AvbAdapterAdminChange -Name $Name -Enabled $Enabled -TimeoutSeconds $TimeoutSeconds }
     }
 }
 
@@ -135,8 +155,10 @@ function Get-AvbDeployState {
     $sysPath = Join-Path $Sys.DriversDir 'IntelAvbFilter.sys'
     $mgmt = & $Sys.ManagementAdapter
     $b = @(& $Sys.Bindings)
+    $img = if ($Sys.ContainsKey('ServiceImage')) { & $Sys.ServiceImage } else { @{ Path = $null; Sha256 = $null; Error = 'service image probe not available' } }
     return [ordered]@{
         service = (& $Sys.ServiceState); installedSysSha256 = (& $Sys.FileHash $sysPath)
+        serviceImagePath = $img.Path; serviceImageSha256 = $img.Sha256; serviceImageError = $img.Error
         bindings = @($b | ForEach-Object { [ordered]@{ name = $_.Name; enabled = $_.Enabled } })
         pendingRenames = @(& $Sys.PendingRenames); managementAdapter = $mgmt
         managementAdapterBound = [bool](@($b | Where-Object { $_.Name -eq $mgmt -and $_.Enabled }).Count)
@@ -424,15 +446,109 @@ function Invoke-AvbHilReconciliation {
     return $rec
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# #510 design A: adapter quiescing around the filter replacement (see the header).  Read-only state query and the one
+# permitted administrative change both run through Invoke-AvbBoundedPowerShell (bounded, nothing but the helper's own
+# process is ever terminated).
+# ---------------------------------------------------------------------------------------------------------
+$AvbHilAdapterStateScript = @'
+$ErrorActionPreference = 'Stop'
+try { $a = @(Get-NetAdapter -ErrorAction Stop | ForEach-Object { [ordered]@{ name = [string]$_.Name; guid = [string]$_.InterfaceGuid; adminEnabled = ([string]$_.AdminStatus -eq 'Up') } }) }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
+'AVBADAPT:' + (ConvertTo-Json -InputObject @($a) -Compress -Depth 3)
+exit 0
+'@
+# @( @{ Name; Guid; AdminEnabled } ); throws when the adapters cannot be measured (never an empty "clean" answer).
+function Get-AvbAdapterStates {
+    param([int]$TimeoutSeconds = 60)
+    $h = Invoke-AvbBoundedPowerShell -Script $AvbHilAdapterStateScript -TimeoutSeconds $TimeoutSeconds
+    if ($h.status -ne 'COMPLETED' -or $h.exitCode -ne 0) {
+        throw "adapter state query $($h.status) (exit $($h.exitCode), helper PID $($h.pid) $($h.disposition)): $(([string]$h.stderr).Trim()) $($h.error)"
+    }
+    $line = @(([string]$h.stdout) -split "`r?`n" | Where-Object { $_ -match '^AVBADAPT:' }) | Select-Object -Last 1
+    if (-not $line) { throw 'adapter state query produced no AVBADAPT line' }
+    return @(ConvertFrom-Json -InputObject $line.Substring(9) | ForEach-Object { $_ } | ForEach-Object { @{ Name = [string]$_.name; Guid = [string]$_.guid; AdminEnabled = [bool]$_.adminEnabled } })
+}
+
+# The ONLY code in this library that may contain the adapter cmdlets (TEST-CIDEPLOY-016b).  $AvbName / $AvbEnable are
+# prepended by Invoke-AvbAdapterAdminChange.
+$AvbHilAdapterAdminScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ($AvbEnable) { Enable-NetAdapter -Name $AvbName -Confirm:$false -ErrorAction Stop } else { Disable-NetAdapter -Name $AvbName -Confirm:$false -ErrorAction Stop }
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
+'AVBADMIN:done'
+exit 0
+'@
+# @{ Ok; Detail; ElapsedMs }.  Ok = the cmdlet returned without error within the bound; the resulting state is
+# confirmed separately by the caller from a fresh Get-AvbAdapterStates observation.
+function Invoke-AvbAdapterAdminChange {
+    param([string]$Name, [bool]$Enabled, [int]$TimeoutSeconds)
+    $prefix = "`$AvbName = '" + $Name.Replace("'", "''") + "'`n`$AvbEnable = `$" + $(if ($Enabled) { 'true' } else { 'false' }) + "`n"
+    $h = Invoke-AvbBoundedPowerShell -Script ($prefix + $AvbHilAdapterAdminScript) -TimeoutSeconds $TimeoutSeconds
+    $ok = ($h.status -eq 'COMPLETED' -and $h.exitCode -eq 0 -and ([string]$h.stdout) -match 'AVBADMIN:done')
+    $detail = "$(if ($Enabled) { 'enable' } else { 'disable' }) status=$($h.status) exit=$($h.exitCode) helper=$($h.disposition)$(if (-not $ok) { " err=$((([string]$h.stderr).Trim() + ' ' + $h.error).Trim())" })"
+    return @{ Ok = $ok; Detail = $detail; ElapsedMs = $h.elapsedMs }
+}
+
+# Records the targets (enabled MS_IntelAvbFilter binding AND administratively enabled), disables them sequentially and
+# confirms the disable.  Returns @{ Ok; Reason; Record; Sent } - Sent: every adapter a disable was sent for (restored
+# afterwards by Invoke-AvbAdapterRestore whatever the outcome).
+function Invoke-AvbAdapterQuiesce {
+    param([hashtable]$Sys, $Bindings, [int]$TimeoutSeconds)
+    $rec = [ordered]@{ targets = @(); skipped = @(); disable = @(); enable = @(); final = @(); restored = $null; error = '' }
+    $out = @{ Ok = $false; Reason = ''; Record = $rec; Sent = @() }
+    try { $states = @(& $Sys.AdapterStates) } catch { $rec.error = "adapter state query failed: $($_.Exception.Message)"; $out.Reason = $rec.error; return $out }
+    foreach ($n in @($Bindings | Where-Object { $_.enabled } | ForEach-Object { [string]$_.name } | Select-Object -Unique)) {
+        $a = @($states | Where-Object { $_.Name -eq $n }) | Select-Object -First 1
+        if ($null -eq $a) { $rec.skipped += ,([ordered]@{ name = $n; reason = 'bound, but no visible adapter of that name: not administered' }); continue }
+        if (-not $a.AdminEnabled) { $rec.skipped += ,([ordered]@{ name = $n; reason = 'administratively disabled before the deployment: left untouched' }); continue }
+        $rec.targets += ,([ordered]@{ name = $n; guid = $a.Guid; originalAdminEnabled = $true })
+    }
+    foreach ($t in $rec.targets) {
+        $out.Sent += $t.name
+        $r = & $Sys.SetAdapterEnabled $t.name $false $TimeoutSeconds
+        $rec.disable += ,([ordered]@{ name = $t.name; ok = [bool]$r.Ok; detail = $r.Detail; elapsedMs = $r.ElapsedMs })
+        if (-not $r.Ok) { $out.Reason = "disable of adapter '$($t.name)' failed: $($r.Detail)"; return $out }
+    }
+    if ($rec.targets.Count -gt 0) {
+        try { $now = @(& $Sys.AdapterStates) } catch { $out.Reason = "disable not confirmed: adapter state query failed: $($_.Exception.Message)"; return $out }
+        $still = @($rec.targets | Where-Object { $n = $_.name; @($now | Where-Object { $_.Name -eq $n -and -not $_.AdminEnabled }).Count -eq 0 } | ForEach-Object { $_.name })
+        if ($still.Count -gt 0) { $out.Reason = "disable not confirmed for adapter(s) $($still -join ', ')"; return $out }
+    }
+    $out.Ok = $true
+    return $out
+}
+
+# Re-enables every adapter in $Sent (each attempt bounded, all attempted even after a failure) and confirms each one from
+# a fresh observation.  Sets $Record.enable/final/restored; returns '' or the restoration problem.
+function Invoke-AvbAdapterRestore {
+    param([hashtable]$Sys, $Record, [string[]]$Sent, [int]$TimeoutSeconds)
+    foreach ($n in @($Sent)) {
+        $r = & $Sys.SetAdapterEnabled $n $true $TimeoutSeconds
+        $Record.enable += ,([ordered]@{ name = $n; ok = [bool]$r.Ok; detail = $r.Detail; elapsedMs = $r.ElapsedMs })
+    }
+    try { $now = @(& $Sys.AdapterStates) } catch { $Record.restored = $false; $Record.error = "restoration not confirmed: adapter state query failed: $($_.Exception.Message)"; return $Record.error }
+    $Record.final = @(foreach ($n in @($Sent)) { $a = @($now | Where-Object { $_.Name -eq $n }) | Select-Object -First 1; [ordered]@{ name = $n; adminEnabled = $(if ($a) { [bool]$a.AdminEnabled } else { $null }) } })
+    $bad = @($Record.final | Where-Object { $_.adminEnabled -ne $true } | ForEach-Object { $_.name })
+    $Record.restored = ($bad.Count -eq 0)
+    if ($bad.Count -gt 0) { $Record.error = "adapter restoration not confirmed for $($bad -join ', ') (administratively enabled before the deployment)"; return $Record.error }
+    return ''
+}
+
 function Invoke-AvbCiDriverDeployment {
-    param([hashtable]$Sys, [string]$PackageDir, [string]$ExpectedSysSha256, [int]$StepTimeoutSeconds = 180, [int]$CopyAttempts = 10)
-    $res = [ordered]@{ outcome = $null; exitCode = $null; reason = ''; steps = @(); preState = $null; postState = $null; managementRisk = '' }
+    param([hashtable]$Sys, [string]$PackageDir, [string]$ExpectedSysSha256, [int]$StepTimeoutSeconds = 180, [int]$CopyAttempts = 10,
+          [int]$AdapterTimeoutSeconds = 60)
+    $res = [ordered]@{ outcome = $null; exitCode = $null; reason = ''; steps = @(); preState = $null; postState = $null; managementRisk = ''; adapters = $null }
+    # sent: adapters a disable was sent for (#510); while any is outstanding the post-failure state is taken only after
+    # the restoration (deferPost), so machine_ok judges the restored machine.
+    $ctx = @{ sent = @(); deferPost = $false }
     $step = { param([string]$Name, [bool]$Ok, [string]$Detail) $res.steps += ,([ordered]@{ step = $Name; ok = $Ok; detail = $Detail }) }
     $finish = { param([string]$Outcome, [string]$Reason)
         $res.outcome = $Outcome; $res.reason = $Reason
         # The state a failure left behind (read-only queries) decides machine_ok.  Not after NEEDS_OPERATOR: netcfg may
         # still be running and hold the INetCfg lock.
-        if ($Outcome -eq 'FAILED' -and $null -eq $res.postState) {
+        if ($Outcome -eq 'FAILED' -and $null -eq $res.postState -and -not $ctx.deferPost) {
             try { $res.postState = Get-AvbDeployState $Sys } catch { $res.postState = [ordered]@{ service = "UNKNOWN:UNRESOLVED (post-state query failed: $($_.Exception.Message))" } }
         }
         $res.exitCode = switch ($Outcome) { 'DEPLOYED' { 0 } 'NEEDS_OPERATOR' { 3 } default { 1 } }
@@ -453,7 +569,7 @@ function Invoke-AvbCiDriverDeployment {
     # 2. Pre-state; refuse what only a reboot or the operator can resolve.
     $res.preState = Get-AvbDeployState $Sys
     if ($res.preState.managementAdapterBound) {
-        $res.managementRisk = "management adapter '$($res.preState.managementAdapter)' is bound to MS_IntelAvbFilter: netcfg -u/-l restart its NDIS stack (connectivity interruption expected; if the runner loses its connection the job is lost and the next run collects the evidence)"
+        $res.managementRisk = "management adapter '$($res.preState.managementAdapter)' is bound to MS_IntelAvbFilter: it is disabled before netcfg -u and re-enabled after installation (#510 quiescing), and netcfg -u/-l restart its NDIS stack (connectivity interruption expected; if the runner loses its connection the job is lost and the next run collects the evidence)"
     }
     if ($res.preState.service -eq 'STOP_PENDING') { & $step 'pre-state' $false 'STOP_PENDING'; return (& $finish 'NEEDS_OPERATOR' 'IntelAvbFilter is STOP_PENDING before deployment: reboot required (never automatic)') }
     if (@($res.preState.pendingRenames).Count -gt 0) { & $step 'pre-state' $false 'pending rename'; return (& $finish 'NEEDS_OPERATOR' "reboot-time file replacement pending for IntelAvbFilter: $(@($res.preState.pendingRenames) -join ' | ')") }
@@ -465,61 +581,98 @@ function Invoke-AvbCiDriverDeployment {
         & $step 'etw-unregister' $true "completed=$($um.Completed) rc=$($um.ExitCode)"
         if (-not $um.Completed) { return (& $finish 'NEEDS_OPERATOR' "wevtutil um did not finish in ${StepTimeoutSeconds}s (left running)") }
     }
-    if ($res.preState.service -ne 'NOT_FOUND' -or @($res.preState.bindings).Count -gt 0) {
-        $u = & $Sys.Invoke 'netcfg.exe' @('-u', 'MS_IntelAvbFilter') $StepTimeoutSeconds ''
-        & $step 'netcfg-uninstall' ($u.Completed -and $u.ExitCode -eq 0) "completed=$($u.Completed) rc=$($u.ExitCode) $($u.Output)"
-        if (-not $u.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -u did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
-        if ($u.ExitCode -ne 0) { return (& $finish 'FAILED' ("netcfg -u returned rc {0} (0x{1:X8}): removal of MS_IntelAvbFilter not confirmed, nothing installed: {2}" -f $u.ExitCode, $u.ExitCode, $u.Output)) }
-        $w = Wait-AvbServiceState -Sys $Sys -Want @('NOT_FOUND', 'STOPPED') -TimeoutSeconds $StepTimeoutSeconds
-        & $step 'service-released' $w.Ok "state $($w.State) after $($w.Waited)s"
-        if (-not $w.Ok) {
-            if ($w.State -eq 'STOP_PENDING') { return (& $finish 'NEEDS_OPERATOR' "IntelAvbFilter stuck in STOP_PENDING after netcfg -u: reboot required (never automatic)") }
-            return (& $finish 'FAILED' "IntelAvbFilter did not stop after netcfg -u (state $($w.State))")
+    # Steps 3b-6 run as one block so that EVERY exit after an adapter disable reaches the restoration below (#510).
+    $core = {
+        if ($res.preState.service -ne 'NOT_FOUND' -or @($res.preState.bindings).Count -gt 0) {
+            # #510 design A: quiesce the recorded adapters immediately before netcfg -u.
+            $ctx.deferPost = $true
+            $q = Invoke-AvbAdapterQuiesce -Sys $Sys -Bindings $res.preState.bindings -TimeoutSeconds $AdapterTimeoutSeconds
+            $res.adapters = $q.Record; $ctx.sent = @($q.Sent)
+            & $step 'adapter-quiesce' $q.Ok ("targets=[{0}] skipped=[{1}]{2}" -f (@($q.Record.targets | ForEach-Object { $_.name }) -join ', '), (@($q.Record.skipped | ForEach-Object { "$($_.name): $($_.reason)" }) -join '; '), $(if ($q.Ok) { '' } else { " | $($q.Reason)" }))
+            if (-not $q.Ok) { return (& $finish 'FAILED' "adapter quiescing before netcfg -u failed ($($q.Reason)); nothing uninstalled") }
+            $u = & $Sys.Invoke 'netcfg.exe' @('-u', 'MS_IntelAvbFilter') $StepTimeoutSeconds ''
+            & $step 'netcfg-uninstall' ($u.Completed -and $u.ExitCode -eq 0) "completed=$($u.Completed) rc=$($u.ExitCode) $($u.Output)"
+            if (-not $u.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -u did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
+            if ($u.ExitCode -ne 0) { return (& $finish 'FAILED' ("netcfg -u returned rc {0} (0x{1:X8}): removal of MS_IntelAvbFilter not confirmed, nothing installed: {2}" -f $u.ExitCode, $u.ExitCode, $u.Output)) }
+            $w = Wait-AvbServiceState -Sys $Sys -Want @('NOT_FOUND', 'STOPPED') -TimeoutSeconds $StepTimeoutSeconds
+            & $step 'service-released' $w.Ok "state $($w.State) after $($w.Waited)s"
+            if (-not $w.Ok) {
+                if ($w.State -eq 'STOP_PENDING') { return (& $finish 'NEEDS_OPERATOR' "IntelAvbFilter stuck in STOP_PENDING after netcfg -u: reboot required (never automatic)") }
+                return (& $finish 'FAILED' "IntelAvbFilter did not stop after netcfg -u (state $($w.State))")
+            }
+            $left = @(& $Sys.Bindings)
+            if ($left.Count -gt 0) { & $step 'unbound' $false "$($left.Count) binding(s)"; return (& $finish 'FAILED' "MS_IntelAvbFilter still bound to $($left.Count) adapter(s) after netcfg -u (rc $($u.ExitCode))") }
+        } else {
+            & $step 'netcfg-uninstall' $true 'driver absent before deployment (nothing to remove)'
         }
-        $left = @(& $Sys.Bindings)
-        if ($left.Count -gt 0) { & $step 'unbound' $false "$($left.Count) binding(s)"; return (& $finish 'FAILED' "MS_IntelAvbFilter still bound to $($left.Count) adapter(s) after netcfg -u (rc $($u.ExitCode))") }
-    } else {
-        & $step 'netcfg-uninstall' $true 'driver absent before deployment (nothing to remove)'
+
+        # 4. Driver image: bounded retry; a locked image is a reboot case, never a scheduled replacement.
+        $copied = $false
+        for ($i = 1; $i -le $CopyAttempts; $i++) {
+            try { & $Sys.CopyFile $pkgSys $installedSys; $copied = $true; break } catch { if ($i -lt $CopyAttempts) { & $Sys.Sleep 2 } }
+        }
+        if (-not $copied) { & $step 'copy-sys' $false "locked after $CopyAttempts attempts"; return (& $finish 'NEEDS_OPERATOR' "installed IntelAvbFilter.sys still locked after $CopyAttempts attempts: the old image is loaded; reboot required (no reboot-time replacement is scheduled)") }
+        $hi = & $Sys.FileHash $installedSys
+        if ($hi -ne $want) { & $step 'copy-sys' $false "installed $hi"; return (& $finish 'FAILED' "installed .sys SHA256 $hi after copy is not $want") }
+        & $step 'copy-sys' $true $installedSys
+
+        # 5. ETW manifest (same commands as the attended path, without the EventLog restart).
+        & $Sys.CopyFile $pkgMan $installedMan
+        $null = & $Sys.Invoke 'wevtutil.exe' @('um', $installedMan) $StepTimeoutSeconds ''
+        $null = & $Sys.Invoke 'icacls.exe' @($installedSys, '/grant', 'NT SERVICE\EventLog:(R)') $StepTimeoutSeconds ''
+        $im = & $Sys.Invoke 'wevtutil.exe' @('im', $installedMan, "/mf:$installedSys", "/rf:$installedSys") $StepTimeoutSeconds ''
+        & $step 'etw-register' ($im.Completed -and $im.ExitCode -eq 0) "completed=$($im.Completed) rc=$($im.ExitCode) $($im.Output)"
+        if (-not $im.Completed) { return (& $finish 'NEEDS_OPERATOR' "wevtutil im did not finish in ${StepTimeoutSeconds}s (left running)") }
+        if ($im.ExitCode -ne 0) { return (& $finish 'FAILED' "ETW manifest registration failed (wevtutil im rc $($im.ExitCode)): $($im.Output)") }
+
+        # 6. Install the filter component.
+        $l = & $Sys.Invoke 'netcfg.exe' @('-l', 'IntelAvbFilter.inf', '-c', 's', '-i', 'MS_IntelAvbFilter') $StepTimeoutSeconds $PackageDir
+        & $step 'netcfg-install' ($l.Completed -and $l.ExitCode -eq 0) "completed=$($l.Completed) rc=$($l.ExitCode) $($l.Output)"
+        if (-not $l.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -l did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
+        if ($l.ExitCode -ne 0) { return (& $finish 'FAILED' "netcfg -l failed with rc $($l.ExitCode): $($l.Output)") }
+    }
+    $null = & $core
+
+    # #510: re-enable every adapter a disable was sent for - after netcfg -l, or after any earlier exit of the block -
+    # and confirm each one.  No adapter operation happens after this point.
+    $restoreProblem = ''
+    if (@($ctx.sent).Count -gt 0) {
+        $restoreProblem = Invoke-AvbAdapterRestore -Sys $Sys -Record $res.adapters -Sent $ctx.sent -TimeoutSeconds $AdapterTimeoutSeconds
+        & $step 'adapter-restore' ([bool]$res.adapters.restored) $(if ($restoreProblem) { $restoreProblem } else { "re-enabled and confirmed: $(@($ctx.sent) -join ', ')" })
+    }
+    $ctx.deferPost = $false
+    if ($null -ne $res.outcome) {
+        # The block already decided a failure; an unconfirmed restoration makes it an operator case.
+        if ($res.outcome -eq 'FAILED' -and $null -eq $res.postState) {
+            try { $res.postState = Get-AvbDeployState $Sys } catch { $res.postState = [ordered]@{ service = "UNKNOWN:UNRESOLVED (post-state query failed: $($_.Exception.Message))" } }
+        }
+        if ($restoreProblem) { $res.outcome = 'NEEDS_OPERATOR'; $res.exitCode = 3; $res.reason = "$($res.reason); $restoreProblem" }
+        return $res
     }
 
-    # 4. Driver image: bounded retry; a locked image is a reboot case, never a scheduled replacement.
-    $copied = $false
-    for ($i = 1; $i -le $CopyAttempts; $i++) {
-        try { & $Sys.CopyFile $pkgSys $installedSys; $copied = $true; break } catch { if ($i -lt $CopyAttempts) { & $Sys.Sleep 2 } }
-    }
-    if (-not $copied) { & $step 'copy-sys' $false "locked after $CopyAttempts attempts"; return (& $finish 'NEEDS_OPERATOR' "installed IntelAvbFilter.sys still locked after $CopyAttempts attempts: the old image is loaded; reboot required (no reboot-time replacement is scheduled)") }
-    $hi = & $Sys.FileHash $installedSys
-    if ($hi -ne $want) { & $step 'copy-sys' $false "installed $hi"; return (& $finish 'FAILED' "installed .sys SHA256 $hi after copy is not $want") }
-    & $step 'copy-sys' $true $installedSys
-
-    # 5. ETW manifest (same commands as the attended path, without the EventLog restart).
-    & $Sys.CopyFile $pkgMan $installedMan
-    $null = & $Sys.Invoke 'wevtutil.exe' @('um', $installedMan) $StepTimeoutSeconds ''
-    $null = & $Sys.Invoke 'icacls.exe' @($installedSys, '/grant', 'NT SERVICE\EventLog:(R)') $StepTimeoutSeconds ''
-    $im = & $Sys.Invoke 'wevtutil.exe' @('im', $installedMan, "/mf:$installedSys", "/rf:$installedSys") $StepTimeoutSeconds ''
-    & $step 'etw-register' ($im.Completed -and $im.ExitCode -eq 0) "completed=$($im.Completed) rc=$($im.ExitCode) $($im.Output)"
-    if (-not $im.Completed) { return (& $finish 'NEEDS_OPERATOR' "wevtutil im did not finish in ${StepTimeoutSeconds}s (left running)") }
-    if ($im.ExitCode -ne 0) { return (& $finish 'FAILED' "ETW manifest registration failed (wevtutil im rc $($im.ExitCode)): $($im.Output)") }
-
-    # 6. Install the filter component.
-    $l = & $Sys.Invoke 'netcfg.exe' @('-l', 'IntelAvbFilter.inf', '-c', 's', '-i', 'MS_IntelAvbFilter') $StepTimeoutSeconds $PackageDir
-    & $step 'netcfg-install' ($l.Completed -and $l.ExitCode -eq 0) "completed=$($l.Completed) rc=$($l.ExitCode) $($l.Output)"
-    if (-not $l.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -l did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
-    if ($l.ExitCode -ne 0) { return (& $finish 'FAILED' "netcfg -l failed with rc $($l.ExitCode): $($l.Output)") }
-
-    # 7. Post-state: running, bound, identity, ETW.
+    # 7. Post-state: running, bound, identity, ETW - and, when adapters were quiesced, their confirmed restoration.
     $w2 = Wait-AvbServiceState -Sys $Sys -Want @('RUNNING') -TimeoutSeconds $StepTimeoutSeconds
     $res.postState = Get-AvbDeployState $Sys
     & $step 'service-running' $w2.Ok "state $($w2.State) after $($w2.Waited)s"
+    $verdict = $null
     if (-not $w2.Ok) {
-        if ($w2.State -in @('STOP_PENDING', 'START_PENDING')) { return (& $finish 'NEEDS_OPERATOR' "IntelAvbFilter $($w2.State) after installation: not usable, reboot/inspection required") }
-        return (& $finish 'FAILED' "IntelAvbFilter is $($w2.State) after installation, not RUNNING")
+        if ($w2.State -in @('STOP_PENDING', 'START_PENDING')) { $verdict = @('NEEDS_OPERATOR', "IntelAvbFilter $($w2.State) after installation: not usable, reboot/inspection required") }
+        else { $verdict = @('FAILED', "IntelAvbFilter is $($w2.State) after installation, not RUNNING") }
     }
-    $bound = @($res.postState.bindings | Where-Object { $_.enabled })
-    if ($bound.Count -eq 0) { & $step 'bound' $false 'no enabled binding'; return (& $finish 'FAILED' 'MS_IntelAvbFilter is not bound to any adapter after installation') }
-    if ($res.postState.installedSysSha256 -ne $want) { & $step 'identity' $false $res.postState.installedSysSha256; return (& $finish 'FAILED' "installed .sys SHA256 $($res.postState.installedSysSha256) is not the staged $want") }
-    $gp = & $Sys.Invoke 'wevtutil.exe' @('gp', 'IntelAvbFilter') $StepTimeoutSeconds ''
-    & $step 'etw-provider' ($gp.Completed -and $gp.ExitCode -eq 0) "rc=$($gp.ExitCode)"
-    if (-not ($gp.Completed -and $gp.ExitCode -eq 0)) { return (& $finish 'FAILED' "ETW provider IntelAvbFilter not registered after installation (wevtutil gp rc $($gp.ExitCode))") }
-    return (& $finish 'DEPLOYED' "service RUNNING, bound to $($bound.Count) adapter(s), installed .sys = staged $want, ETW provider registered")
+    if ($null -eq $verdict) {
+        $bound = @($res.postState.bindings | Where-Object { $_.enabled })
+        if ($bound.Count -eq 0) { & $step 'bound' $false 'no enabled binding'; $verdict = @('FAILED', 'MS_IntelAvbFilter is not bound to any adapter after installation') }
+        elseif ($res.postState.installedSysSha256 -ne $want) { & $step 'identity' $false $res.postState.installedSysSha256; $verdict = @('FAILED', "installed .sys SHA256 $($res.postState.installedSysSha256) is not the staged $want") }
+        elseif (-not $res.postState.serviceImageSha256) { & $step 'service-image' $false "not observed: $($res.postState.serviceImageError)"; $verdict = @('FAILED', "service image identity not observed (ImagePath file: $($res.postState.serviceImageError)): the loaded driver cannot be attributed to the staged package") }
+        elseif ($res.postState.serviceImageSha256 -ne $want) { & $step 'service-image' $false "$($res.postState.serviceImagePath) $($res.postState.serviceImageSha256)"; $verdict = @('FAILED', "service ImagePath file $($res.postState.serviceImagePath) SHA256 $($res.postState.serviceImageSha256) is not the staged $want (netcfg -l selected another package from the driver store; the System32 copy is not what the service loads)") }
+        else {
+            & $step 'service-image' $true "$($res.postState.serviceImagePath) = staged"
+            $gp = & $Sys.Invoke 'wevtutil.exe' @('gp', 'IntelAvbFilter') $StepTimeoutSeconds ''
+            & $step 'etw-provider' ($gp.Completed -and $gp.ExitCode -eq 0) "rc=$($gp.ExitCode)"
+            if (-not ($gp.Completed -and $gp.ExitCode -eq 0)) { $verdict = @('FAILED', "ETW provider IntelAvbFilter not registered after installation (wevtutil gp rc $($gp.ExitCode))") }
+            else { $verdict = @('DEPLOYED', "service RUNNING, bound to $($bound.Count) adapter(s), installed .sys = service image = staged $want, ETW provider registered$(if (@($ctx.sent).Count -gt 0) { ", adapters re-enabled: $(@($ctx.sent) -join ', ')" })") }
+        }
+    }
+    if ($restoreProblem) { return (& $finish 'NEEDS_OPERATOR' "$($verdict[1]); $restoreProblem") }
+    return (& $finish $verdict[0] $verdict[1])
 }
