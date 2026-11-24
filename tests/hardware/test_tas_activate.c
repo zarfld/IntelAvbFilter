@@ -2,7 +2,10 @@
  * @file test_tas_activate.c
  * @brief IOCTL_AVB_TAS_ACTIVATE on a real adapter: first gate schedule, wire behaviour, state, refusal, cleanup (#357)
  *
- * One mode per run, each its own registered runner entry:
+ * Without arguments every contained case runs, one after another in this process (#487): each with its own device handle,
+ * adapter discovery, setup, cleanup, counts and result; a failed, blocked or unsupported case never ends the run, and the exit
+ * status is 0 only when every case passed (tests/ioctl/tas_activate_cases.h, TC-MOCK-064). Arguments select cases; each is also
+ * its own registered runner entry:
  *   --hold   TEST-TAS-API-004 (#369, Verifies #357 and #350), case TC-TASAPI-004, per #369's amendments of 2026-11-18 (P2 step 5)
  *            and 2026-11-19 (oracle: executable accepted-unverified HOLD) against #365 13.1-13.4 and its published R1/R2/R4/R5/R7
  *            (#352 R1, #351, #362): the versioned AVB_TAS_OP_REQUEST (144 bytes, version 1) on IOCTL_AVB_TAS_ACTIVATE_80C
@@ -222,6 +225,7 @@
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/tas_activate_cases.h"   /* contained cases, selection, exit status (#487) */
 #include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
 
@@ -252,8 +256,6 @@
 #define FILETIME_TO_UNIX_US  11644473600000000LL
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
-typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV, MODE_HOLDCTL } RUN_MODE;
-
 /* #482: the common numbered-write contract - N = 1 is the first schedule write for every backend (published, not a commit index) */
 #define FAULTV_FIRST_SCHEDULE_WRITE 1u
 
@@ -283,10 +285,16 @@ C_ASSERT(SEND_BOUND_MS / SEND_PERIOD_MS + 1 + 2 * (BASELINE_MS / SEND_PERIOD_MS 
 static volatile LONG g_pending_adapter = -1;
 static volatile LONG g_pending_did;
 static volatile LONG g_pending_setup;
+/* The run (#487): the selected cases, the one in progress (-1: none) and the results of the finished ones */
+static BOOL g_selected[TAS_ACT_CASE_COUNT];
+static int g_case_result[TAS_ACT_CASE_COUNT];
+static volatile LONG g_case_pos = -1;
 
-static void report_abort(void)
+/* An unreported state change the case in progress owns: named, never dropped. TRUE when there was one */
+static BOOL report_pending(void)
 {
     LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
+
     if (adapter >= 0 && InterlockedCompareExchange(&g_pending_setup, 0, 0) != 0) {
         printf("[INCONCLUSIVE_RESTORATION] %s-SETUP/adapter:%ld did=0x%04lX: test aborted during its setup recovery NIC cycle, before any "
                "TAS_ACTIVATE; the adapter may be left disabled; operator: NIC cycle of this adapter, then TC-TSNREG-001\n",
@@ -296,6 +304,23 @@ static void report_abort(void)
         printf("[INCONCLUSIVE_RESTORATION] %s-RESTORE/adapter:%ld did=0x%04lX: test aborted after TAS_ACTIVATE, its cleanup did not run; "
                "operator: NIC cycle of this adapter, then TC-TSNREG-001\n", g_case, adapter, g_pending_did);
         fflush(stdout);
+    }
+    return adapter >= 0;
+}
+
+static void report_abort(void)
+{
+    LONG pos = InterlockedExchange(&g_case_pos, -1);
+    unsigned k;
+
+    (void)report_pending();
+    /* An ended process runs no further case: every selected one without a result is named, never silent */
+    for (k = pos >= 0 ? (unsigned)pos : TAS_ACT_CASE_COUNT; k < TAS_ACT_CASE_COUNT; k++) {
+        if (g_selected[k]) {
+            printf("[INCONCLUSIVE] %s%s: %s: the program ended during case %s\n", g_tas_act_cases[k].case_id, g_tas_act_cases[k].arg,
+                   k == (unsigned)pos ? "not completed" : "not executed", g_tas_act_cases[pos].arg);
+            fflush(stdout);
+        }
     }
 }
 
@@ -2929,7 +2954,30 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 #endif
 }
 
-int main(int argc, char **argv)
+/* Every case starts from its own state: nothing a previous case counted, captured or left pending is carried over. g_op_id alone
+ * continues - client_op_id stays distinct within the process */
+static void reset_case_state(const TAS_ACT_CASE *c)
+{
+    g_mode = c->mode;
+    g_case = c->case_id;
+    g_fault_case = 0;
+    g_failed = g_blocked = g_ran = 0;
+    g_tas_adapters = 0;
+    g_capture_luid = 0;
+    g_next_seq = 0;
+    memset(g_send_us, 0, sizeof(g_send_us));
+    g_last_send_error = 0;
+    g_all = NULL;
+    g_nall = 0;
+    g_cleanup_link_was_up = TRUE;
+    InterlockedExchange(&g_pending_adapter, -1);
+    InterlockedExchange(&g_pending_did, 0);
+    InterlockedExchange(&g_pending_setup, 0);
+}
+
+/* One case: its own Winsock use, device handle and adapter discovery (a NIC cycle of an earlier case may have reordered the
+ * enumeration). Returns tas_act_case_exit of its own counts */
+static int run_case(void)
 {
     AVB_ADAPTER_IDENTITY_REQUEST *ids = NULL, *all = NULL, first;
     BOOL complete = FALSE;
@@ -2939,19 +2987,6 @@ int main(int argc, char **argv)
     HANDLE h;
     UINT32 i = 0, count = 0, stored = 0, nall = 0;
 
-    setvbuf(stdout, NULL, _IONBF, 0);
-    SetConsoleCtrlHandler(on_console_ctrl, TRUE);
-    SetUnhandledExceptionFilter(on_crash);
-    if (argc == 2 && strcmp(argv[1], "--hold") == 0) { g_mode = MODE_HOLD; g_case = "TC-TASAPI-004"; }
-    if (argc == 2 && strcmp(argv[1], "--pass") == 0) { g_mode = MODE_PASS; g_case = "TC-TASAPI-005"; }
-    if (argc == 2 && strcmp(argv[1], "--fault") == 0) { g_mode = MODE_FAULT; g_case = "TC-TASACT-FAULT-001"; }
-    if (argc == 2 && strcmp(argv[1], "--fault-versioned") == 0) { g_mode = MODE_FAULTV; g_case = "TC-TASACT-FAULT-001"; }
-    if (argc == 2 && strcmp(argv[1], "--phc-hold-control") == 0) { g_mode = MODE_HOLDCTL; g_case = "TC-TASACT-HOLDCTL-001"; }
-    printf("=== IntelAvbFilter - IOCTL_AVB_TAS_ACTIVATE on real hardware (#357) ===\n");
-    if (g_mode == MODE_NONE) {
-        printf("[BLOCKED] TC-TASAPI-004: usage: test_tas_activate --hold | --pass | --fault | --fault-versioned | --phc-hold-control\n");
-        return 3;
-    }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] %s: Winsock unavailable\n", g_case);
         return 3;
@@ -2959,6 +2994,7 @@ int main(int argc, char **argv)
     h = open_device(GENERIC_READ | GENERIC_WRITE);
     if (h == INVALID_HANDLE_VALUE) {
         printf("[BLOCKED] %s: cannot open %s (error %lu)\n", g_case, DEVICE_NAME, GetLastError());
+        WSACleanup();
         return 3;
     }
     if (DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL)) {
@@ -3023,12 +3059,56 @@ int main(int argc, char **argv)
             run_adapter(ids[i].index, &ids[i]);
         }
     }
+    g_all = NULL;
+    g_nall = 0;
     free(ids);
     free(all);
     WSACleanup();
 
     printf("\nTAS adapters run=%d case executions=%d nonpassing verdicts=%d blocked=%d\n", g_tas_adapters, g_ran, g_failed, g_blocked);
-    if (g_ran == 0) { return 2; }
-    if (g_failed != 0) { return 1; }
-    return g_blocked != 0 ? 3 : 0;
+    return tas_act_case_exit(g_ran, g_failed, g_blocked);
+}
+
+int main(int argc, char **argv)
+{
+    static const char *const outcome[] = { "PASSED", "FAILED", "NO APPLICABLE ADAPTER", "BLOCKED" };
+    unsigned k;
+    int rc;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    SetConsoleCtrlHandler(on_console_ctrl, TRUE);
+    SetUnhandledExceptionFilter(on_crash);
+    printf("=== IntelAvbFilter - IOCTL_AVB_TAS_ACTIVATE on real hardware (#357) ===\n");
+    if (!tas_act_select(argc, argv, g_selected)) {
+        printf("[BLOCKED] test_tas_activate: unknown argument; without arguments every case runs, or select with:");
+        for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+            printf(" %s", g_tas_act_cases[k].arg);
+        }
+        printf("\n");
+        return 3;
+    }
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        if (g_selected[k]) {
+            printf("\n--- case %s (%s) ---\n", g_tas_act_cases[k].arg, g_tas_act_cases[k].case_id);
+            reset_case_state(&g_tas_act_cases[k]);
+            InterlockedExchange(&g_case_pos, (LONG)k);
+            g_case_result[k] = run_case();
+            if (report_pending()) {
+                g_case_result[k] = 1;   /* the case ended without reporting the restoration it owns: never successful */
+            }
+            InterlockedExchange(&g_case_pos, -1);
+        }
+    }
+    rc = tas_act_run_exit(g_selected, g_case_result);
+    printf("\n--- result per case ---\n");
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        if (g_selected[k]) {
+            printf("  %-18s %s: %s (%d)\n", g_tas_act_cases[k].arg, g_tas_act_cases[k].case_id,
+                   g_case_result[k] >= 0 && g_case_result[k] <= 3 ? outcome[g_case_result[k]] : "FAILED", g_case_result[k]);
+        } else {
+            printf("  %-18s %s: not selected\n", g_tas_act_cases[k].arg, g_tas_act_cases[k].case_id);
+        }
+    }
+    printf("run exit status %d (0 only when every selected case passed)\n", rc);
+    return rc;
 }

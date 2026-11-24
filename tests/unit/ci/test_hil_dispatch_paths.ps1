@@ -566,6 +566,17 @@ if ($feText -notmatch 'PARTIAL / SMOKE') { $feBad += '-Quick not labelled as a p
 if ($feText -match 'Read-Host') { $feBad += 'interactive prompt still present' }
 tc_check 'TEST-HILPATH-019-run-tests-frontend-resolves-registered-entries-fails-closed-and-runs-every-suite' ($feBad.Count -eq 0) ($feBad -join '; ')
 
+# 026 STATIC (#487/#473): the cases contained in test_tas_activate.exe (tests/ioctl/tas_activate_cases.h) and its registered runner
+#      entries are the same set - a mode cannot be added to only one of them.  That the program runs them is TC-MOCK-064 and
+#      the hardware run, not this check.
+$ccBad = @()
+$caseHdr = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\tas_activate_cases.h'))
+$caseTable = [regex]::Match($caseHdr, '(?s)g_tas_act_cases\[\]\s*=\s*\{(.*?)\r?\n\};')
+$caseArgs = @([regex]::Matches($caseTable.Groups[1].Value, '\{\s*"(--[a-z-]+)"\s*,') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+$regArgs = @(@(if ($feBad.Count -eq 0) { $feReg['HardwareIntegration'] | Where-Object { $_ -match '^test_tas_activate\s' } | ForEach-Object { ($_ -split '\s+', 2)[1] } }) | Sort-Object)
+if ($caseArgs.Count -eq 0 -or ($caseArgs -join '|') -ne ($regArgs -join '|')) { $ccBad += "contained [$($caseArgs -join '|')], registered [$($regArgs -join '|')]" }
+tc_check 'TEST-HILPATH-026-STATIC-contained-cases-of-test-tas-activate-equal-its-registered-entries' ($ccBad.Count -eq 0) ($ccBad -join '; ')
+
 # --- #458 (comment 7008463710, Q 2026-11-19): earlier failures never stop later independent tests at any layer ---------
 # Maintainer decision #458 comment 7010425296 (2026-11-19) narrows 7008463710 into two rules, both covered here:
 #   (1) admission/promotion unchanged: a failed required Unit or Integration job prevents deploy-staging, and automated HIL
