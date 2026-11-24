@@ -1982,6 +1982,15 @@ function Get-AvbTestTimeoutSeconds {
     return [Math]::Max($SuiteSeconds, $own)
 }
 
+# The adapter count an item is budgeted with, reported to Run-Tests-Elevated.ps1 (AVB_ELEVATED_INVENTORY_FILE) so that its default
+# outer deadline covers this runner's own budget (#480, PR #518).  Nothing is reported without an observed enumeration.
+function Write-AvbObservedInventory {
+    param([string]$Path, [int]$AdapterCount)
+    if (-not $Path -or $AdapterCount -lt 0) { return }
+    try { [System.IO.File]::WriteAllText($Path, [string]$AdapterCount) }
+    catch { Write-Host "  [WARN] adapter count $AdapterCount not reported to the elevated wrapper ($($_.Exception.Message)): its deadline may be shorter than this runner's budget" -ForegroundColor Yellow }
+}
+
 # Incremental capture of one redirected stream (#458, PR #485 r4629829999), plain PowerShell (no compiled helper: a
 # per-process Add-Type cost about 250 ms in every runner start).  One ReadAsync is outstanding per stream; the runner
 # collects completed reads while it polls the process (Update-AvbStreamCapture) and waits for EOF only for a bounded
@@ -2962,6 +2971,7 @@ foreach ($WorkItem in $WorkItems) {
     $timedOut  = $false
     # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
     $enumeratedAdapters = if ($script:HilBaseline -and $script:HilBaseline.ClockOk) { @($script:HilBaseline.Clock).Count } else { -1 }
+    Write-AvbObservedInventory -Path $env:AVB_ELEVATED_INVENTORY_FILE -AdapterCount $enumeratedAdapters
     $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds -AdapterCount $enumeratedAdapters
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
     if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }

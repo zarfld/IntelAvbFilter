@@ -72,12 +72,14 @@ function Get-AvbElevatedAuthorization {
 function New-AvbElevatedCommand {
     param([string]$Configuration, [string]$TestName, [string]$TestArgs, [string]$TestExecutable, [bool]$Full,
           [string]$LogFile, [string]$Suite, [string]$ResultsJson, [string]$PriorResultsDir = '', [string]$LegacyScript, [string]$RunCiScript,
-          [string]$AuthorizeUnsafe = '')
+          [string]$AuthorizeUnsafe = '', [string]$InventoryFile = '')
     $command = if ($LogFile) { "Start-Transcript -Path $(ConvertTo-AvbPsLiteral $LogFile) -Force | Out-Null; " } else { '' }
     $command += "`$_innerCode = 1; `$global:LASTEXITCODE = `$null; "
     # -Verb RunAs builds a new environment.  An operator-set compatibility value is carried across it unchanged; it has no
     # dispatch effect (#458).
     if ($AuthorizeUnsafe) { $command += "`$env:AVB_HIL_AUTHORIZE_UNSAFE = $(ConvertTo-AvbPsLiteral $AuthorizeUnsafe); " }
+    # Where the runner reports the adapter count it budgets with (#480).
+    if ($InventoryFile) { $command += "`$env:AVB_ELEVATED_INVENTORY_FILE = $(ConvertTo-AvbPsLiteral $InventoryFile); " }
     if ($Suite) {
         $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration"
         if ($TestName) {
@@ -163,7 +165,7 @@ function Get-AvbElevatedBudget {
         foreach ($s in @($r.Groups.Keys)) { $groups[$s] = @($r.Groups[$s]) }
         if ($groups.Count -eq 0) { $groups['HardwareIntegration'] = @([string]$r.Entry); $notes += "'$($r.Entry)' is no registered entry: budgeted as one HardwareIntegration item" }
     } else { foreach ($s in 'Unit', 'HardwareUnit', 'HardwareIntegration') { $groups[$s] = @() } }   # the full run
-    if ($AdapterCount -lt 0) { $notes += 'number of adapters unknown: budgeted like the runner without an observed enumeration; the child may need longer' }
+    if ($AdapterCount -lt 0) { $notes += 'number of adapters unknown here: budgeted like the runner without an observed enumeration until the runner reports its own' }
     $sum = [long]$FixedSeconds; $entries = @()
     foreach ($s in @($groups.Keys)) {
         foreach ($i in @(& $items $s @($groups[$s]) $AdapterCount)) { $sum += [long]$i.Items * ([long]$i.Seconds + $PerItemSeconds); $entries += "${s}: $($i.Entry) = $($i.Seconds) s$(if ($i.Items -gt 1) { " x $($i.Items) targets" })" }
@@ -183,7 +185,39 @@ function Resolve-AvbElevatedDeadline {
     $w = if ($Requested -lt $Budget.Seconds) { "explicit -TimeoutSeconds $Requested is shorter than the $($Budget.Seconds) s budget of what will run: the child can be ended during a test or its cleanup" } else { '' }
     return @{ Seconds = [long]$Requested; Warning = $w }
 }
-function ConvertTo-AvbWaitMilliseconds { param([long]$Seconds) return [int][Math]::Min([long][int]::MaxValue, [Math]::Max([long]1, $Seconds) * 1000) }
+# The count the elevated runner reported (Run-Tests-CI.ps1 Write-AvbObservedInventory); -1 = none (yet) or not readable.
+function Read-AvbObservedInventory {
+    param([string]$Path)
+    try {
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return -1 }
+        $m = [regex]::Match([System.IO.File]::ReadAllText($Path), '^\s*(\d{1,4})\s*$')
+        if ($m.Success) { return [int]$m.Groups[1].Value }
+    } catch { }
+    return -1
+}
+# Reconciles a DEFAULT deadline with the runner's enumeration: more adapters than budgeted (or an unknown count) recompute it, never
+# shorter.  An explicit deadline, a smaller count and no report leave it as it is.  @{ Deadline; BudgetedCount }
+function Update-AvbElevatedDeadline {
+    param($Deadline, [int]$Requested, [int]$BudgetedCount, [int]$Observed, [scriptblock]$BudgetFor)
+    if ($Requested -gt 0 -or $Observed -lt 1 -or $Observed -le $BudgetedCount) { return @{ Deadline = $Deadline; BudgetedCount = $BudgetedCount } }
+    $b = & $BudgetFor $Observed
+    return @{ Deadline = @{ Seconds = [Math]::Max([long]$Deadline.Seconds, [long]$b.Seconds); Warning = $Deadline.Warning }; BudgetedCount = $Observed }
+}
+# Bounded wait for the elevated child; the deadline is reconciled while waiting and once more before it is enforced.
+# @{ Exited; Deadline; BudgetedCount }
+function Wait-AvbElevatedChild {
+    param([System.Diagnostics.Process]$Process, $Deadline, [int]$Requested, [int]$BudgetedCount, [string]$InventoryFile, [scriptblock]$BudgetFor)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $left = [double]$Deadline.Seconds * 1000 - $sw.ElapsedMilliseconds
+        $slice = [int][Math]::Min(5000, [Math]::Max(1, $left))
+        if ($Process.WaitForExit($slice)) { return @{ Exited = $true; Deadline = $Deadline; BudgetedCount = $BudgetedCount } }
+        $u = Update-AvbElevatedDeadline -Deadline $Deadline -Requested $Requested -BudgetedCount $BudgetedCount -Observed (Read-AvbObservedInventory $InventoryFile) -BudgetFor $BudgetFor
+        if ($u.Deadline.Seconds -ne $Deadline.Seconds) { Write-Host "Deadline: $($u.Deadline.Seconds) s (the runner enumerated $($u.BudgetedCount) adapter(s), was $($Deadline.Seconds) s)" -ForegroundColor Cyan }
+        $Deadline = $u.Deadline; $BudgetedCount = $u.BudgetedCount
+        if ($sw.ElapsedMilliseconds -ge [double]$Deadline.Seconds * 1000) { return @{ Exited = $false; Deadline = $Deadline; BudgetedCount = $BudgetedCount } }
+    }
+}
 
 # Default log file if not specified - use logs directory
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -201,9 +235,11 @@ if (-not $LogFile) {
     }
 }
 # Only a value the operator set is forwarded (compatibility, no dispatch effect, #458); nothing is added for the named entry.
+$inventoryFile = if ($LogFile) { "$LogFile.adapters.txt" } else { Join-Path $env:TEMP "avb_elevated_adapters_$PID.txt" }
+if (Test-Path -LiteralPath $inventoryFile) { Remove-Item -LiteralPath $inventoryFile -Force }   # never a count of an earlier run
 $authorizeUnsafe = Get-AvbElevatedAuthorization -Existing $env:AVB_HIL_AUTHORIZE_UNSAFE -TestName $TestName -TestArgs $TestArgs
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
-               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe $authorizeUnsafe -LegacyScript $scriptPath -RunCiScript $runCiPath
+               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe $authorizeUnsafe -InventoryFile $inventoryFile -LegacyScript $scriptPath -RunCiScript $runCiPath
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
 if ($authorizeUnsafe) { Write-Host "Forwarding AVB_HIL_AUTHORIZE_UNSAFE=$authorizeUnsafe to the elevated runner (compatibility only: no dispatch effect, #458)" -ForegroundColor Cyan }
 
@@ -211,8 +247,9 @@ if ($LogFile) {
     Write-Host "Output will be logged to: $LogFile" -ForegroundColor Cyan
 }
 $adapterBound = Get-AvbFilterAdapterBound
-$budget = Get-AvbElevatedBudget -RunCiScript $runCiPath -FrontEndScript $scriptPath -Suite $Suite -TestName $(if ($TestName) { $TestName } else { $TestExecutable }) `
-              -TestArgs $TestArgs -Full ([bool]$Full) -AdapterCount $adapterBound
+$budgetFor = { param([int]$n) Get-AvbElevatedBudget -RunCiScript $runCiPath -FrontEndScript $scriptPath -Suite $Suite -TestName $(if ($TestName) { $TestName } else { $TestExecutable }) `
+                                  -TestArgs $TestArgs -Full ([bool]$Full) -AdapterCount $n }
+$budget = & $budgetFor $adapterBound
 $deadline = Resolve-AvbElevatedDeadline -Requested $TimeoutSeconds -Budget $budget
 Write-Host "Deadline: $($deadline.Seconds) s (budget $($budget.Seconds) s: $(@($budget.Entries).Count) entry/entries, adapter bound $adapterBound)" -ForegroundColor Cyan
 if ($budget.Note) { Write-Host "[WARN] $($budget.Note)" -ForegroundColor Yellow }
@@ -241,7 +278,7 @@ if ($CaptureDbgView) {
     $capture = [ordered]@{ testName = $TestName; testArgs = $TestArgs; configuration = $Configuration; suite = $Suite; dbgViewPid = $dbgViewProc.Id
                            dbgViewLog = $dbgLog; startedUtc = (Get-Date).ToUniversalTime().ToString('o'); transcript = $LogFile; resultsJson = $ResultsJson
                            installedDriverSha256 = $null; outcome = $null; testExitCode = $null; stoppedUtc = $null; stop = $null; logStatus = $null; logBytes = 0
-                           terminationVerified = $null; termination = $null; timeoutSeconds = $deadline.Seconds; timeoutBudgetSeconds = $budget.Seconds }
+                           terminationVerified = $null; termination = $null; timeoutSeconds = $deadline.Seconds; timeoutBudgetSeconds = $budget.Seconds; budgetedAdapters = $adapterBound }
     $drv = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
     if (Test-Path -LiteralPath $drv) { $capture.installedDriverSha256 = (Get-FileHash -LiteralPath $drv -Algorithm SHA256).Hash }
 }
@@ -253,7 +290,10 @@ $childProc = Start-Process powershell -Verb RunAs -ArgumentList $arguments -Pass
 $childExitCode = -1
 if ($null -ne $childProc) {
     $null = $childProc.Handle
-    if ($childProc.WaitForExit((ConvertTo-AvbWaitMilliseconds $deadline.Seconds))) {
+    $waited = Wait-AvbElevatedChild -Process $childProc -Deadline $deadline -Requested $TimeoutSeconds -BudgetedCount $adapterBound -InventoryFile $inventoryFile -BudgetFor $budgetFor
+    $deadline = $waited.Deadline
+    if ($capture) { $capture.timeoutSeconds = $deadline.Seconds; $capture.budgetedAdapters = $waited.BudgetedCount }
+    if ($waited.Exited) {
         $childExitCode = $childProc.ExitCode
         if ($null -eq $childExitCode) { $childExitCode = 1; $outcome = 'NO_EXIT_CODE' }
     } else {
