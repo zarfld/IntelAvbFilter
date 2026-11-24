@@ -33,6 +33,7 @@
 
 /* SSOT structures from avb_ioctl.h */
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_ntstatus.h"   /* exact NTSTATUS for the TC-TARGET-015 verdicts (#299) */
 
 /* Test result tracking */
 static int tests_passed = 0;
@@ -1007,7 +1008,495 @@ static void test_aux_011_invalid_timer(HANDLE hDevice) {
 
 /* ========== MAIN TEST RUNNER ========== */
 
+/* =====================================================================================================================
+ * TC-TARGET-015 (#299): timer-0 target-time event on every enumerated adapter - characterization step
+ *                       (selected with --case TC-TARGET-015; the default run is unchanged)
+ *
+ * Question: when IOCTL_AVB_SET_TARGET_TIME programs timer 0 with a target in NANOSECONDS (the public contract of
+ * AVB_TARGET_TIME_REQUEST.target_time) and enable_interrupt = 1, does the driver deliver a new TS_EVENT_TARGET_TIME
+ * event for timer 0 after the PHC has reached that target?
+ *
+ * - Every adapter the driver enumerates is bound separately by NET_LUID (no capability stand-in, no first-adapter pick).
+ *   Applicability follows the operation itself: there is no per-operation target-time capability contract, so a
+ *   STATUS_NOT_SUPPORTED is INCONCLUSIVE, never SKIP (docs/testing/test-verdict-contract.md).
+ * - PHC time comes only from IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 with AVB_PHC_SOURCE_REGISTER_DERIVED; a software
+ *   fallback sample does not count.
+ * - The target is the contract value (PHC ns + lead).  The test does NOT convert it into any register format.  The
+ *   requested target, the register content read back through QUERY_HW_SNAPSHOT version 2 (raw, not decoded) and the
+ *   event are reported separately.  The event's stored timestamp is what the driver read from the registers; it
+ *   identifies the event, it is not a trigger time and not functional evidence.
+ * - Measurements, ATTRIBUTION, FUNCTION and RESTORATION are reported separately per adapter.
+ *   Measurements: baseline events (a window before the request), every new event, the posting interval of the first
+ *   timer-0 event (PHC before the previous ring check .. PHC after the ring check that saw it; it bounds the driver's
+ *   posting, not the hardware trigger) and the event's timestamp PATTERN (target registers as read, or a PHC at
+ *   detection) - a pattern names a driver posting path, it is not a request identifier.
+ *   ATTRIBUTION: this test cannot exclude an independent source of timer-0 target-time events (for example an already
+ *   active clock output on the same target time).  An observed event is therefore never attributed to the request:
+ *   INCONCLUSIVE; "none" when no timer-0 event arrived.
+ *   FUNCTION: FAIL only for a request-independent finding - the required event is missing although the PHC passed the
+ *   requested target by TT15_OBSERVE_AFTER_NS, established by a PHC sample taken BEFORE a terminal ring read (the ring
+ *   is reconciled after that sample; otherwise INCONCLUSIVE).  A present event yields neither PASS nor a request-specific timing FAIL
+ *   (INCONCLUSIVE, with its interval reported); PHC sample gaps and ring overflow are INCONCLUSIVE.  PASS is not
+ *   reachable in this version.  TT15_OBSERVE_AFTER_NS is a diagnostic observation bound only - it does not replace or
+ *   relax any accuracy requirement of #299.
+ * - Timer 1 is never programmed here.  Register values are printed raw; their bit meaning is evaluated outside the
+ *   test against the documented sources.
+ * - Cleanup: unsubscribe; then the observable state (TSAUXC, TRGTTIML0/H0) is compared with the pre-test snapshot.
+ *   No IOCTL restores target-time state; state the operation may change but no IOCTL reads back is NOT_VERIFIED.
+ * ===================================================================================================================*/
+#define TT15_ID                 "TC-TARGET-015"
+#define TT15_LEAD_NS            2000000000ULL  /* requested target: 2 s after the PHC sample */
+#define TT15_OBSERVE_AFTER_NS   1000000000ULL  /* diagnostic observation bound after the target; not an accuracy requirement */
+#define TT15_BASELINE_MS        1000u          /* baseline window before the request: events here are not caused by it */
+#define TT15_RUNNING_GAP_MS     50u            /* two PHC samples this far apart must differ (PHC advancing) */
+#define TT15_POLL_MS            5u
+#define TT15_HOST_DEADLINE_MS   8000u          /* hard host bound of the wait loop */
+#define TT15_RING_EVENTS        1024u          /* the driver's subscription ring_count */
+
+static int tt15_nonpass = 0;   /* FAIL, INCONCLUSIVE, BLOCKED, CLEANUP_FAILED, INCONCLUSIVE_RESTORATION lines */
+
+typedef struct {
+    LONG nt;
+    BOOL ok;
+    AVB_CROSS_TIMESTAMP_V2_REQUEST x;
+} TT15_PHC;
+
+static BOOL tt15_phc(HANDLE h, UINT32 index, TT15_PHC *p)
+{
+    DWORD br = 0;
+    ZeroMemory(p, sizeof(*p));
+    p->x.struct_version = AVB_XTSTAMP_V2_VERSION;
+    p->x.struct_size = (avb_u32)sizeof(p->x);
+    p->x.adapter_index = index;
+    p->nt = avb_ioctl_ntstatus(h, IOCTL_AVB_PHC_CROSSTIMESTAMP_V2, &p->x, sizeof(p->x), &p->x, sizeof(p->x), &br);
+    p->ok = (p->nt >= 0 && p->x.valid == 1u && p->x.avb_phc_source == AVB_PHC_SOURCE_REGISTER_DERIVED);
+    return p->ok;
+}
+
+static void tt15_print_phc(const char *what, const TT15_PHC *p)
+{
+    printf("    PHC %s: nt=0x%08lX valid=%u source=%u rc=%d phc_time_ns=%llu%s\n", what, (unsigned long)p->nt,
+           p->x.valid, p->x.avb_phc_source, p->x.get_systime_rc, (unsigned long long)p->x.phc_time_ns,
+           p->ok ? "" : " (not a hardware-derived sample)");
+}
+
+static LONG tt15_snapshot(HANDLE h, AVB_HW_SNAPSHOT_REQUEST_V2 *s)
+{
+    DWORD br = 0;
+    ZeroMemory(s, sizeof(*s));
+    s->version = AVB_HW_SNAPSHOT_VERSION_2;
+    return avb_ioctl_ntstatus(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, s, sizeof(*s), s, sizeof(*s), &br);
+}
+
+static BOOL tt15_snapshot_ok(LONG nt, const AVB_HW_SNAPSHOT_REQUEST_V2 *s, avb_u64 luid)
+{
+    return nt >= 0 && s->status == 0u && s->count == AVB_HWREG_COUNT_V2 && s->net_luid == luid;
+}
+
+/* TRUE and the raw value when the entry for id is VALID */
+static BOOL tt15_reg(const AVB_HW_SNAPSHOT_REQUEST_V2 *s, UINT32 id, UINT32 *value)
+{
+    const AVB_HWREG_ENTRY *e = &s->entries[id - 1u];
+    if (e->id != id || e->state != AVB_HWREG_STATE_VALID) return FALSE;
+    *value = e->value;
+    return TRUE;
+}
+
+static void tt15_print_snapshot(const char *what, LONG nt, const AVB_HW_SNAPSHOT_REQUEST_V2 *s)
+{
+    static const struct { UINT32 id; const char *name; } regs[] = {
+        { AVB_HWREG_TSAUXC, "TSAUXC" }, { AVB_HWREG_TRGTTIML0, "TRGTTIML0" }, { AVB_HWREG_TRGTTIMH0, "TRGTTIMH0" },
+        { AVB_HWREG_TRGTTIML1, "TRGTTIML1" }, { AVB_HWREG_TRGTTIMH1, "TRGTTIMH1" },
+        { AVB_HWREG_SYSTIML, "SYSTIML" }, { AVB_HWREG_SYSTIMH, "SYSTIMH" } };
+    UINT32 i;
+    printf("    snapshot %s: nt=0x%08lX status=0x%08X count=%u did=0x%04X luid=0x%016llX (raw register values, not decoded)\n",
+           what, (unsigned long)nt, s->status, s->count, s->device_id, (unsigned long long)s->net_luid);
+    if (nt < 0 || s->count != AVB_HWREG_COUNT_V2) return;
+    for (i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        const AVB_HWREG_ENTRY *e = &s->entries[regs[i].id - 1u];
+        printf("      %-9s id=%-2u offset=0x%05X value=0x%08X state=%u\n", regs[i].name, e->id, e->offset, e->value, e->state);
+    }
+}
+
+/* Validates the mapped ring against the ABI before any use; FALSE on any mismatch or access fault */
+static BOOL tt15_ring_valid(const AVB_TS_RING_MAP_REQUEST *map, char *why, size_t whySize)
+{
+    const AVB_TIMESTAMP_RING_HEADER *hdr = (const AVB_TIMESTAMP_RING_HEADER *)(UINT_PTR)map->shm_token;
+    BOOL ok = FALSE;
+    if (map->shm_token == 0u) { sprintf_s(why, whySize, "shm_token is 0"); return FALSE; }
+    __try {
+        UINT32 count = hdr->count;
+        if (count == 0u || (count & (count - 1u)) != 0u)        sprintf_s(why, whySize, "count %u is not a power of two", count);
+        else if (hdr->mask != count - 1u)                        sprintf_s(why, whySize, "mask 0x%X != count-1", hdr->mask);
+        else if ((UINT64)map->length < sizeof(*hdr) + (UINT64)count * sizeof(AVB_TIMESTAMP_EVENT))
+                                                                 sprintf_s(why, whySize, "length %u below header + %u events", map->length, count);
+        else if (hdr->event_mask != TS_EVENT_TARGET_TIME)        sprintf_s(why, whySize, "event_mask 0x%X", hdr->event_mask);
+        else ok = TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sprintf_s(why, whySize, "access fault reading the ring header at 0x%llX", (unsigned long long)map->shm_token);
+        ok = FALSE;
+    }
+    return ok;
+}
+
+/* Consumes the ring up to ONE producer snapshot, at most the ring size (bounded).  Counts new events; the first timer-0
+ * TARGET_TIME event is kept with evLo as the lower bound of its posting interval.  TRUE when that first event was
+ * found in this call.  Used by the wait loop and by the terminal reconciliation, so both apply the same rules. */
+static BOOL tt15_drain(AVB_TIMESTAMP_RING_HEADER *hdr, const AVB_TIMESTAMP_EVENT *events, UINT32 *cons,
+                       UINT32 *seen, UINT32 *candidates, UINT32 *others, AVB_TIMESTAMP_EVENT *hit, UINT64 *lo, UINT64 evLo)
+{
+    UINT32 prod, n = 0;
+    BOOL firstHere = FALSE;
+    MemoryBarrier();
+    prod = hdr->producer_index;
+    MemoryBarrier();
+    while (*cons != prod && n < hdr->count) {
+        AVB_TIMESTAMP_EVENT ev = events[*cons & hdr->mask];
+        *cons = (*cons + 1u) & hdr->mask;
+        hdr->consumer_index = *cons;
+        (*seen)++;
+        n++;
+        printf("    event: seq=%u type=0x%X queue=%u trigger_source=%u stored_timestamp=0x%016llX\n", ev.sequence_num,
+               ev.event_type, ev.queue, ev.trigger_source, (unsigned long long)ev.timestamp_ns);
+        if (ev.event_type == TS_EVENT_TARGET_TIME && ev.queue == 0u && ev.trigger_source == 0u) {
+            (*candidates)++;
+            if (*candidates == 1u) { *hit = ev; *lo = evLo; firstHere = TRUE; }
+        } else {
+            (*others)++;
+        }
+    }
+    return firstHere;
+}
+
+static void tt15_line(const char *verdict, const char *tag, const char *reason)
+{
+    printf("[%s] %s%s%s\n", verdict, tag, reason ? ": " : "", reason ? reason : "");
+    if (strcmp(verdict, "PASS") == 0) tests_passed++;
+    else { tests_failed++; tt15_nonpass++; }
+}
+
+static void tt15_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
+{
+    char tag[96], why[256];
+    HANDLE h;
+    AVB_OPEN_BY_LUID_REQUEST bind;
+    AVB_HW_SNAPSHOT_REQUEST_V2 pre, written, after;
+    LONG nt, ntPre, ntWritten = -1, ntAfter;
+    TT15_PHC p0, p1;
+    AVB_TS_SUBSCRIBE_REQUEST sub;
+    AVB_TS_RING_MAP_REQUEST map;
+    AVB_TARGET_TIME_REQUEST tgt;
+    AVB_TIMESTAMP_RING_HEADER *hdr = NULL;
+    AVB_TIMESTAMP_EVENT *events = NULL;
+    DWORD br = 0;
+    BOOL subscribed = FALSE, setSent = FALSE, haveWritten = FALSE;
+    UINT64 requested = 0;
+    UINT32 wL = 0, wH = 0;
+
+    sprintf_s(tag, sizeof(tag), "%s/adapter:%u did=0x%04X", TT15_ID, index, id->device_id);
+    printf("\n--- %s vid=0x%04X luid=0x%016llX ifIndex=%u capabilities=0x%08X (reported only; not used for applicability)\n",
+           tag, id->vendor_id, (unsigned long long)id->net_luid, id->if_index, id->capabilities);
+
+    h = CreateFileA("\\\\.\\IntelAvbFilter", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        sprintf_s(why, sizeof(why), "setup: open failed (Win32 %lu); nothing sent", GetLastError());
+        tt15_line("BLOCKED", tag, why);
+        return;
+    }
+    ZeroMemory(&bind, sizeof(bind));
+    bind.version = AVB_OPEN_BY_LUID_VERSION;
+    bind.net_luid = id->net_luid;
+    nt = avb_ioctl_ntstatus(h, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &bind, sizeof(bind), &bind, sizeof(bind), &br);
+    printf("    OPEN_ADAPTER_BY_LUID: nt=0x%08lX status=0x%08X matches=%u\n", (unsigned long)nt, bind.status, bind.matches);
+    if (nt < 0 || bind.status != 0u || bind.matches != 1u) {
+        tt15_line("BLOCKED", tag, "setup: per-handle binding by NET_LUID failed; nothing sent");
+        CloseHandle(h);
+        return;
+    }
+
+    /* ---- characterization, read-only ---- */
+    ntPre = tt15_snapshot(h, &pre);
+    tt15_print_snapshot("pre-test", ntPre, &pre);
+    if (!tt15_snapshot_ok(ntPre, &pre, id->net_luid)) {
+        tt15_line("BLOCKED", tag, "setup: no pre-test snapshot of this adapter (restoration could not be judged); nothing sent");
+        CloseHandle(h);
+        return;
+    }
+    tt15_phc(h, index, &p0);
+    tt15_print_phc("sample 1", &p0);
+    Sleep(TT15_RUNNING_GAP_MS);
+    tt15_phc(h, index, &p1);
+    tt15_print_phc("sample 2", &p1);
+    if (!p0.ok || !p1.ok) {
+        tt15_line("BLOCKED", tag, "setup: no hardware-derived PHC sample (software fallback does not count); nothing sent");
+        CloseHandle(h);
+        return;
+    }
+    if (p1.x.phc_time_ns <= p0.x.phc_time_ns) {
+        tt15_line("BLOCKED", tag, "setup: PHC not advancing across the two samples; prerequisite not established by this step; nothing sent");
+        CloseHandle(h);
+        return;
+    }
+
+    /* ---- event path: subscribe and map ---- */
+    ZeroMemory(&sub, sizeof(sub));
+    sub.types_mask = TS_EVENT_TARGET_TIME;
+    sub.vlan = 0xFFFF;   /* no VLAN filter */
+    sub.pcp = 0xFF;      /* no PCP filter */
+    nt = avb_ioctl_ntstatus(h, IOCTL_AVB_TS_SUBSCRIBE, &sub, sizeof(sub), &sub, sizeof(sub), &br);
+    printf("    TS_SUBSCRIBE: nt=0x%08lX status=0x%08X ring_id=%u\n", (unsigned long)nt, sub.status, sub.ring_id);
+    if (nt < 0 || sub.status != 0u || sub.ring_id == 0u) {
+        tt15_line("INCONCLUSIVE", tag, "measurement chain: TS_SUBSCRIBE failed; SET_TARGET_TIME not sent");
+        CloseHandle(h);
+        return;
+    }
+    subscribed = TRUE;
+    ZeroMemory(&map, sizeof(map));
+    map.ring_id = sub.ring_id;
+    map.length = (avb_u32)(sizeof(AVB_TIMESTAMP_RING_HEADER) + TT15_RING_EVENTS * sizeof(AVB_TIMESTAMP_EVENT));
+    nt = avb_ioctl_ntstatus(h, IOCTL_AVB_TS_RING_MAP, &map, sizeof(map), &map, sizeof(map), &br);
+    printf("    TS_RING_MAP: nt=0x%08lX status=0x%08X length=%u shm_token=0x%llX "
+           "(used as a user address, as the driver returns it; the ABI comment calls it an opaque token / HANDLE)\n",
+           (unsigned long)nt, map.status, map.length, (unsigned long long)map.shm_token);
+    if (nt < 0 || map.status != 0u || !tt15_ring_valid(&map, why, sizeof(why))) {
+        char r[320];
+        sprintf_s(r, sizeof(r), "measurement chain: ring not usable (%s); SET_TARGET_TIME not sent",
+                  (nt < 0 || map.status != 0u) ? "TS_RING_MAP failed" : why);
+        tt15_line("INCONCLUSIVE", tag, r);
+        goto cleanup;
+    }
+    hdr = (AVB_TIMESTAMP_RING_HEADER *)(UINT_PTR)map.shm_token;
+    events = (AVB_TIMESTAMP_EVENT *)(hdr + 1);
+    printf("    ring: count=%u producer=%u consumer=%u total_events=%llu overflow=%u\n", hdr->count, hdr->producer_index,
+           hdr->consumer_index, (unsigned long long)hdr->total_events, hdr->overflow_count);
+
+    /* ---- the operation: timer 0, contract nanoseconds (after a baseline window) ---- */
+    {
+        UINT32 cons = hdr->producer_index, seen = 0, candidates = 0, others = 0, baselineEvents = 0;
+        UINT32 overflowStart = hdr->overflow_count;
+        BOOL phcGap = FALSE, ringLoss = FALSE, byRegs = FALSE, byPhc = FALSE, pastWindow = FALSE;
+        UINT64 lo = 0, hi = 0, prevA = 0, lastPhc = 0;
+        AVB_TIMESTAMP_EVENT hit;
+        DWORD t0;
+        const char *fv = NULL, *fr = NULL;
+        ZeroMemory(&hit, sizeof(hit));
+        hdr->consumer_index = cons;
+
+        /* Baseline window BEFORE the request: a TARGET_TIME event here was not caused by this test, so any event of the
+         * window that follows could have the same other cause - attribution is then ambiguous. */
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < TT15_BASELINE_MS) {
+            UINT32 prod = hdr->producer_index;
+            MemoryBarrier();
+            while (cons != prod) {
+                AVB_TIMESTAMP_EVENT ev = events[cons & hdr->mask];
+                cons = (cons + 1u) & hdr->mask;
+                hdr->consumer_index = cons;
+                baselineEvents++;
+                printf("    baseline event (before the request): seq=%u type=0x%X queue=%u trigger_source=%u stored_timestamp=0x%016llX\n",
+                       ev.sequence_num, ev.event_type, ev.queue, ev.trigger_source, (unsigned long long)ev.timestamp_ns);
+            }
+            Sleep(TT15_POLL_MS);
+        }
+        printf("    baseline window %u ms before the request: %u event(s)\n", TT15_BASELINE_MS, baselineEvents);
+        if (!tt15_phc(h, index, &p0)) {
+            tt15_print_phc("before target", &p0);
+            tt15_line("BLOCKED", tag, "setup: no hardware-derived PHC sample for the target; SET_TARGET_TIME not sent");
+            goto cleanup;
+        }
+        requested = p0.x.phc_time_ns + TT15_LEAD_NS;
+        printf("    requested target (contract, ns): %llu = PHC %llu + %llu  [= %llu s + %llu ns; 64-bit halves high=0x%08X low=0x%08X]\n",
+               (unsigned long long)requested, (unsigned long long)p0.x.phc_time_ns, (unsigned long long)TT15_LEAD_NS,
+               (unsigned long long)(requested / 1000000000ULL), (unsigned long long)(requested % 1000000000ULL),
+               (unsigned)(UINT32)(requested >> 32), (unsigned)(UINT32)requested);
+        prevA = lastPhc = p0.x.phc_time_ns;
+
+        ZeroMemory(&tgt, sizeof(tgt));
+        tgt.timer_index = 0;
+        tgt.target_time = requested;
+        tgt.enable_interrupt = 1;
+        tgt.enable_sdp_output = 0;
+        tgt.sdp_mode = 0;
+        nt = avb_ioctl_ntstatus(h, IOCTL_AVB_SET_TARGET_TIME, &tgt, sizeof(tgt), &tgt, sizeof(tgt), &br);
+        setSent = TRUE;   /* the driver may have written registers even when it then failed */
+        printf("    SET_TARGET_TIME(timer 0, enable_interrupt 1): nt=0x%08lX status=0x%08X previous_target=0x%08X "
+               "(32-bit ABI field)\n", (unsigned long)nt, tgt.status, tgt.previous_target);
+        if (nt < 0) {
+            AVB_VERDICT v = avb_verdict_from_status((NTSTATUS)nt, AVB_CAP_UNKNOWN, 0, 1);
+            sprintf_s(why, sizeof(why), "SET_TARGET_TIME refused nt=0x%08lX (no per-operation target-time capability contract exists)",
+                      (unsigned long)nt);
+            tt15_line(avb_verdict_tag(v), tag, why);
+            goto cleanup;
+        }
+        ntWritten = tt15_snapshot(h, &written);
+        tt15_print_snapshot("after SET_TARGET_TIME", ntWritten, &written);
+        haveWritten = tt15_snapshot_ok(ntWritten, &written, id->net_luid) &&
+                      tt15_reg(&written, AVB_HWREG_TRGTTIML0, &wL) && tt15_reg(&written, AVB_HWREG_TRGTTIMH0, &wH);
+        if (haveWritten)
+            printf("    target registers as written: TRGTTIMH0=0x%08X TRGTTIML0=0x%08X (read-back only; not functional evidence)\n", wH, wL);
+
+        /* Every new event until the PHC is past the diagnostic window (not only the first), so that several candidates
+         * or other events stay visible.  Bracket of an event first seen at poll k: [PHC before the ring check of poll k-1,
+         * PHC after the ring check of poll k] - it bounds the driver's posting, not the hardware trigger. */
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < TT15_HOST_DEADLINE_MS) {
+            TT15_PHC a, b;
+            UINT64 evLo = prevA;
+            BOOL aok = tt15_phc(h, index, &a);
+            BOOL firstHere = tt15_drain(hdr, events, &cons, &seen, &candidates, &others, &hit, &lo, evLo);
+            if (tt15_phc(h, index, &b)) lastPhc = b.x.phc_time_ns; else phcGap = TRUE;
+            if (firstHere) hi = lastPhc;
+            if (aok) prevA = a.x.phc_time_ns; else phcGap = TRUE;
+            /* The window boundary counts only when THIS iteration's terminal PHC sample succeeded and crossed it. */
+            if (lastPhc > requested + TT15_OBSERVE_AFTER_NS) { pastWindow = TRUE; break; }
+            Sleep(TT15_POLL_MS);
+        }
+        /* Terminal reconciliation (PR #514 review): the ring check above precedes the terminal PHC sample, so an event
+         * published while that sample was taken would stay unread.  One more producer read AFTER the terminal sample
+         * (bounded: one snapshot, at most the ring size) closes the observation window before absence is judged; the
+         * loss check follows it.  An event found here is reported like any other (posting interval up to a PHC sample
+         * taken after this read); without a successful sample there the interval is open and the result INCONCLUSIVE. */
+        {
+            TT15_PHC c;
+            UINT32 seenBefore = seen;
+            BOOL firstHere = tt15_drain(hdr, events, &cons, &seen, &candidates, &others, &hit, &lo, prevA);
+            BOOL cok = tt15_phc(h, index, &c);
+            if (firstHere) { if (cok) hi = c.x.phc_time_ns; else { hi = lastPhc; phcGap = TRUE; } }
+            printf("    terminal ring reconciliation after the terminal PHC sample: %u further event(s); window boundary %s\n",
+                   seen - seenBefore, pastWindow ? "established by that sample" : "NOT established (host bound or sample gap)");
+        }
+        ringLoss = (hdr->overflow_count != overflowStart);
+        printf("    ring after wait: producer=%u total_events=%llu overflow=%u (start %u); new events=%u, timer-0 candidates=%u, others=%u; "
+               "PHC sample gaps=%s; last PHC %llu ns\n", hdr->producer_index, (unsigned long long)hdr->total_events,
+               hdr->overflow_count, overflowStart, seen, candidates, others, phcGap ? "yes" : "no", (unsigned long long)lastPhc);
+
+        /* ---- assessment 1: event attribution (separate from the functional verdict) ----
+         * Two driver posting paths exist; each leaves a timestamp PATTERN in the event: the target registers as read
+         * (H<<32|L), or a PHC value at detection.  A pattern names the posting path, it is not a request identifier.
+         * This test cannot exclude an independent source of timer-0 target-time events (for example an already active
+         * clock output on the same target time), so a present event is never attributed to the request. */
+        if (candidates > 0u) {
+            byRegs = haveWritten && hit.timestamp_ns == (((UINT64)wH << 32) | wL);
+            byPhc  = hit.timestamp_ns >= lo && hit.timestamp_ns <= hi;
+            printf("    first timer-0 event: posting interval PHC [%llu, %llu] ns; requested target %llu ns; interval - target = "
+                   "[%lld, %lld] ns; timestamp pattern: %s\n",
+                   (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)requested,
+                   (long long)(lo - requested), (long long)(hi - requested),
+                   byRegs ? "target registers as read (register posting path)" :
+                   byPhc ? "PHC inside the posting interval (detection posting path)" : "neither posting-path pattern");
+        }
+        printf("    assessment ATTRIBUTION: %s (baseline events %u, timer-0 events %u, other events %u, ring overflow %s)\n",
+               candidates == 0u ? "none (no timer-0 event)"
+                                : "INCONCLUSIVE - an independent timer-0 event source is not excluded by this test",
+               baselineEvents, candidates, others, ringLoss ? "yes" : "no");
+
+        /* ---- assessment 2: function ----
+         * The required event missing after the PHC passed the target is judged (FAIL).  A present event is reported with
+         * its interval, but neither a PASS nor a request-specific timing FAIL follows from it while an independent source
+         * is not excluded: INCONCLUSIVE.  PASS is therefore not reachable in this version of the case. */
+        if (phcGap || ringLoss) {
+            fv = "INCONCLUSIVE"; fr = phcGap ? "measurement gap: PHC sample(s) missing in the wait loop"
+                                             : "measurement gap: ring overflow during the wait";
+        } else if (candidates == 0u) {
+            if (pastWindow) {
+                fv = "FAIL"; fr = "required timer-0 TARGET_TIME event missing although the PHC passed the requested target by the diagnostic window "
+                                  "(ring reconciled after the terminal PHC sample)";
+            } else {
+                fv = "INCONCLUSIVE"; fr = "no event, but the window boundary was not established by a PHC sample before the terminal ring read";
+            }
+        } else {
+            sprintf_s(why, sizeof(why), "timer-0 event present (first posting interval %s the requested target); request-specific timing "
+                      "not judged: an independent event source is not excluded", hi < requested ? "entirely BEFORE" :
+                      lo >= requested ? "entirely after" : "overlapping");
+            fv = "INCONCLUSIVE"; fr = why;
+        }
+        printf("    assessment FUNCTION: %s\n", fv);
+        tt15_line(fv, tag, fr);
+    }
+
+cleanup:
+    if (subscribed) {
+        AVB_TS_UNSUBSCRIBE_REQUEST un;
+        ZeroMemory(&un, sizeof(un));
+        un.ring_id = sub.ring_id;
+        nt = avb_ioctl_ntstatus(h, IOCTL_AVB_TS_UNSUBSCRIBE, &un, sizeof(un), &un, sizeof(un), &br);
+        printf("    cleanup TS_UNSUBSCRIBE: nt=0x%08lX status=0x%08X\n", (unsigned long)nt, un.status);
+        if (nt < 0 || un.status != 0u) {
+            tt15_line("CLEANUP_FAILED", tag, "subscription not released");
+        }
+    }
+    if (setSent) {
+        static const struct { UINT32 id; const char *name; } obs[] = {
+            { AVB_HWREG_TSAUXC, "TSAUXC" }, { AVB_HWREG_TRGTTIML0, "TRGTTIML0" }, { AVB_HWREG_TRGTTIMH0, "TRGTTIMH0" } };
+        UINT32 i, changed = 0, unread = 0;
+        ntAfter = tt15_snapshot(h, &after);
+        tt15_print_snapshot("after cleanup", ntAfter, &after);
+        for (i = 0; i < sizeof(obs) / sizeof(obs[0]); i++) {
+            UINT32 vb = 0, va = 0;
+            BOOL okb = tt15_reg(&pre, obs[i].id, &vb);
+            BOOL oka = tt15_snapshot_ok(ntAfter, &after, id->net_luid) && tt15_reg(&after, obs[i].id, &va);
+            if (!okb || !oka) { unread++; printf("    restoration %-9s NOT_OBSERVED\n", obs[i].name); }
+            else if (va != vb) { changed++; printf("    restoration %-9s NOT_RESTORED 0x%08X -> 0x%08X\n", obs[i].name, vb, va); }
+            else printf("    restoration %-9s unchanged 0x%08X\n", obs[i].name, va);
+        }
+        printf("    restoration NOT_VERIFIED: interrupt mask/enable and clock-output state the operation may change but no IOCTL "
+               "reads back; the driver's target-time polling (no query exists); no IOCTL restores target-time state\n");
+        printf("    assessment RESTORATION: %s\n", changed > 0 ? "CLEANUP_FAILED" : "INCONCLUSIVE_RESTORATION");
+        if (changed > 0) tt15_line("CLEANUP_FAILED", tag, "observable target-time state differs from the pre-test snapshot (no restore path)");
+        else tt15_line("INCONCLUSIVE_RESTORATION", tag, unread > 0 ? "observable state partly unreadable; unobservable state NOT_VERIFIED"
+                                                                    : "observable state unchanged; unobservable state NOT_VERIFIED");
+    } else {
+        printf("    assessment RESTORATION: not required (SET_TARGET_TIME not sent; no target-time mutation by this test)\n");
+    }
+    CloseHandle(h);
+}
+
+static int tt15_run(void)
+{
+    HANDLE h;
+    UINT32 index, count = 1;
+    printf("==============================================\n");
+    printf("%s (#299): timer-0 target-time event, every enumerated adapter\n", TT15_ID);
+    printf("Characterization step: timer 1 is not programmed; register values are raw\n");
+    printf("==============================================\n");
+    h = CreateFileA("\\\\.\\IntelAvbFilter", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[BLOCKED] %s: open failed (Win32 %lu)\n", TT15_ID, GetLastError());
+        return 1;
+    }
+    for (index = 0; index < count; index++) {
+        AVB_ADAPTER_IDENTITY_REQUEST id;
+        DWORD br = 0;
+        LONG nt;
+        ZeroMemory(&id, sizeof(id));
+        id.version = AVB_ADAPTER_IDENTITY_VERSION;
+        id.index = index;
+        nt = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_ADAPTER_IDENTITY, &id, sizeof(id), &id, sizeof(id), &br);
+        if (nt < 0 || id.status != 0u) {
+            printf("[BLOCKED] %s/adapter:%u: GET_ADAPTER_IDENTITY nt=0x%08lX status=0x%08X\n", TT15_ID, index,
+                   (unsigned long)nt, id.status);
+            tests_failed++; tt15_nonpass++;
+            if (index == 0) break;   /* the adapter count is unknown */
+            continue;
+        }
+        count = id.count;
+        tt15_adapter(index, &id);
+    }
+    CloseHandle(h);
+    if (count == 0) { printf("[BLOCKED] %s: no adapter enumerated\n", TT15_ID); tt15_nonpass++; }
+    printf("\n%s SUMMARY: adapters=%u PASS=%d non-pass=%d\n", TT15_ID, count, tests_passed, tt15_nonpass);
+    return (tt15_nonpass > 0 || tests_passed == 0) ? 1 : 0;
+}
+
 int main(int argc, char* argv[]) {
+    /* --case TC-TARGET-015 (#299): the isolated timer-0 characterization case; any other argument fails closed */
+    if (argc > 1) {
+        if (argc == 3 && strcmp(argv[1], "--case") == 0 && strcmp(argv[2], TT15_ID) == 0) return tt15_run();
+        printf("usage: test_ioctl_target_time [--case %s]\n", TT15_ID);
+        return 2;
+    }
     printf("==============================================\n");
     printf("Target Time & Aux Timestamp IOCTL Tests\n");
     printf("Requirement #7: REQ-F-PTP-005\n");
