@@ -217,6 +217,14 @@ typedef struct _IOCTL_VERSION {
  * FILE_WRITE_ACCESS because it changes driver state. */
 #define IOCTL_AVB_DBG_INITFAULT_CONTROL CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x8F0, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A3C0 (#412) */
 
+/* Versioned target-time requests (#515 increment 1, decision D-1 on #515, 2026-11-24): two METHOD_BUFFERED codes sharing
+ * AVB_TARGET_TIME_V2_REQUEST, whose operation field must match the code. QUERY reads the selected timer's target and needs
+ * FILE_READ_ACCESS; ARM programs it and needs FILE_WRITE_ACCESS, checked by the I/O manager against the handle before
+ * dispatch. DECLARATION ONLY: no driver serves these codes yet (STATUS_INVALID_DEVICE_REQUEST like any unknown code). The
+ * legacy IOCTL_AVB_SET_TARGET_TIME (function 47) and its AVB_TARGET_TIME_REQUEST are unchanged. */
+#define IOCTL_AVB_TARGET_TIME_V2_QUERY  CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80D, METHOD_BUFFERED, FILE_READ_ACCESS)   /* 0x00176034 (#515) */
+#define IOCTL_AVB_TARGET_TIME_V2_ARM    CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80E, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A038 (#515) */
+
 #define AVB_TAS_ACTIVATE_VERSION 1u
 #define AVB_TAS_QUEUES           4u
 #define AVB_TAS_PRE_HOLD         1u   /* frames held until the first window after BaseT */
@@ -674,6 +682,48 @@ typedef struct AVB_TARGET_TIME_REQUEST {
     avb_u32 previous_target;   /* out: Previous target time (for verification) */
     avb_u32 status;            /* out: NDIS_STATUS value */
 } AVB_TARGET_TIME_REQUEST, *PAVB_TARGET_TIME_REQUEST;
+
+/* ---- IOCTL_AVB_TARGET_TIME_V2_QUERY / _ARM request (#515 increment 1; layout and values as published on #515, 2026-11-24:
+ * D-1, D-3, D-4, D-7) ----
+ * One 48-byte, 8-byte-aligned METHOD_BUFFERED structure for both codes. The API unit is nanoseconds of the adapter's hardware
+ * PHC; the register encoding is the device backend's, never a binary split of this value (#515, #7 clarification).
+ * - Actual input or output buffer < 48 bytes: STATUS_BUFFER_TOO_SMALL. Larger buffers are accepted; only 48 bytes are read and
+ *   written. version != 2, size != 48, operation unknown or not matching the code, timer_index > 1, flags != 0, reserved0 or
+ *   reserved1 != 0, or (QUERY) target_time_ns != 0: STATUS_INVALID_PARAMETER.
+ * - Incoming result_target_ns / result_state are ignored (output-only) and overwritten on success (D-4).
+ * - Success: Information 48; every error: Information 0. No status field: the NTSTATUS is the result.
+ * - result_state other than VALID returns result_target_ns 0, an explicitly invalid value, never a zero-time claim (D-7).
+ * - ARM (flags 0) programs only the selected target; no comparator, event, ownership or restoration promise (D-3).
+ * DECLARATION ONLY: no handler exists yet; what a driver serves is the hardware tests' evidence (TC-TARGET-V2-001). */
+#define AVB_TARGET_TIME_V2_VERSION 2u
+
+#define AVB_TT_V2_OP_QUERY 1u
+#define AVB_TT_V2_OP_ARM   2u
+
+#define AVB_TT_V2_STATE_VALID                1u  /* decodable, no mismatch, coherence assumptions established */
+#define AVB_TT_V2_STATE_UNDECODABLE          2u  /* outside the backend's documented representation; value 0 */
+#define AVB_TT_V2_STATE_INCOHERENT           3u  /* a mismatch was observed while sampling; value 0 */
+#define AVB_TT_V2_STATE_COHERENCE_UNVERIFIED 4u  /* no mismatch, but coherence assumptions not established; value 0 (D-7) */
+
+typedef struct AVB_TARGET_TIME_V2_REQUEST {
+    avb_u32 version;           /*  0 in  AVB_TARGET_TIME_V2_VERSION */
+    avb_u32 size;              /*  4 in  sizeof(AVB_TARGET_TIME_V2_REQUEST) = 48; negotiation only, never a buffer bound */
+    avb_u32 operation;         /*  8 in  AVB_TT_V2_OP_*; must match the code */
+    avb_u32 timer_index;       /* 12 in  0 or 1 */
+    avb_u32 flags;             /* 16 in  0 (increment 1, D-3) */
+    avb_u32 reserved0;         /* 20 in  0 */
+    avb_u64 target_time_ns;    /* 24 in  ARM: requested target; QUERY: 0 */
+    avb_u64 result_target_ns;  /* 32 out QUERY: current target; ARM: target before this ARM; 0 unless result_state VALID */
+    avb_u32 result_state;      /* 40 out AVB_TT_V2_STATE_* */
+    avb_u32 reserved1;         /* 44 in/out 0 */
+} AVB_TARGET_TIME_V2_REQUEST, *PAVB_TARGET_TIME_V2_REQUEST;                   /* 48 */
+
+/* Compile-time size pin (offsets, alignment and codes: TC-ABI-034..036 in tests/unit/abi/test_ioctl_abi.c) */
+#if defined(_KERNEL_MODE)
+C_ASSERT(sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48);
+#elif defined(__cplusplus)
+static_assert(sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48, "target-time v2 request size changed");
+#endif
 
 /* Auxiliary timestamp query (AUXSTMPL/H registers)
  * Read captured timestamp from auxiliary timestamp registers.

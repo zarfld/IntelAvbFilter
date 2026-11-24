@@ -92,6 +92,8 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_TAS_ACTIVATE,               /* 0x80C; IOCTL_AVB_TAS_ACTIVATE_80C is the same code (TC-ABI-028) */
         IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,   /* function 71, withdrawn (TC-ABI-024) */
         IOCTL_AVB_TAS_QUERY_HW,
+        IOCTL_AVB_TARGET_TIME_V2_QUERY,       /* 0x80D (#515, TC-ABI-034) */
+        IOCTL_AVB_TARGET_TIME_V2_ARM,         /* 0x80E (#515, TC-ABI-034) */
         IOCTL_AVB_SETUP_FP,
         IOCTL_AVB_SETUP_PTM,
         IOCTL_AVB_MDIO_READ,
@@ -587,6 +589,60 @@ static void test_struct_sizes(void)
     TEST_ASSERT(AVB_TAS_ACT_READ_FAILED == 8u && AVB_TAS_ACT_NOT_HARDWARE_VERIFIED == 9u && AVB_TAS_ACT_NOT_SUPPORTED == 10u &&
                 AVB_TAS_ACT_NOT_IMPLEMENTED == 11u && AVB_TAS_ACT_STATE_CONFLICT == 12u && AVB_TAS_ACT_NOT_READY == 13u &&
                 AVB_TAS_ACT_NOT_BOUND == 15u && AVB_TAS_ACT_ADAPTER_MISMATCH == 16u, "results 8-13, 15, 16 as published");
+
+    /* Verifies: #515, declaration only. Decision D-1 on #515 (2026-11-24): QUERY = CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80D,
+     * METHOD_BUFFERED, FILE_READ_ACCESS) = 0x00176034; ARM = CTL_CODE(..., 0x80E, METHOD_BUFFERED, FILE_WRITE_ACCESS) =
+     * 0x0017A038. Static values only: what a driver serves is TC-TARGET-V2-001's hardware evidence */
+    TEST_CASE("TC-ABI-034: IOCTL_AVB_TARGET_TIME_V2_QUERY 0x80D read access, _ARM 0x80E write access, buffered (#515 D-1)");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_QUERY == 0x00176034u, "IOCTL_AVB_TARGET_TIME_V2_QUERY == 0x00176034");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_ARM == 0x0017A038u, "IOCTL_AVB_TARGET_TIME_V2_ARM == 0x0017A038");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 14) & 3u) == FILE_READ_ACCESS, "QUERY requires FILE_READ_ACCESS only");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_ARM >> 14) & 3u) == FILE_WRITE_ACCESS, "ARM requires FILE_WRITE_ACCESS only");
+    TEST_ASSERT((IOCTL_AVB_TARGET_TIME_V2_QUERY & 3u) == METHOD_BUFFERED && (IOCTL_AVB_TARGET_TIME_V2_ARM & 3u) == METHOD_BUFFERED,
+                "both codes are METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 2) & 0xFFFu) == 0x80Du && ((IOCTL_AVB_TARGET_TIME_V2_ARM >> 2) & 0xFFFu) == 0x80Eu,
+                "functions 0x80D and 0x80E (vendor range)");
+    TEST_ASSERT((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 16) == FILE_DEVICE_PHYSICAL_NETCARD &&
+                (IOCTL_AVB_TARGET_TIME_V2_ARM >> 16) == FILE_DEVICE_PHYSICAL_NETCARD, "device type unchanged");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_QUERY != IOCTL_AVB_SET_TARGET_TIME && IOCTL_AVB_TARGET_TIME_V2_ARM != IOCTL_AVB_SET_TARGET_TIME &&
+                IOCTL_AVB_TARGET_TIME_V2_QUERY != IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 && IOCTL_AVB_TARGET_TIME_V2_ARM != IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,
+                "neither code reuses the legacy SET_TARGET_TIME (47) or the withdrawn function 71");
+
+    /* Verifies: #515, declaration only. The layout accepted on #515 (D-1 "Layout and output rules", D-7): 48 bytes, 8-byte
+     * aligned, every offset pinned. Static layout only: ABI compatibility, not handler or hardware behaviour */
+    TEST_CASE("TC-ABI-035: AVB_TARGET_TIME_V2_REQUEST layout, 48 bytes, 8-byte aligned (#515)");
+    TEST_ASSERT(sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48, "sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48");
+    TEST_ASSERT(__alignof(AVB_TARGET_TIME_V2_REQUEST) == 8, "__alignof(AVB_TARGET_TIME_V2_REQUEST) == 8");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, version),           0, "version" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, size),              4, "size" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, operation),         8, "operation" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, timer_index),      12, "timer_index" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, flags),            16, "flags" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, reserved0),        20, "reserved0" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, target_time_ns),   24, "target_time_ns" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, result_target_ns), 32, "result_target_ns" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, result_state),     40, "result_state" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, reserved1),        44, "reserved1" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(AVB_TARGET_TIME_V2_REQUEST, %s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+    TEST_ASSERT(sizeof(((AVB_TARGET_TIME_V2_REQUEST *)0)->target_time_ns) == 8 &&
+                sizeof(((AVB_TARGET_TIME_V2_REQUEST *)0)->result_target_ns) == 8, "target_time_ns and result_target_ns are 64-bit");
+
+    /* Verifies: #515, declaration only. Published values: version 2, size 48; QUERY 1, ARM 2; VALID 1, UNDECODABLE 2,
+     * INCOHERENT 3 (D-1), COHERENCE_UNVERIFIED 4 (D-7) */
+    TEST_CASE("TC-ABI-036: AVB_TARGET_TIME_V2_REQUEST published values (#515 D-1, D-7)");
+    TEST_ASSERT(AVB_TARGET_TIME_V2_VERSION == 2u, "AVB_TARGET_TIME_V2_VERSION == 2");
+    TEST_ASSERT(AVB_TT_V2_OP_QUERY == 1u && AVB_TT_V2_OP_ARM == 2u, "operation: QUERY 1, ARM 2");
+    TEST_ASSERT(AVB_TT_V2_STATE_VALID == 1u && AVB_TT_V2_STATE_UNDECODABLE == 2u && AVB_TT_V2_STATE_INCOHERENT == 3u &&
+                AVB_TT_V2_STATE_COHERENCE_UNVERIFIED == 4u, "result_state: VALID 1, UNDECODABLE 2, INCOHERENT 3, COHERENCE_UNVERIFIED 4");
 }
 
 int main(void)

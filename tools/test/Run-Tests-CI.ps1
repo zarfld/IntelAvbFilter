@@ -460,6 +460,7 @@ $HardwareUnitTests = @(
     "test_rx_timestamp_complete",
     "test_ioctl_target_time",       # IOCTL target time management -- (#199)
     "test_ioctl_target_time --case TC-TARGET-015",  # #299 timer-0 target-time event on every adapter (characterization; no timer 1)
+    "test_ioctl_target_time --case TC-TARGET-V2-001",  # #515 V2 target-time QUERY/validation/access on every adapter (invalid ARM only)
     "test_qav_cbs",
     "test_ioctl_tas",
     "test_ioctl_fp_ptm",
@@ -730,6 +731,7 @@ $HilTestSafety = @{
     'test_rx_timestamp_complete'       = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
     'test_ioctl_target_time'           = 'Mutating'   # SET_TARGET_TIME, SET_HW_TIMESTAMPING
     'test_ioctl_target_time --case TC-TARGET-015' = 'Mutating'   # SET_TARGET_TIME timer 0 + TS_SUBSCRIBE/RING_MAP/UNSUBSCRIBE (#299)
+    'test_ioctl_target_time --case TC-TARGET-V2-001' = 'Mutating'   # negative mutation boundary (#515): per LUID-bound adapter QUERY_HW_SNAPSHOT x2, V2 QUERY (valid + invalid), invalid V2 ARM only (version 0, operation QUERY, input 47, target 1 ns), read-only-handle QUERY + ARM access probe, QUERY_HW_SNAPSHOT; no valid ARM
     'test_ioctl_tas'                   = 'Mutating'   # SETUP_TAS, DISARM_TAS
     'test_ioctl_fp_ptm'                = 'Mutating'   # SETUP_FP, SETUP_PTM
     'test_ioctl_offset'                = 'Mutating'   # PHC_OFFSET_ADJUST
