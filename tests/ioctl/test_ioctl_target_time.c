@@ -1502,8 +1502,13 @@ static int tt15_run(void)
  *      input/output length 47, version 1, size 47/56, operation 0 or ARM, timer 2, flags 1, reserved0 1, reserved1 1,
  *      target_time_ns 1);
  *   3. ARM (0x0017A038) on that handle, invalid only: A-VER0 (version 0), A-OPQ (operation QUERY), A-IN47 (input 47),
- *      A-PAST (target 0 ns with every other field valid: not after the PHC for any PHC value, so rejected under D-5
- *      before any write); every ARM here carries target 0 ns (TV2_ARM_PAST_NS) as its second invalid field;
+ *      A-FLAGS (flags 1, D-3). Each is invalid in its header or length, so its status (BUFFER_TOO_SMALL or
+ *      INVALID_PARAMETER, #515 comment 7130364452) does not depend on adapter, backend or PHC state: header validation
+ *      precedes those phases (PR #516 re-review of 409f353). Every ARM also carries target 0 ns (TV2_ARM_PAST_NS) as a
+ *      second invalid field, so the status alone does not show which rule rejected the request.
+ *      NOT tested here: D-5 (target not after the hardware-derived PHC, more than 1 hour ahead). It stays required and
+ *      belongs to the later semantic ARM test, which must first establish a ready adapter, the backend and a
+ *      hardware-derived PHC;
  *   4. read-only handle bound to the same LUID: RO-Q (valid QUERY: read access suffices), RO-A (ARM version 0): an access
  *      probe answered by the I/O manager before dispatch - never evidence of a V2 implementation;
  *   5. QUERY_HW_SNAPSHOT v2 "post" on the read/write handle.
@@ -1527,8 +1532,8 @@ static int tt15_run(void)
 #define TV2_SIZE            48u
 /* ARM target for the invalid-ARM cases: 0 ns. target_time_ns and the hardware PHC are both unsigned 64-bit nanoseconds, so
  * 0 <= PHC for every PHC value (including a PHC of 0 after a reset), and #515 D-5 rejects any target <= the hardware-derived
- * PHC. A non-zero value such as 1 ns would be a valid future target while the PHC is still below it. An adapter whose PHC
- * is not hardware-derived, not ready or without the HAL is rejected earlier; either way no write is reachable. */
+ * PHC. A non-zero value such as 1 ns would be a valid future target while the PHC is still below it. Rejecting these
+ * requests before any write is required of a conforming driver; it is no guarantee about a defective implementation. */
 #define TV2_ARM_PAST_NS     0ULL
 
 typedef enum { TV2_QUERY_OK, TV2_REJECT, TV2_ACCESS_DENIED } TV2_KIND;
@@ -1578,7 +1583,7 @@ static const TV2_CASE tv2_cases[] = {
     { "A-VER0",   TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     0,     TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "invalid ARM: version 0" },
     { "A-OPQ",    TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "invalid ARM: operation QUERY on the ARM code" },
     { "A-IN47",   TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_BUFFER_TOO_SMALL,      TV2_V, TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 47, 48, "invalid ARM: input buffer 47" },
-    { "A-PAST",   TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "invalid ARM: target 0 ns, not after the PHC for any PHC value (D-5)" },
+    { "A-FLAGS",  TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OA, 0, 1, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "invalid ARM: flags 1 (D-3)" },
     { "RO-Q",     TV2_Q, TRUE,  TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "read-only handle: valid QUERY" },
     { "RO-A",     TV2_A, TRUE,  TV2_ACCESS_DENIED, (LONG)STATUS_ACCESS_DENIED,  0,     TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "read-only handle: ARM version 0 (access probe)" },
 };
