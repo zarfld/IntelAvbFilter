@@ -823,8 +823,26 @@ $HilTestSafety = @{
 # ===========================
 # Resolve which tests to run
 # ===========================
+# A program named in -Tests without arguments that is no entry itself stands for all its registered modes of the suite, each
+# once (#473; the same rule as Run-Tests.ps1 Resolve-AvbRunnerEntry).  Everything else is passed on unchanged: an unregistered
+# name still fails closed at dispatch.
+function Expand-AvbBareProgram {
+    param([string[]]$Names, [string[]]$Registered, [string[]]$Classified)
+    $reg = @($Registered | ForEach-Object { $_ -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' } | Select-Object -Unique)
+    $out = @()
+    foreach ($n in $Names) {
+        $b = $n.Trim() -replace '\.exe$', ''
+        $modes = @(if ($b -notmatch '[\s:]' -and $reg -notcontains $b -and $Classified -notcontains $b) { $reg | Where-Object { ($_ -split '\s+', 2)[0] -eq $b } })
+        if ($modes.Count -gt 0) { $out += @($modes | Where-Object { $out -notcontains $_ }) } else { $out += $n }
+    }
+    return $out
+}
 if ($Tests.Count -gt 0) {
-    $TestList = $Tests
+    $TestList = @(Expand-AvbBareProgram -Names $Tests -Classified @($HilTestSafety.Keys) -Registered $(switch ($Suite) {
+        'HardwareUnit'        { @($HardwareUnitTests) + @($HardwareUnitCoverageGaps.Keys) }
+        'HardwareIntegration' { @($HardwareIntegrationTests) + @($HardwareIntegrationCoverageGaps.Keys) + @($HardwareIntegrationAttendedOnly.Keys) }
+        default               { @($UnitTests) + @($IntegrationTests) }
+    }))
     # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list (the behavioral sentinel
     # test injects a custom list while exercising the hardware-suite control flow).
 } else {

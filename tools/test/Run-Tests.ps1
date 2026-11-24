@@ -131,7 +131,9 @@ function Get-AvbArtifactClassification {
 }
 
 # Program name as typed (Build-Tests Output, e.g. avb_test_i210_um.exe, or a test script name) -> runner entry + suite.
-# Suite preference: HardwareUnit, HardwareIntegration, Unit, Integration.
+# Suite preference: HardwareUnit, HardwareIntegration, Unit, Integration.  Groups: suite -> the entries to run.  An exact
+# entry (with its arguments) is run as it is, once.  A program selected WITHOUT arguments that is no entry itself stands for
+# all its registered modes, each once, in the first suite that has it (#473); the program name must match exactly.
 function Resolve-AvbRunnerEntry {
     param([string]$Name, [string]$Arguments, $Registry)
     $n = $Name.Trim()
@@ -148,8 +150,15 @@ function Resolve-AvbRunnerEntry {
         $n = $base
     }
     $key = ConvertTo-AvbEntryKey $(if ($Arguments) { "$n $Arguments" } else { $n })
-    foreach ($s in $Registry.Keys) { if (@($Registry[$s]) -contains $key) { return @{ Entry = $key; Suite = $s } } }
-    return @{ Entry = $key; Suite = $null }
+    foreach ($s in $Registry.Keys) { if (@($Registry[$s]) -contains $key) { return @{ Entry = $key; Suite = $s; Groups = ([ordered]@{ $s = @($key) }) } } }
+    $groups = [ordered]@{}; $taken = @()
+    if (-not $Arguments -and -not $key.StartsWith('ps1:')) {
+        foreach ($s in $Registry.Keys) {
+            $modes = @($Registry[$s] | Where-Object { ($_ -split '\s+', 2)[0] -eq $key -and $taken -notcontains $_ })
+            if ($modes.Count -gt 0) { $groups[$s] = $modes; $taken += $modes }
+        }
+    }
+    return @{ Entry = $key; Suite = (@($groups.Keys) | Select-Object -First 1); Groups = $groups }
 }
 
 # One Run-Tests-CI.ps1 invocation (in-process, like LocalSuites): results document + logs under $ReportDir; earlier
@@ -507,7 +516,8 @@ if ($HardwareOnly) { Invoke-AvbDispatch -Label 'hardware-only' -Suite 'HardwareI
 if ($TestExecutable) {
     Write-Step "Running Specific Test: $TestExecutable $TestArgs (Run-Tests-CI.ps1)"
     $r = Resolve-AvbRunnerEntry -Name $TestExecutable -Arguments $TestArgs -Registry $runnerRegistry
-    if ($r.Suite) { Invoke-AvbDispatch -Label $r.Entry -Suite $r.Suite -Entries @($r.Entry) -ReportDir $ReportDir }
+    # One runner call per suite: it runs the entries one after another, a failing one never stops the next (#473)
+    if ($r.Suite) { foreach ($s in @($r.Groups.Keys)) { Invoke-AvbDispatch -Label $r.Entry -Suite $s -Entries @($r.Groups[$s]) -ReportDir $ReportDir } }
     else { Add-AvbUnregistered $r.Entry }
 } elseif ($Quick) {
     Write-Step "Running Quick Verification Tests -- PARTIAL / SMOKE RUN (never satisfies HIL coverage)"
@@ -522,8 +532,10 @@ if ($TestExecutable) {
     foreach ($q in $quickPrograms) {
         $r = Resolve-AvbRunnerEntry -Name $q -Arguments '' -Registry $runnerRegistry
         if (-not $r.Suite) { Add-AvbUnregistered $r.Entry; continue }
-        if (-not $bySuite.Contains($r.Suite)) { $bySuite[$r.Suite] = @() }
-        $bySuite[$r.Suite] += $r.Entry
+        foreach ($s in @($r.Groups.Keys)) {
+            if (-not $bySuite.Contains($s)) { $bySuite[$s] = @() }
+            $bySuite[$s] += @($r.Groups[$s])
+        }
     }
     foreach ($s in $suiteOrder) { if ($bySuite.Contains($s)) { Invoke-AvbDispatch -Label 'quick (partial)' -Suite $s -Entries $bySuite[$s] -ReportDir $ReportDir } }
     Write-Host "`n  [PARTIAL] Quick run only - HIL coverage requires the full run (-Full: Unit + all four hardware suites)" -ForegroundColor Yellow

@@ -49,7 +49,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | Parameter | Notes |
 |---|---|
 | `-Suite HardwareUnit\|HardwareIntegration` | routes through `Run-Tests-CI.ps1 -LocalDiagnostic` with all gates: with `-TestName` that one entry, without it every registered entry of the suite |
-| `-TestName <entry>` | with `-Suite`: the runner entry; without: legacy single binary (`.exe` appended if missing) |
+| `-TestName <entry>` | with `-Suite`: the runner entry; without: the program through `Run-Tests.ps1` (`.exe` appended if missing). A program named without arguments runs all its registered modes, each once (#473) |
 | `-TestArgs <args>` | appended to the entry |
 | `-Configuration Debug\|Release` | default `Debug` |
 | `-ResultsJson <path>` | with `-Suite` only |
