@@ -459,6 +459,7 @@ $HardwareUnitTests = @(
     "test_rx_timestamp",
     "test_rx_timestamp_complete",
     "test_ioctl_target_time",       # IOCTL target time management -- (#199)
+    "test_ioctl_target_time --case TC-TARGET-015",  # #299 timer-0 target-time event on every adapter (characterization; no timer 1)
     "test_qav_cbs",
     "test_ioctl_tas",
     "test_ioctl_fp_ptm",
@@ -728,6 +729,7 @@ $HilTestSafety = @{
     'test_rx_timestamp'                = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
     'test_rx_timestamp_complete'       = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
     'test_ioctl_target_time'           = 'Mutating'   # SET_TARGET_TIME, SET_HW_TIMESTAMPING
+    'test_ioctl_target_time --case TC-TARGET-015' = 'Mutating'   # SET_TARGET_TIME timer 0 + TS_SUBSCRIBE/RING_MAP/UNSUBSCRIBE (#299)
     'test_ioctl_tas'                   = 'Mutating'   # SETUP_TAS, DISARM_TAS
     'test_ioctl_fp_ptm'                = 'Mutating'   # SETUP_FP, SETUP_PTM
     'test_ioctl_offset'                = 'Mutating'   # PHC_OFFSET_ADJUST
