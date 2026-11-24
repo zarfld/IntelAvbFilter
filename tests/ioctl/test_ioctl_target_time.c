@@ -1034,7 +1034,8 @@ static void test_aux_011_invalid_timer(HANDLE hDevice) {
  *   active clock output on the same target time).  An observed event is therefore never attributed to the request:
  *   INCONCLUSIVE; "none" when no timer-0 event arrived.
  *   FUNCTION: FAIL only for a request-independent finding - the required event is missing although the PHC passed the
- *   requested target by TT15_OBSERVE_AFTER_NS.  A present event yields neither PASS nor a request-specific timing FAIL
+ *   requested target by TT15_OBSERVE_AFTER_NS, established by a PHC sample taken BEFORE a terminal ring read (the ring
+ *   is reconciled after that sample; otherwise INCONCLUSIVE).  A present event yields neither PASS nor a request-specific timing FAIL
  *   (INCONCLUSIVE, with its interval reported); PHC sample gaps and ring overflow are INCONCLUSIVE.  PASS is not
  *   reachable in this version.  TT15_OBSERVE_AFTER_NS is a diagnostic observation bound only - it does not replace or
  *   relax any accuracy requirement of #299.
@@ -1136,6 +1137,35 @@ static BOOL tt15_ring_valid(const AVB_TS_RING_MAP_REQUEST *map, char *why, size_
         ok = FALSE;
     }
     return ok;
+}
+
+/* Consumes the ring up to ONE producer snapshot, at most the ring size (bounded).  Counts new events; the first timer-0
+ * TARGET_TIME event is kept with evLo as the lower bound of its posting interval.  TRUE when that first event was
+ * found in this call.  Used by the wait loop and by the terminal reconciliation, so both apply the same rules. */
+static BOOL tt15_drain(AVB_TIMESTAMP_RING_HEADER *hdr, const AVB_TIMESTAMP_EVENT *events, UINT32 *cons,
+                       UINT32 *seen, UINT32 *candidates, UINT32 *others, AVB_TIMESTAMP_EVENT *hit, UINT64 *lo, UINT64 evLo)
+{
+    UINT32 prod, n = 0;
+    BOOL firstHere = FALSE;
+    MemoryBarrier();
+    prod = hdr->producer_index;
+    MemoryBarrier();
+    while (*cons != prod && n < hdr->count) {
+        AVB_TIMESTAMP_EVENT ev = events[*cons & hdr->mask];
+        *cons = (*cons + 1u) & hdr->mask;
+        hdr->consumer_index = *cons;
+        (*seen)++;
+        n++;
+        printf("    event: seq=%u type=0x%X queue=%u trigger_source=%u stored_timestamp=0x%016llX\n", ev.sequence_num,
+               ev.event_type, ev.queue, ev.trigger_source, (unsigned long long)ev.timestamp_ns);
+        if (ev.event_type == TS_EVENT_TARGET_TIME && ev.queue == 0u && ev.trigger_source == 0u) {
+            (*candidates)++;
+            if (*candidates == 1u) { *hit = ev; *lo = evLo; firstHere = TRUE; }
+        } else {
+            (*others)++;
+        }
+    }
+    return firstHere;
 }
 
 static void tt15_line(const char *verdict, const char *tag, const char *reason)
@@ -1245,7 +1275,7 @@ static void tt15_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     {
         UINT32 cons = hdr->producer_index, seen = 0, candidates = 0, others = 0, baselineEvents = 0;
         UINT32 overflowStart = hdr->overflow_count;
-        BOOL phcGap = FALSE, ringLoss = FALSE, byRegs = FALSE, byPhc = FALSE;
+        BOOL phcGap = FALSE, ringLoss = FALSE, byRegs = FALSE, byPhc = FALSE, pastWindow = FALSE;
         UINT64 lo = 0, hi = 0, prevA = 0, lastPhc = 0;
         AVB_TIMESTAMP_EVENT hit;
         DWORD t0;
@@ -1312,31 +1342,29 @@ static void tt15_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         t0 = GetTickCount();
         while (GetTickCount() - t0 < TT15_HOST_DEADLINE_MS) {
             TT15_PHC a, b;
-            UINT32 prod;
             UINT64 evLo = prevA;
             BOOL aok = tt15_phc(h, index, &a);
-            BOOL firstHere = FALSE;
-            prod = hdr->producer_index;
-            MemoryBarrier();
-            while (cons != prod) {
-                AVB_TIMESTAMP_EVENT ev = events[cons & hdr->mask];
-                cons = (cons + 1u) & hdr->mask;
-                hdr->consumer_index = cons;
-                seen++;
-                printf("    event: seq=%u type=0x%X queue=%u trigger_source=%u stored_timestamp=0x%016llX\n", ev.sequence_num,
-                       ev.event_type, ev.queue, ev.trigger_source, (unsigned long long)ev.timestamp_ns);
-                if (ev.event_type == TS_EVENT_TARGET_TIME && ev.queue == 0u && ev.trigger_source == 0u) {
-                    candidates++;
-                    if (candidates == 1u) { hit = ev; lo = evLo; firstHere = TRUE; }
-                } else {
-                    others++;
-                }
-            }
+            BOOL firstHere = tt15_drain(hdr, events, &cons, &seen, &candidates, &others, &hit, &lo, evLo);
             if (tt15_phc(h, index, &b)) lastPhc = b.x.phc_time_ns; else phcGap = TRUE;
             if (firstHere) hi = lastPhc;
             if (aok) prevA = a.x.phc_time_ns; else phcGap = TRUE;
-            if (lastPhc > requested + TT15_OBSERVE_AFTER_NS) break;
+            /* The window boundary counts only when THIS iteration's terminal PHC sample succeeded and crossed it. */
+            if (lastPhc > requested + TT15_OBSERVE_AFTER_NS) { pastWindow = TRUE; break; }
             Sleep(TT15_POLL_MS);
+        }
+        /* Terminal reconciliation (PR #514 review): the ring check above precedes the terminal PHC sample, so an event
+         * published while that sample was taken would stay unread.  One more producer read AFTER the terminal sample
+         * (bounded: one snapshot, at most the ring size) closes the observation window before absence is judged; the
+         * loss check follows it.  An event found here is reported like any other (posting interval up to a PHC sample
+         * taken after this read); without a successful sample there the interval is open and the result INCONCLUSIVE. */
+        {
+            TT15_PHC c;
+            UINT32 seenBefore = seen;
+            BOOL firstHere = tt15_drain(hdr, events, &cons, &seen, &candidates, &others, &hit, &lo, prevA);
+            BOOL cok = tt15_phc(h, index, &c);
+            if (firstHere) { if (cok) hi = c.x.phc_time_ns; else { hi = lastPhc; phcGap = TRUE; } }
+            printf("    terminal ring reconciliation after the terminal PHC sample: %u further event(s); window boundary %s\n",
+                   seen - seenBefore, pastWindow ? "established by that sample" : "NOT established (host bound or sample gap)");
         }
         ringLoss = (hdr->overflow_count != overflowStart);
         printf("    ring after wait: producer=%u total_events=%llu overflow=%u (start %u); new events=%u, timer-0 candidates=%u, others=%u; "
@@ -1371,10 +1399,11 @@ static void tt15_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             fv = "INCONCLUSIVE"; fr = phcGap ? "measurement gap: PHC sample(s) missing in the wait loop"
                                              : "measurement gap: ring overflow during the wait";
         } else if (candidates == 0u) {
-            if (lastPhc > requested + TT15_OBSERVE_AFTER_NS) {
-                fv = "FAIL"; fr = "required timer-0 TARGET_TIME event missing although the PHC passed the requested target by the diagnostic window";
+            if (pastWindow) {
+                fv = "FAIL"; fr = "required timer-0 TARGET_TIME event missing although the PHC passed the requested target by the diagnostic window "
+                                  "(ring reconciled after the terminal PHC sample)";
             } else {
-                fv = "INCONCLUSIVE"; fr = "no event and the PHC was not observed past the diagnostic window (host bound reached)";
+                fv = "INCONCLUSIVE"; fr = "no event, but the window boundary was not established by a PHC sample before the terminal ring read";
             }
         } else {
             sprintf_s(why, sizeof(why), "timer-0 event present (first posting interval %s the requested target); request-specific timing "
