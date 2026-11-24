@@ -1490,11 +1490,365 @@ static int tt15_run(void)
     return (tt15_nonpass > 0 || tests_passed == 0) ? 1 : 0;
 }
 
+/* =====================================================================================================================
+ * TC-TARGET-V2-001 (#515 increment 1; test plan #299, requirement #7): versioned target-time QUERY, parameter validation and
+ * access rights on every enumerated adapter, each bound by NET_LUID. Selected only by --case TC-TARGET-V2-001.
+ *
+ * Request sequence per adapter (no valid ARM is ever sent; every ARM request is invalid under the #515 contract):
+ *   1. read/write handle, OPEN_ADAPTER_BY_LUID; QUERY_HW_SNAPSHOT v2 "pre-1", 100 ms, "pre-2" (movement control, before
+ *      any V2 request);
+ *   2. QUERY (0x00176034) on that handle: Q-T0, Q-T1 (valid, timer 0/1); Q-OUTIGN (valid, non-zero output-only fields,
+ *      ignored per D-4); Q-BIG (valid, 56-byte buffers, bytes 48-55 must stay untouched); V-* (one invalid input each:
+ *      input/output length 47, version 1, size 47/56, operation 0 or ARM, timer 2, flags 1, reserved0 1, reserved1 1,
+ *      target_time_ns 1);
+ *   3. ARM (0x0017A038) on that handle, invalid only: A-VER0 (version 0), A-OPQ (operation QUERY), A-IN47 (input 47),
+ *      A-FLAGS (flags 1, D-3). Each is invalid in its header or length, so its status (BUFFER_TOO_SMALL or
+ *      INVALID_PARAMETER, #515 comment 7130364452) does not depend on adapter, backend or PHC state: header validation
+ *      precedes those phases (PR #516 re-review of 409f353). Every ARM also carries target 0 ns (TV2_ARM_PAST_NS) as a
+ *      second invalid field, so the status alone does not show which rule rejected the request.
+ *      NOT tested here: D-5 (target not after the hardware-derived PHC, more than 1 hour ahead). It stays required and
+ *      belongs to the later semantic ARM test, which must first establish a ready adapter, the backend and a
+ *      hardware-derived PHC;
+ *   4. read-only handle bound to the same LUID: RO-Q (valid QUERY: read access suffices), RO-A (ARM version 0): an access
+ *      probe answered by the I/O manager before dispatch - never evidence of a V2 implementation;
+ *   5. QUERY_HW_SNAPSHOT v2 "post" on the read/write handle.
+ *
+ * Verdicts (docs/testing/test-verdict-contract.md via avb_verdict_from_status): each request has its own PROTOCOL line
+ * (contract status and Information, output-field rules). A successful QUERY of timer 0/1 additionally gets a FUNCTION line
+ * that stays INCONCLUSIVE here: a generic test decodes no device representation, so a VALID value is not checked against
+ * independent device evidence (raw target words are printed for evaluation outside the test). States 2/3/4 must carry
+ * result_target_ns 0; reporting them correctly is a protocol result, never a functional read of a valid target.
+ * OBSERVATION: TSAUXC and the four target words (snapshot ids 2, 10-13) per class - unchanged, moving before any request
+ * (autonomous, not attributable), stable then changed (not attributed), or not observed (entry state reported). Equal
+ * snapshots are an observation only, not proof that no MMIO write occurred. Pre-test values are the device's current state,
+ * possibly residue of earlier runs (e.g. TC-TARGET-015, #513): reported, never judged or repaired here. No restore path
+ * exists; RESTORATION is assessed from these results, never assumed.
+ * ===================================================================================================================*/
+#define TV2_ID              "TC-TARGET-V2-001"
+#define TV2_MOVE_GAP_MS     100u
+#define TV2_SENTINEL_NS     0xA5A5A5A5A5A5A5A5ULL  /* above any decodable target ((2^32-1) s + 999999999 ns): never a valid result */
+#define TV2_SENTINEL_STATE  0xFFFFFFFFu
+#define TV2_PAD             0xCC
+#define TV2_SIZE            48u
+/* ARM target for the invalid-ARM cases: 0 ns. target_time_ns and the hardware PHC are both unsigned 64-bit nanoseconds, so
+ * 0 <= PHC for every PHC value (including a PHC of 0 after a reset), and #515 D-5 rejects any target <= the hardware-derived
+ * PHC. A non-zero value such as 1 ns would be a valid future target while the PHC is still below it. Rejecting these
+ * requests before any write is required of a conforming driver; it is no guarantee about a defective implementation. */
+#define TV2_ARM_PAST_NS     0ULL
+
+typedef enum { TV2_QUERY_OK, TV2_REJECT, TV2_ACCESS_DENIED } TV2_KIND;
+
+typedef struct {
+    const char *name;
+    DWORD code;
+    BOOL readOnly;
+    TV2_KIND kind;
+    LONG expect;                       /* TV2_REJECT / TV2_ACCESS_DENIED: the contract status */
+    avb_u32 version, size, operation, timer, flags, reserved0, reserved1;
+    avb_u64 target;
+    BOOL outputSentinel;               /* non-zero output-only fields in the input (D-4: ignored) */
+    DWORD inLen, outLen;               /* actual buffer lengths */
+    const char *what;
+} TV2_CASE;
+
+typedef struct {
+    AVB_TARGET_TIME_V2_REQUEST r;
+    unsigned char pad[8];
+} TV2_BUF;
+
+#define TV2_Q   IOCTL_AVB_TARGET_TIME_V2_QUERY
+#define TV2_A   IOCTL_AVB_TARGET_TIME_V2_ARM
+#define TV2_V   AVB_TARGET_TIME_V2_VERSION
+#define TV2_OQ  AVB_TT_V2_OP_QUERY
+#define TV2_OA  AVB_TT_V2_OP_ARM
+
+static const TV2_CASE tv2_cases[] = {
+    /* name       code   RO     kind               expect                       ver    size      op      tmr fl r0 r1 target sentinel in  out */
+    { "Q-T0",     TV2_Q, FALSE, TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "valid QUERY, timer 0" },
+    { "Q-T1",     TV2_Q, FALSE, TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 1, 0, 0, 0, 0, FALSE, 48, 48, "valid QUERY, timer 1" },
+    { "Q-OUTIGN", TV2_Q, FALSE, TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, TRUE,  48, 48, "valid QUERY, non-zero output-only fields (ignored, D-4)" },
+    { "Q-BIG",    TV2_Q, FALSE, TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 56, 56, "valid QUERY, 56-byte buffers (only 48 bytes written)" },
+    { "V-IN47",   TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_BUFFER_TOO_SMALL,      TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 47, 48, "input buffer 47" },
+    { "V-OUT47",  TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_BUFFER_TOO_SMALL,      TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 47, "output buffer 47" },
+    { "V-VER1",   TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     1,     TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "version 1" },
+    { "V-SIZE47", TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, 47,       TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "size 47" },
+    { "V-SIZE56", TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, 56,       TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "size 56" },
+    { "V-OP0",    TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, 0,      0, 0, 0, 0, 0, FALSE, 48, 48, "operation 0 (unknown)" },
+    { "V-OPARM",  TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OA, 0, 0, 0, 0, 0, FALSE, 48, 48, "operation ARM on the QUERY code" },
+    { "V-TIMER2", TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 2, 0, 0, 0, 0, FALSE, 48, 48, "timer_index 2" },
+    { "V-FLAGS1", TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 1, 0, 0, 0, FALSE, 48, 48, "flags 1" },
+    { "V-RES0",   TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 1, 0, 0, FALSE, 48, 48, "reserved0 1" },
+    { "V-RES1",   TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 1, 0, FALSE, 48, 48, "reserved1 1" },
+    { "V-TGT1",   TV2_Q, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 1, FALSE, 48, 48, "QUERY with target_time_ns 1" },
+    { "A-VER0",   TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     0,     TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "invalid ARM: version 0" },
+    { "A-OPQ",    TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "invalid ARM: operation QUERY on the ARM code" },
+    { "A-IN47",   TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_BUFFER_TOO_SMALL,      TV2_V, TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 47, 48, "invalid ARM: input buffer 47" },
+    { "A-FLAGS",  TV2_A, FALSE, TV2_REJECT, (LONG)STATUS_INVALID_PARAMETER,     TV2_V, TV2_SIZE, TV2_OA, 0, 1, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "invalid ARM: flags 1 (D-3)" },
+    { "RO-Q",     TV2_Q, TRUE,  TV2_QUERY_OK,      0,                           TV2_V, TV2_SIZE, TV2_OQ, 0, 0, 0, 0, 0, FALSE, 48, 48, "read-only handle: valid QUERY" },
+    { "RO-A",     TV2_A, TRUE,  TV2_ACCESS_DENIED, (LONG)STATUS_ACCESS_DENIED,  0,     TV2_SIZE, TV2_OA, 0, 0, 0, 0, TV2_ARM_PAST_NS, FALSE, 48, 48, "read-only handle: ARM version 0 (access probe)" },
+};
+
+static int tv2_nonpass = 0;
+
+static void tv2_line(const char *verdict, const char *tag, const char *check, const char *reason)
+{
+    printf("[%s] %s %s: %s\n", verdict, tag, check, reason);
+    if (strcmp(verdict, "PASS") == 0) tests_passed++;
+    else { tests_failed++; tv2_nonpass++; }
+}
+
+static HANDLE tv2_open_bound(DWORD access, avb_u64 luid, LONG *ntBind, DWORD *win32)
+{
+    AVB_OPEN_BY_LUID_REQUEST bind;
+    DWORD br = 0;
+    HANDLE h = CreateFileA("\\\\.\\IntelAvbFilter", access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    *ntBind = AVB_NTSTATUS_UNAVAILABLE;
+    *win32 = (h == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+    if (h == INVALID_HANDLE_VALUE) return h;
+    ZeroMemory(&bind, sizeof(bind));
+    bind.version = AVB_OPEN_BY_LUID_VERSION;
+    bind.net_luid = luid;
+    *ntBind = avb_ioctl_ntstatus(h, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &bind, sizeof(bind), &bind, sizeof(bind), &br);
+    printf("    %s handle: OPEN_ADAPTER_BY_LUID nt=0x%08lX status=0x%08X matches=%u\n",
+           (access & GENERIC_WRITE) ? "read/write" : "read-only", (unsigned long)*ntBind, bind.status, bind.matches);
+    if (*ntBind < 0 || bind.status != 0u || bind.matches != 1u) { CloseHandle(h); return INVALID_HANDLE_VALUE; }
+    return h;
+}
+
+/* One request with its PROTOCOL line (and FUNCTION line for a successful timer-0/1 QUERY).
+ * *armAccepted is set when an ARM request completed with a success status. */
+static void tv2_request(HANDLE h, const TV2_CASE *c, const char *tag, BOOL *armAccepted)
+{
+    TV2_BUF b;
+    DWORD info = 0;
+    LONG nt;
+    char why[400], check[32];
+    const char *verdict;
+    size_t i;
+    BOOL padOk = TRUE, functionLine = FALSE;
+
+    FillMemory(&b, sizeof(b), TV2_PAD);
+    ZeroMemory(&b.r, sizeof(b.r));
+    b.r.version = c->version;
+    b.r.size = c->size;
+    b.r.operation = c->operation;
+    b.r.timer_index = c->timer;
+    b.r.flags = c->flags;
+    b.r.reserved0 = c->reserved0;
+    b.r.reserved1 = c->reserved1;
+    b.r.target_time_ns = c->target;
+    if (c->outputSentinel) { b.r.result_target_ns = TV2_SENTINEL_NS; b.r.result_state = TV2_SENTINEL_STATE; }
+
+    nt = avb_ioctl_ntstatus(h, c->code, &b, c->inLen, &b, c->outLen, &info);
+    for (i = 0; i < sizeof(b.pad); i++) if (b.pad[i] != TV2_PAD) padOk = FALSE;
+    printf("    %-8s code=0x%08lX in=%lu out=%lu -> nt=0x%08lX information=%lu | result_target_ns=%llu result_state=%u "
+           "reserved1=%u bytes48-55 %s\n", c->name, (unsigned long)c->code, c->inLen, c->outLen, (unsigned long)nt, info,
+           (unsigned long long)b.r.result_target_ns, b.r.result_state, b.r.reserved1, padOk ? "untouched" : "MODIFIED");
+    if (c->code == TV2_A && nt >= 0) *armAccepted = TRUE;
+
+    if (c->kind == TV2_ACCESS_DENIED) {
+        if (nt == c->expect && info == 0) {
+            verdict = "PASS";
+            sprintf_s(why, sizeof(why), "%s: STATUS_ACCESS_DENIED, Information 0 (I/O manager access check before dispatch; "
+                      "not evidence of a V2 implementation)", c->what);
+        } else {
+            verdict = "FAIL";
+            sprintf_s(why, sizeof(why), "%s: expected STATUS_ACCESS_DENIED with Information 0; raw nt=0x%08lX information=%lu",
+                      c->what, (unsigned long)nt, info);
+        }
+    } else if (c->kind == TV2_REJECT) {
+        if (nt == c->expect && info == 0) {
+            verdict = "PASS";
+            sprintf_s(why, sizeof(why), "%s: contract status 0x%08lX, Information 0", c->what, (unsigned long)c->expect);
+        } else {
+            verdict = (nt == c->expect) ? "FAIL" : avb_verdict_tag(avb_verdict_from_status((NTSTATUS)nt, AVB_CAP_UNKNOWN, 0, 1));
+            sprintf_s(why, sizeof(why), "%s: contract status 0x%08lX with Information 0; raw nt=0x%08lX information=%lu%s",
+                      c->what, (unsigned long)c->expect, (unsigned long)nt, info,
+                      nt >= 0 ? " (a success where the contract requires rejection)" : "");
+        }
+    } else {
+        BOOL stateOk = (b.r.result_state >= AVB_TT_V2_STATE_VALID && b.r.result_state <= AVB_TT_V2_STATE_COHERENCE_UNVERIFIED);
+        BOOL valueOk = (b.r.result_state == AVB_TT_V2_STATE_VALID || b.r.result_target_ns == 0);
+        BOOL sentinelOk = (!c->outputSentinel || b.r.result_target_ns != TV2_SENTINEL_NS);
+        BOOL payload = (info == TV2_SIZE && stateOk && valueOk && sentinelOk && b.r.reserved1 == 0u && padOk);
+        verdict = avb_verdict_tag(avb_verdict_from_status((NTSTATUS)nt, AVB_CAP_UNKNOWN, payload, 1));
+        if (nt >= 0) {
+            sprintf_s(why, sizeof(why), "%s: success; Information %lu (48 required), result_state %u (1-4 required), "
+                      "result_target_ns %s, reserved1 %u (0 required), bytes 48-55 %s%s", c->what, info, b.r.result_state,
+                      !valueOk ? "non-zero with a non-VALID state (0 required)"
+                               : (sentinelOk ? "consistent with the state" : "still the injected output-only value"),
+                      b.r.reserved1, padOk ? "untouched" : "modified", payload ? "" : " -> payload invalid");
+        } else {
+            sprintf_s(why, sizeof(why), "%s: contract SUCCESS with Information 48; raw nt=0x%08lX information=%lu",
+                      c->what, (unsigned long)nt, info);
+        }
+        functionLine = (strcmp(verdict, "PASS") == 0 && !c->readOnly && !c->outputSentinel && c->inLen == TV2_SIZE);
+    }
+    sprintf_s(check, sizeof(check), "%s PROTOCOL", c->name);
+    tv2_line(verdict, tag, check, why);
+    if (functionLine) {
+        if (b.r.result_state == AVB_TT_V2_STATE_VALID) {
+            sprintf_s(why, sizeof(why), "VALID result_target_ns=%llu; not compared with independent device-representation "
+                      "evidence in this generic test (raw target words in the snapshots; evaluated outside)",
+                      (unsigned long long)b.r.result_target_ns);
+        } else {
+            sprintf_s(why, sizeof(why), "state %u with value 0: no valid target was read; a correct protocol state is not a "
+                      "functional read of a valid target", b.r.result_state);
+        }
+        sprintf_s(check, sizeof(check), "%s FUNCTION", c->name);
+        tv2_line("INCONCLUSIVE", tag, check, why);
+    }
+}
+
+static void tv2_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
+{
+    static const struct { UINT32 id; const char *name; } obs[] = {
+        { AVB_HWREG_TSAUXC, "TSAUXC" }, { AVB_HWREG_TRGTTIML0, "TRGTTIML0" }, { AVB_HWREG_TRGTTIMH0, "TRGTTIMH0" },
+        { AVB_HWREG_TRGTTIML1, "TRGTTIML1" }, { AVB_HWREG_TRGTTIMH1, "TRGTTIMH1" } };
+    char tag[96], why[400];
+    HANDLE h, hro;
+    AVB_HW_SNAPSHOT_REQUEST_V2 pre1, pre2, post;
+    LONG nt1, nt2, ntPost, ntBind;
+    DWORD win32 = 0;
+    BOOL armAccepted = FALSE, postOk;
+    UINT32 i, unchanged = 0, moving = 0, changed = 0, unobserved = 0;
+
+    sprintf_s(tag, sizeof(tag), "%s/adapter:%u did=0x%04X", TV2_ID, index, id->device_id);
+    printf("\n--- %s vid=0x%04X luid=0x%016llX ifIndex=%u capabilities=0x%08X (reported only; not used for applicability)\n",
+           tag, id->vendor_id, (unsigned long long)id->net_luid, id->if_index, id->capabilities);
+
+    h = tv2_open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid, &ntBind, &win32);
+    if (h == INVALID_HANDLE_VALUE) {
+        sprintf_s(why, sizeof(why), "read/write handle not opened and bound by NET_LUID (Win32 %lu, bind nt=0x%08lX); "
+                  "nothing sent", win32, (unsigned long)ntBind);
+        tv2_line("BLOCKED", tag, "SETUP", why);
+        return;
+    }
+    nt1 = tt15_snapshot(h, &pre1);
+    tt15_print_snapshot("pre-1", nt1, &pre1);
+    Sleep(TV2_MOVE_GAP_MS);
+    nt2 = tt15_snapshot(h, &pre2);
+    tt15_print_snapshot("pre-2", nt2, &pre2);
+    if (!tt15_snapshot_ok(nt1, &pre1, id->net_luid) || !tt15_snapshot_ok(nt2, &pre2, id->net_luid)) {
+        tv2_line("BLOCKED", tag, "SETUP", "no pre-1/pre-2 snapshot of this adapter (accidental mutation could not be observed); "
+                 "nothing sent");
+        CloseHandle(h);
+        return;
+    }
+    printf("    pre-test values are the device's current state (possibly residue of earlier runs, e.g. TC-TARGET-015, #513); "
+           "not judged here\n");
+
+    for (i = 0; i < sizeof(tv2_cases) / sizeof(tv2_cases[0]); i++) {
+        if (!tv2_cases[i].readOnly) tv2_request(h, &tv2_cases[i], tag, &armAccepted);
+    }
+
+    hro = tv2_open_bound(GENERIC_READ, id->net_luid, &ntBind, &win32);
+    if (hro == INVALID_HANDLE_VALUE) {
+        sprintf_s(why, sizeof(why), "read-only handle not opened and bound by NET_LUID (Win32 %lu, bind nt=0x%08lX): missing "
+                  "access-probe evidence; RO-Q and RO-A not sent", win32, (unsigned long)ntBind);
+        tv2_line("BLOCKED", tag, "RO SETUP", why);
+    } else {
+        for (i = 0; i < sizeof(tv2_cases) / sizeof(tv2_cases[0]); i++) {
+            if (tv2_cases[i].readOnly) tv2_request(hro, &tv2_cases[i], tag, &armAccepted);
+        }
+        CloseHandle(hro);
+    }
+
+    ntPost = tt15_snapshot(h, &post);
+    tt15_print_snapshot("post", ntPost, &post);
+    postOk = tt15_snapshot_ok(ntPost, &post, id->net_luid);
+    for (i = 0; i < sizeof(obs) / sizeof(obs[0]); i++) {
+        UINT32 a = 0, b = 0, c = 0;
+        BOOL ra = tt15_reg(&pre1, obs[i].id, &a);
+        BOOL rb = tt15_reg(&pre2, obs[i].id, &b);
+        BOOL rc = postOk && tt15_reg(&post, obs[i].id, &c);
+        if (!ra || !rb || !rc) {
+            unobserved++;
+            printf("    observation %-9s NOT_OBSERVED entry state pre-1=%u pre-2=%u post=%s\n", obs[i].name,
+                   pre1.entries[obs[i].id - 1u].state, pre2.entries[obs[i].id - 1u].state,
+                   !postOk ? "no snapshot" : (rc ? "1" : "not VALID"));
+        } else if (a != b) {
+            moving++;
+            printf("    observation %-9s MOVING before any V2 request 0x%08X -> 0x%08X (autonomous; post 0x%08X not attributable)\n",
+                   obs[i].name, a, b, c);
+        } else if (b != c) {
+            changed++;
+            printf("    observation %-9s CHANGED 0x%08X -> 0x%08X (stable before the requests; cause not attributed)\n",
+                   obs[i].name, b, c);
+        } else {
+            unchanged++;
+            printf("    observation %-9s unchanged 0x%08X\n", obs[i].name, c);
+        }
+    }
+    sprintf_s(why, sizeof(why), "ids 2,10-13: unchanged %u, moving before the requests %u, changed %u, not observed %u (state "
+              "observation only; not proof that no MMIO write occurred; pending buffers, TSIM/EIMS/FREQOUT/SDP not observed)",
+              unchanged, moving, changed, unobserved);
+    if (changed > 0) tv2_line("CLEANUP_FAILED", tag, "OBSERVATION", why);
+    else if (moving > 0 || unobserved > 0) tv2_line("INCONCLUSIVE_RESTORATION", tag, "OBSERVATION", why);
+    else tv2_line("PASS", tag, "OBSERVATION", why);
+
+    if (armAccepted) {
+        printf("    assessment RESTORATION: an invalid ARM completed with a success status: programming may have occurred; no "
+               "restore path exists (#513)\n");
+        if (changed == 0) tv2_line("INCONCLUSIVE_RESTORATION", tag, "RESTORATION",
+                                   "invalid ARM accepted; observed words unchanged, unobservable state NOT_VERIFIED");
+    } else if (changed > 0) {
+        printf("    assessment RESTORATION: observed state differs (see OBSERVATION); no restore path\n");
+    } else {
+        printf("    assessment RESTORATION: no ARM succeeded and no observed word changed: nothing observed to restore; "
+               "unobservable state NOT_VERIFIED%s\n", (moving > 0 || unobserved > 0) ? "; observation incomplete" : "");
+    }
+    CloseHandle(h);
+}
+
+static int tv2_run(void)
+{
+    HANDLE h;
+    UINT32 index, count = 1, enumerated = 0;
+    printf("==============================================\n");
+    printf("%s (#515; test plan #299; requirement #7): V2 target-time QUERY, validation, access\n", TV2_ID);
+    printf("QUERY 0x%08lX, ARM 0x%08lX (invalid ARM requests only); every adapter bound by NET_LUID\n",
+           (unsigned long)IOCTL_AVB_TARGET_TIME_V2_QUERY, (unsigned long)IOCTL_AVB_TARGET_TIME_V2_ARM);
+    printf("==============================================\n");
+    h = CreateFileA("\\\\.\\IntelAvbFilter", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[BLOCKED] %s: open failed (Win32 %lu)\n", TV2_ID, GetLastError());
+        return 1;
+    }
+    for (index = 0; index < count; index++) {
+        AVB_ADAPTER_IDENTITY_REQUEST id;
+        DWORD br = 0;
+        LONG nt;
+        ZeroMemory(&id, sizeof(id));
+        id.version = AVB_ADAPTER_IDENTITY_VERSION;
+        id.index = index;
+        nt = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_ADAPTER_IDENTITY, &id, sizeof(id), &id, sizeof(id), &br);
+        if (nt < 0 || id.status != 0u) {
+            printf("[BLOCKED] %s/adapter:%u: GET_ADAPTER_IDENTITY nt=0x%08lX status=0x%08X\n", TV2_ID, index,
+                   (unsigned long)nt, id.status);
+            tests_failed++; tv2_nonpass++;
+            if (index == 0) break;   /* the adapter count is unknown */
+            continue;
+        }
+        count = id.count;
+        enumerated++;
+        tv2_adapter(index, &id);
+    }
+    CloseHandle(h);
+    if (enumerated == 0) { printf("[BLOCKED] %s: no adapter enumerated\n", TV2_ID); tv2_nonpass++; }
+    printf("\n%s SUMMARY: adapters=%u PASS=%d non-pass=%d\n", TV2_ID, enumerated, tests_passed, tv2_nonpass);
+    return (tv2_nonpass > 0 || tests_passed == 0) ? 1 : 0;
+}
+
 int main(int argc, char* argv[]) {
-    /* --case TC-TARGET-015 (#299): the isolated timer-0 characterization case; any other argument fails closed */
+    /* --case TC-TARGET-015 (#299): the isolated timer-0 characterization case; --case TC-TARGET-V2-001 (#515): the V2
+     * QUERY/validation/access case; any other argument fails closed */
     if (argc > 1) {
         if (argc == 3 && strcmp(argv[1], "--case") == 0 && strcmp(argv[2], TT15_ID) == 0) return tt15_run();
-        printf("usage: test_ioctl_target_time [--case %s]\n", TT15_ID);
+        if (argc == 3 && strcmp(argv[1], "--case") == 0 && strcmp(argv[2], TV2_ID) == 0) return tv2_run();
+        printf("usage: test_ioctl_target_time [--case %s | --case %s]\n", TT15_ID, TV2_ID);
         return 2;
     }
     printf("==============================================\n");
