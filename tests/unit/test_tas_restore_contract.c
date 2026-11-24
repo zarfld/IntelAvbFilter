@@ -40,6 +40,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/owned_worker.h"         /* #505: worker ownership, PR #518 review */
 #include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 
@@ -2007,6 +2008,92 @@ static void test_64_activate_cases(void)
     EXPECT_EQ("a run without any case is never successful", tas_act_run_exit(sel, ex) != 0, 1);
 }
 
+/* TC-MOCK-065: a worker that outlives a bounded wait stays owned until its completion is established (#505, PR #518 review; test logic
+ * only, real threads, no driver). Its storage is not read, reused or freed before, a wait that fails settles nothing, a late completion
+ * is collected with its real result, and no cleanup is judged as verified while an operation may still be running */
+typedef struct {
+    HANDLE go;
+    volatile LONG *observed;   /* what the worker saw in its own storage after the caller had given up waiting */
+    LONG input;
+    LONG output;
+} OWNED_WORKER_JOB;
+
+static DWORD WINAPI owned_worker_late(LPVOID p)
+{
+    OWNED_WORKER_JOB *job = (OWNED_WORKER_JOB *)p;
+
+    if (WaitForSingleObject(job->go, 20000) != WAIT_OBJECT_0) {
+        return 1;
+    }
+    InterlockedExchange(job->observed, job->input);
+    job->output = job->input + 1;
+    return 0;
+}
+
+static void test_65_owned_worker(void)
+{
+    volatile LONG observed = 0;
+    OWNED_WORKER w;
+    OWNED_WORKER_JOB init, *res;
+    HANDLE go = CreateEventA(NULL, TRUE, FALSE, NULL), full, limited = NULL;
+    DWORD t0;
+
+    printf("\n[TC-MOCK-065] #505 worker ownership beyond a bounded wait (test logic only)\n");
+    if (go == NULL) {
+        EXPECT_EQ("event available", 0, 1);
+        return;
+    }
+    init.go = go;
+    init.observed = &observed;
+    init.input = 41;
+    init.output = 0;
+    EXPECT_EQ("the worker starts", owned_worker_start(&w, owned_worker_late, &init, sizeof(init)), TRUE);
+    EXPECT_EQ("its storage is not the caller's", w.ctx != (void *)&init, 1);
+    memset(&init, 0xEE, sizeof(init));   /* the caller reuses its own object, as ONESHOT did */
+
+    EXPECT_EQ("a wait that times out leaves it running", owned_worker_wait(&w, 50), OWNED_WORKER_RUNNING);
+    EXPECT_EQ("no result before completion", owned_worker_result(&w) == NULL, 1);
+    EXPECT_EQ("a running worker is not released", owned_worker_release(&w), FALSE);
+    EXPECT_EQ("its storage stays owned", w.ctx != NULL, 1);
+    EXPECT_EQ("its handle stays owned", w.thread != NULL, 1);
+
+    /* A wait that FAILS (no SYNCHRONIZE right) settles nothing either */
+    full = w.thread;
+    if (full != NULL && DuplicateHandle(GetCurrentProcess(), full, GetCurrentProcess(), &limited, THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+        w.thread = limited;
+        w.state = OWNED_WORKER_RUNNING;
+        EXPECT_EQ("a failed wait leaves it running", owned_worker_wait(&w, 50), OWNED_WORKER_RUNNING);
+        EXPECT_EQ("no result after a failed wait", owned_worker_result(&w) == NULL, 1);
+        CloseHandle(limited);
+        w.thread = full;
+        w.state = OWNED_WORKER_RUNNING;
+    } else {
+        EXPECT_EQ("limited handle available", 0, 1);
+    }
+
+    /* The late completion is collected with its real result */
+    SetEvent(go);
+    EXPECT_EQ("a late completion is established", owned_worker_wait(&w, 10000), OWNED_WORKER_DONE);
+    for (t0 = GetTickCount(); observed == 0 && GetTickCount() - t0 < 5000;) {
+        Sleep(5);
+    }
+    EXPECT_EQ("the worker used its own storage, not the reused object", (int)observed, 41);
+    res = (OWNED_WORKER_JOB *)owned_worker_result(&w);
+    EXPECT_EQ("its result is readable after completion", res != NULL && res->output == 42, 1);
+    EXPECT_EQ("a finished worker is released", owned_worker_release(&w), TRUE);
+    EXPECT_EQ("nothing is owned afterwards", w.thread == NULL && w.ctx == NULL && w.state == OWNED_WORKER_NONE, 1);
+    EXPECT_EQ("a wait without a worker settles nothing", owned_worker_wait(&w, 0), OWNED_WORKER_NONE);
+    CloseHandle(go);
+
+    EXPECT_EQ("settled, nothing found: PASS", holdctl_cleanup(TRUE, FALSE, FALSE), HOLDCTL_CLEANUP_PASS);
+    EXPECT_EQ("settled, deviation: FAILED", holdctl_cleanup(TRUE, TRUE, FALSE), HOLDCTL_CLEANUP_FAILED);
+    EXPECT_EQ("settled, deviation and unmeasured: FAILED", holdctl_cleanup(TRUE, TRUE, TRUE), HOLDCTL_CLEANUP_FAILED);
+    EXPECT_EQ("settled, unmeasured: INCONCLUSIVE", holdctl_cleanup(TRUE, FALSE, TRUE), HOLDCTL_CLEANUP_INCONCLUSIVE);
+    EXPECT_EQ("unsettled, nothing found: never PASS", holdctl_cleanup(FALSE, FALSE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
+    EXPECT_EQ("unsettled, unmeasured: unsettled", holdctl_cleanup(FALSE, FALSE, TRUE), HOLDCTL_CLEANUP_UNSETTLED);
+    EXPECT_EQ("unsettled, deviation measured: the final state is unsettled", holdctl_cleanup(FALSE, TRUE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2055,6 +2142,7 @@ int main(void) {
     test_62_hold_commit();
     test_63_hold_generation();
     test_64_activate_cases();
+    test_65_owned_worker();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

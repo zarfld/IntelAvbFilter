@@ -225,6 +225,7 @@
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/owned_worker.h"         /* worker and storage ownership beyond a bounded wait (#505, PR #518) */
 #include "../ioctl/tas_activate_cases.h"   /* contained cases, selection, exit status (#487) */
 #include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
@@ -2558,6 +2559,30 @@ static BOOL holdctl_step(avb_u64 luid, INT64 ns, HOLDCTL_PHC_JOB *job)
            (unsigned long)job->st, job->status, (unsigned long)job->ms);
     return job->opened && job->st == 0;
 }
+
+#define HOLDCTL_WORKER_MS   10000u   /* the held reseed: the driver holds at most 2000 ms */
+#define HOLDCTL_SETTLE_MS   30000u   /* further bounded wait for a reseed that has not completed by then */
+
+/* TRUE while a PHC_OFFSET_ADJUST this test sent has not been observed to complete. A completion established here is collected: its
+ * real result is printed and a completed step is added to *net_ns, so the cleanup compensates it */
+static BOOL holdctl_outstanding(OWNED_WORKER *w, DWORD wait_ms, INT64 *net_ns)
+{
+    const HOLDCTL_PHC_JOB *job;
+
+    if (w->state != OWNED_WORKER_RUNNING) {
+        return FALSE;
+    }
+    if (owned_worker_wait(w, wait_ms) == OWNED_WORKER_RUNNING) {
+        return TRUE;
+    }
+    job = (const HOLDCTL_PHC_JOB *)owned_worker_result(w);
+    printf("    [EVIDENCE] late completion of the held PHC_OFFSET_ADJUST %+lld ns: opened=%d ntstatus=0x%08lX status=0x%X %lu ms\n",
+           (long long)job->offset_ns, job->opened, (unsigned long)job->st, job->status, (unsigned long)job->ms);
+    if (job->opened && job->st == 0) {
+        *net_ns += job->offset_ns;
+    }
+    return FALSE;
+}
 #endif
 
 static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
@@ -2583,7 +2608,11 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     const avb_u32 HOLD_MS = 400u;
     HOLDCTL_STATE pre;
     HOLDCTL_DIAG diag;   /* #505 I226 drift diagnosis: evidence only, no verdict */
+    OWNED_WORKER held;   /* the held reseed; owned until its completion is established */
+    static const char *const outstanding_why = "the held PHC_OFFSET_ADJUST has not completed: another PHC operation would race with it, "
+                                               "so this line is not exercised (never PASS)";
 
+    ZeroMemory(&held, sizeof(held));
     g_ran++;
     printf("\n=== %s adapter:%u did=0x%04X luid=0x%016llX caps=0x%08X ===\n", g_case, index, id->device_id, id->net_luid, id->capabilities);
     hc = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
@@ -2713,17 +2742,19 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     if (!armed_ok) {
         verdict("INCONCLUSIVE", "HOLD", index, id->device_id, "no accepted arm (see ARM): the hold cannot be exercised");
     } else {
-        HANDLE th;
-        DWORD t0 = GetTickCount();
-        BOOL seen = FALSE;
+        HOLDCTL_PHC_JOB start;
+        DWORD t0;
+        BOOL seen = FALSE, started, late = FALSE, outstanding = FALSE;
         unsigned polls = 0;
 
+        ZeroMemory(&start, sizeof(start));
+        start.luid = id->net_luid;
+        start.offset_ns = 1000;
         ZeroMemory(&job, sizeof(job));
-        job.luid = id->net_luid;
-        job.offset_ns = 1000;
         holdctl_diag_anchor(&diag, hc, id, "before HOLD step");
-        th = CreateThread(NULL, 0, holdctl_phc_worker, &job, 0, NULL);
-        while (th != NULL && GetTickCount() - t0 < 3000u) {
+        t0 = GetTickCount();
+        started = owned_worker_start(&held, holdctl_phc_worker, &start, sizeof(start));
+        while (started && GetTickCount() - t0 < 3000u) {
             st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
             polls++;
             if (st == 0 && r.state == AVB_DEBUG_PHC_HOLD_HOLDING) {
@@ -2733,20 +2764,30 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
             }
             Sleep(2);
         }
-        if (th != NULL) {
-            (void)WaitForSingleObject(th, 10000u);
-            CloseHandle(th);
+        if (started && owned_worker_wait(&held, HOLDCTL_WORKER_MS) == OWNED_WORKER_RUNNING) {
+            late = TRUE;
+            printf("    [EVIDENCE] the held PHC_OFFSET_ADJUST did not complete within %u ms; waiting up to %u ms more for it\n",
+                   HOLDCTL_WORKER_MS, HOLDCTL_SETTLE_MS);
+            outstanding = holdctl_outstanding(&held, HOLDCTL_SETTLE_MS, &net_ns);
         }
-        printf("    [EVIDENCE] held PHC_OFFSET_ADJUST +1000 ns: opened=%d ntstatus=0x%08lX status=0x%X %lu ms; HOLDING observed=%d after %u polls\n",
-               job.opened, (unsigned long)job.st, job.status, (unsigned long)job.ms, seen, polls);
-        if (job.opened && job.st == 0) {
-            net_ns += 1000;
+        if (started && !outstanding) {
+            job = *(const HOLDCTL_PHC_JOB *)owned_worker_result(&held);   /* completed: its storage may be read */
+        }
+        printf("    [EVIDENCE] held PHC_OFFSET_ADJUST +1000 ns: %s, opened=%d ntstatus=0x%08lX status=0x%X %lu ms; HOLDING observed=%d after %u polls\n",
+               !started ? "not started" : (outstanding ? "STILL RUNNING" : (late ? "completed late" : "completed")), job.opened, (unsigned long)job.st,
+               job.status, (unsigned long)job.ms, seen, polls);
+        if (!late && job.opened && job.st == 0) {
+            net_ns += 1000;   /* a late completion was already counted when it was collected */
         }
         holdctl_diag_step(&diag, 1000, job.opened && job.st == 0);
         holdctl_diag_anchor(&diag, hc, id, "after HOLD step (+1000 held)");
         st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
         holdctl_print("QUERY after the held reseed", st, info, &r);
-        if (th == NULL || !seen || !job.opened || job.st != 0 || st != 0 || r.arm_id != armed.arm_id || r.state != AVB_DEBUG_PHC_HOLD_RELEASED ||
+        if (late) {
+            sprintf_s(why, sizeof(why), "the held reseed did not complete within %u ms: %s", HOLDCTL_WORKER_MS,
+                      outstanding ? "still running, its effect on the PHC is not established" : "it completed late (see the evidence line)");
+            verdict("FAIL", "HOLD", index, id->device_id, why);
+        } else if (!started || !seen || !job.opened || job.st != 0 || st != 0 || r.arm_id != armed.arm_id || r.state != AVB_DEBUG_PHC_HOLD_RELEASED ||
             r.holds_completed != armed.holds_completed + 1 || r.phc_source != AVB_DEBUG_PHC_HOLD_SRC_PHC_OFFSET_ADJUST || r.phc_rc != 0 ||
             !(r.armed_seq < r.hold_begin_seq && r.hold_begin_seq < r.hold_end_seq && r.hold_end_seq < r.phc_write_enter_seq &&
               r.phc_write_enter_seq < r.phc_write_done_seq) || r.hold_elapsed_us < HOLD_MS * 900u) {
@@ -2766,6 +2807,8 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     /* ONESHOT: the consumed arm does not hold a second reseed */
     if (!armed_ok) {
         verdict("INCONCLUSIVE", "ONESHOT", index, id->device_id, "no accepted arm (see ARM)");
+    } else if (holdctl_outstanding(&held, 0, &net_ns)) {
+        verdict("INCONCLUSIVE", "ONESHOT", index, id->device_id, outstanding_why);
     } else {
         AVB_DEBUG_PHC_HOLD_REQUEST before;
         LONG stb = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &before, &info);
@@ -2785,7 +2828,9 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     }
 
     /* DISARM: an unused arm is cancelled (IDLE) and holds nothing; a DISARM in a terminal or IDLE state is a no-op */
-    {
+    if (holdctl_outstanding(&held, 0, &net_ns)) {
+        verdict("INCONCLUSIVE", "DISARM", index, id->device_id, outstanding_why);
+    } else {
         AVB_DEBUG_PHC_HOLD_REQUEST a, d, q;
         LONG sta = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &a, &info);
         LONG std = holdctl(hc, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &info);
@@ -2811,7 +2856,9 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     }
 
     /* EXPIRY: an unused arm expires at arm_timeout_ms and holds nothing afterwards */
-    {
+    if (holdctl_outstanding(&held, 0, &net_ns)) {
+        verdict("INCONCLUSIVE", "EXPIRY", index, id->device_id, outstanding_why);
+    } else {
         AVB_DEBUG_PHC_HOLD_REQUEST a, q;
         LONG sta = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 300u, &a, &info);
         LONG stq;
@@ -2842,6 +2889,8 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     if (!(id->capabilities & INTEL_CAP_TSN_TAS)) {
         printf("[SKIP_UNSUPPORTED] %s-ACTIVATE_ARRIVAL/adapter:%u did=0x%04X: adapter does not advertise INTEL_CAP_TSN_TAS\n", g_case, index,
                id->device_id);
+    } else if (holdctl_outstanding(&held, 0, &net_ns)) {
+        verdict("INCONCLUSIVE", "ACTIVATE_ARRIVAL", index, id->device_id, outstanding_why);
     } else {
         AVB_DEBUG_PHC_HOLD_REQUEST a, q, d;
         AVB_TAS_OP_REQUEST op;
@@ -2878,9 +2927,11 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
     /* CLEANUP (test-owned): compensate the PHC steps, disarm, then verify independently against the hardware and the driver:
      * every snapshot register read VALID before and after unchanged, the PHC continuous against wall time (within 1 ms), and a
      * readable control state that is neither ARMED nor HOLDING. A measured deviation is CLEANUP_FAILED; anything not measured is
-     * INCONCLUSIVE, never PASS (the step sum alone proves no restoration) */
+     * INCONCLUSIVE, never PASS (the step sum alone proves no restoration). While an operation of this test may still be running
+     * nothing is compensated and no final state is established: INCONCLUSIVE_RESTORATION, with what was measured */
     {
         BOOL comp = TRUE, failed = FALSE, unmeasured = FALSE;
+        const BOOL unsettled = holdctl_outstanding(&held, HOLDCTL_WORKER_MS, &net_ns);
         LONG stq;
         HOLDCTL_STATE post;
         TAS_ACT_PHC_FACT phc;
@@ -2891,7 +2942,9 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
         char part[160];
 
         holdctl_diag_anchor(&diag, hc, id, "before cleanup compensation");
-        if (net_ns != 0) {
+        if (unsettled) {
+            printf("    [DIAG] cleanup compensation: not sent, a PHC_OFFSET_ADJUST of this test may still be running\n");
+        } else if (net_ns != 0) {
             INT64 comp_ns = -net_ns;
             comp = holdctl_step(id->net_luid, comp_ns, &job);
             if (comp) {
@@ -2916,6 +2969,9 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
                tas_act_phc_name(phc), pre.phc, post.phc, wall_ns, (post.phc - pre.phc) - wall_ns, (long long)HOLDCTL_PHC_TOLERANCE_NS);
 
         why[0] = '\0';
+        if (unsettled) {
+            strcat_s(why, sizeof(why), "a PHC_OFFSET_ADJUST (+1000 ns) of this test may still be running: not compensated; measured so far: ");
+        }
         if (!comp || net_ns != 0) {
             failed = TRUE;
             sprintf_s(part, sizeof(part), "PHC compensation step failed (net %lld ns); ", (long long)net_ns);
@@ -2948,7 +3004,13 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
             strcat_s(why, sizeof(why), part);
             failed = failed || r.state == AVB_DEBUG_PHC_HOLD_ARMED || r.state == AVB_DEBUG_PHC_HOLD_HOLDING;
         }
-        verdict(failed ? "CLEANUP_FAILED" : (unmeasured ? "INCONCLUSIVE" : "PASS"), "CLEANUP", index, id->device_id, why);
+        {
+            static const char *const tags[] = { "PASS", "CLEANUP_FAILED", "INCONCLUSIVE", "INCONCLUSIVE_RESTORATION" };   /* HOLDCTL_CLEANUP */
+            verdict(tags[holdctl_cleanup(!unsettled, failed, unmeasured)], "CLEANUP", index, id->device_id, why);
+        }
+    }
+    if (!owned_worker_release(&held)) {
+        printf("    [EVIDENCE] the worker of the held PHC_OFFSET_ADJUST is left running: its handle and storage stay valid until the process ends\n");
     }
     CloseHandle(hc);
 #endif
