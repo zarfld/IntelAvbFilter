@@ -93,6 +93,215 @@ static __inline BOOLEAN avb_tas_meta_can_advance(PAVB_DEVICE_CONTEXT ctx)
     return ctx->tas_context_epoch == 0 || (avb_u64)InterlockedCompareExchange64(&ctx->tas_generation, 0, 0) != ~(avb_u64)0;
 }
 
+#ifndef NDEBUG
+/* #505 Debug-only PHC reseed hold control (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD). All state lives in ctx->dbg_phc under
+ * ctx->dbg_phc_lock, a spin lock held only for field updates: no wait and no logging under it. QUERY takes nothing else, so it
+ * never waits for a TAS claim, an order lock or a held reseed. Markers come from ctx->dbg_seq, so their order is the
+ * driver-internal order. The control performs no register access and changes no other IOCTL's result or status. */
+#define AVB_DBG_ACTIVATE_NONE 0xFFFFFFFFu
+
+static __inline avb_u64 avb_dbg_seq(PAVB_DEVICE_CONTEXT ctx)
+{
+    return (avb_u64)InterlockedIncrement64(&ctx->dbg_seq);
+}
+
+/* Under dbg_phc_lock: an unused arm past its deadline becomes EXPIRED (kernel interrupt time, independent of the PHC) */
+static __inline void avb_dbg_phc_expire_locked(PAVB_DEVICE_CONTEXT ctx)
+{
+    if (ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_ARMED && KeQueryInterruptTime() >= ctx->dbg_phc_deadline) {
+        ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_EXPIRED;
+    }
+}
+
+static NTSTATUS AvbDbgPhcHoldControl(PAVB_DEVICE_CONTEXT ctx, PUCHAR buf, ULONG inLen, ULONG outLen, ULONG_PTR *info)
+{
+    PAVB_DEBUG_PHC_HOLD_REQUEST r;
+    AVB_DEBUG_PHC_HOLD_REQUEST snapshot;
+    avb_u32 action, hold_ms, timeout_ms;
+    NTSTATUS status = STATUS_SUCCESS;
+    KIRQL irql;
+
+    *info = 0;
+    if (buf == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (inLen < sizeof(AVB_DEBUG_PHC_HOLD_REQUEST) || outLen < sizeof(AVB_DEBUG_PHC_HOLD_REQUEST)) {
+        return STATUS_BUFFER_TOO_SMALL;   /* lengths before any dereference; METHOD_BUFFERED: kernel buffer, never probed */
+    }
+    r = (PAVB_DEBUG_PHC_HOLD_REQUEST)buf;
+    if (r->version != AVB_DEBUG_PHC_HOLD_VERSION) {
+        return STATUS_REVISION_MISMATCH;
+    }
+    action = r->action;
+    hold_ms = r->hold_ms;
+    timeout_ms = r->arm_timeout_ms;
+    if (r->reserved_in != 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (action == AVB_DEBUG_PHC_HOLD_ARM) {
+        if (hold_ms < AVB_DEBUG_PHC_HOLD_MIN_HOLD_MS || hold_ms > AVB_DEBUG_PHC_HOLD_MAX_HOLD_MS ||
+            timeout_ms < AVB_DEBUG_PHC_HOLD_MIN_ARM_TIMEOUT_MS || timeout_ms > AVB_DEBUG_PHC_HOLD_MAX_ARM_TIMEOUT_MS) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    } else if (action == AVB_DEBUG_PHC_HOLD_QUERY || action == AVB_DEBUG_PHC_HOLD_DISARM) {
+        if (hold_ms != 0 || timeout_ms != 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    } else {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    avb_dbg_phc_expire_locked(ctx);
+    if (action == AVB_DEBUG_PHC_HOLD_ARM) {
+        if (ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_ARMED || ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_HOLDING ||
+            ctx->dbg_phc_write_arm != 0) {
+            /* at most one pending or active arm per context, and none while the previous held reseed's write is still in
+             * flight (its AfterWrite still owns that record); nothing changes */
+            status = STATUS_DEVICE_BUSY;
+        } else {
+            avb_u32 completed = ctx->dbg_phc.holds_completed;
+            RtlZeroMemory(&ctx->dbg_phc, sizeof(ctx->dbg_phc));
+            ctx->dbg_phc.holds_completed = completed;
+            ctx->dbg_phc.arm_id = ++ctx->dbg_phc_next_arm;
+            ctx->dbg_phc.hold_ms = hold_ms;
+            ctx->dbg_phc.arm_timeout_ms = timeout_ms;
+            ctx->dbg_phc.activate_result = AVB_DBG_ACTIVATE_NONE;
+            ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_ARMED;
+            ctx->dbg_phc.armed_seq = avb_dbg_seq(ctx);
+            ctx->dbg_phc_deadline = KeQueryInterruptTime() + (ULONGLONG)timeout_ms * 10000ULL;
+        }
+    } else if (action == AVB_DEBUG_PHC_HOLD_DISARM) {
+        if (ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_ARMED) {
+            ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_IDLE;   /* an unused arm only; HOLDING and terminal states: no-op */
+        }
+    }
+    snapshot = ctx->dbg_phc;
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+
+    if (status != STATUS_SUCCESS) {
+        return status;
+    }
+    snapshot.version = AVB_DEBUG_PHC_HOLD_VERSION;
+    snapshot.action = action;
+    snapshot.reserved_in = 0;
+    snapshot.reserved_out = 0;
+    snapshot.context_epoch = ctx->tas_context_epoch;
+    snapshot.net_luid = (ctx->filter_instance != NULL) ? ctx->filter_instance->MiniportNetLuid.Value : 0u;
+    snapshot.status = (avb_u32)NDIS_STATUS_SUCCESS;
+    RtlCopyMemory(r, &snapshot, sizeof(snapshot));
+    *info = sizeof(snapshot);
+    return STATUS_SUCCESS;
+}
+
+/* PHC reseed hook, immediately before the physical write (SET_TIMESTAMP, PHC_OFFSET_ADJUST; PASSIVE_LEVEL). Consumes an
+ * ARMED arm, waits hold_ms in a bounded kernel wait outside every lock, then marks the write entry. Returns the consumed arm
+ * id (0 = no hold); until AvbDbgPhcAfterWrite with that id the write is in flight and no new ARM is accepted */
+static avb_u64 AvbDbgPhcBeforeWrite(PAVB_DEVICE_CONTEXT ctx, avb_u32 source)
+{
+    BOOLEAN consumed = FALSE;
+    avb_u64 arm = 0;
+    avb_u32 hold_ms = 0;
+    ULONGLONG t0, t1;
+    LARGE_INTEGER interval;
+    KIRQL irql;
+
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    avb_dbg_phc_expire_locked(ctx);
+    if (ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_ARMED) {
+        ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_HOLDING;
+        ctx->dbg_phc.phc_source = source;
+        ctx->dbg_phc.hold_begin_seq = avb_dbg_seq(ctx);
+        hold_ms = ctx->dbg_phc.hold_ms;
+        arm = ctx->dbg_phc.arm_id;
+        ctx->dbg_phc_write_arm = arm;
+        consumed = TRUE;
+    }
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+    if (!consumed) {
+        return 0;
+    }
+    t0 = KeQueryInterruptTime();
+    interval.QuadPart = -(LONGLONG)hold_ms * 10000LL;   /* relative, bounded by AVB_DEBUG_PHC_HOLD_MAX_HOLD_MS */
+    (void)KeDelayExecutionThread(KernelMode, FALSE, &interval);
+    t1 = KeQueryInterruptTime();
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    ctx->dbg_phc.hold_end_seq = avb_dbg_seq(ctx);
+    ctx->dbg_phc.hold_elapsed_us = (avb_u32)((t1 - t0) / 10ULL);
+    ctx->dbg_phc.holds_completed++;
+    ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_RELEASED;
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+    return arm;
+}
+
+/* Marker immediately before the physical PHC write of a reseed that held (only when a write actually follows) */
+static void AvbDbgPhcWriteEnter(PAVB_DEVICE_CONTEXT ctx, avb_u64 arm)
+{
+    KIRQL irql;
+
+    if (arm == 0) {
+        return;
+    }
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    if (ctx->dbg_phc.arm_id == arm) {
+        ctx->dbg_phc.phc_write_enter_seq = avb_dbg_seq(ctx);
+    }
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+}
+
+/* PHC reseed hook after a reseed that held: its real result, into that arm's record only. wrote = FALSE: the reseed ended
+ * without a physical write (rc is its real error); no write-done marker is set */
+static void AvbDbgPhcAfterWrite(PAVB_DEVICE_CONTEXT ctx, avb_u64 arm, BOOLEAN wrote, int rc)
+{
+    KIRQL irql;
+
+    if (arm == 0) {
+        return;
+    }
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    if (ctx->dbg_phc.arm_id == arm) {   /* no new ARM can replace it meanwhile (dbg_phc_write_arm); checked anyway */
+        if (wrote) {
+            ctx->dbg_phc.phc_write_done_seq = avb_dbg_seq(ctx);
+        }
+        ctx->dbg_phc.phc_rc = (avb_i32)rc;
+    }
+    if (ctx->dbg_phc_write_arm == arm) {
+        ctx->dbg_phc_write_arm = 0;
+    }
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+}
+
+/* IOCTL_AVB_TAS_ACTIVATE arrival (header-valid request, before the claim): the first one while ARMED or HOLDING is recorded */
+static void AvbDbgActivateArrival(PAVB_DEVICE_CONTEXT ctx, avb_u64 op_id)
+{
+    KIRQL irql;
+
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    avb_dbg_phc_expire_locked(ctx);
+    if ((ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_ARMED || ctx->dbg_phc.state == AVB_DEBUG_PHC_HOLD_HOLDING) &&
+        ctx->dbg_phc.activate_arrival_seq == 0) {
+        ctx->dbg_phc.activate_arrival_seq = avb_dbg_seq(ctx);
+        ctx->dbg_phc.activate_op_id = op_id;
+    }
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+}
+
+/* IOCTL_AVB_TAS_ACTIVATE completion: result and commit marker (taken where the record was published after writes, 0 = no
+ * commit) of the recorded ACTIVATE only */
+static void AvbDbgActivateDone(PAVB_DEVICE_CONTEXT ctx, avb_u64 op_id, avb_u32 result, avb_u64 commit_seq)
+{
+    KIRQL irql;
+
+    KeAcquireSpinLock(&ctx->dbg_phc_lock, &irql);
+    if (ctx->dbg_phc.activate_arrival_seq != 0 && ctx->dbg_phc.activate_op_id == op_id &&
+        ctx->dbg_phc.activate_result == AVB_DBG_ACTIVATE_NONE) {
+        ctx->dbg_phc.activate_result = result;
+        ctx->dbg_phc.activate_commit_seq = commit_seq;
+    }
+    KeReleaseSpinLock(&ctx->dbg_phc_lock, irql);
+}
+#endif
+
 /* #365 13.3 header checks after the lengths, in the published order down to net_luid; STATUS_SUCCESS when they pass. Reads
  * only the request. bound_luid: the open instance's bound adapter. Release drivers refuse any non-zero debug_fault */
 static NTSTATUS avb_tas_op_header(const AVB_TAS_OP_REQUEST *r, avb_u64 bound_luid)
@@ -446,6 +655,12 @@ NTSTATUS AvbCreateMinimalContext(
     /* TAS query MMIO protection (#350): starts run down (no holder yet, so this returns at once); FilterRestart re-arms it */
     ExInitializeRundownProtection(&ctx->tas_query_rundown);
     ExWaitForRundownProtectionRelease(&ctx->tas_query_rundown);
+#ifndef NDEBUG
+    /* #505: the Debug PHC reseed hold control starts IDLE with no ACTIVATE result (the rest is zeroed above) */
+    KeInitializeSpinLock(&ctx->dbg_phc_lock);
+    ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_IDLE;
+    ctx->dbg_phc.activate_result = 0xFFFFFFFFu;
+#endif
     
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
@@ -4012,7 +4227,20 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         r->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                         status = STATUS_INVALID_PARAMETER;
                     } else {
-                        int rc = intel_set_systime(&activeContext->intel_device, r->timestamp); 
+#ifndef NDEBUG
+                        /* #505: a Debug PHC reseed hold, immediately before the physical write */
+                        /* The target is absolute: written after the hold it is still the requested operation (PHC := T) */
+                        avb_u64 dbg_arm = AvbDbgPhcBeforeWrite(activeContext, AVB_DEBUG_PHC_HOLD_SRC_SET_TIMESTAMP);
+                        int rc;
+                        AvbDbgPhcWriteEnter(activeContext, dbg_arm);
+#endif
+#ifdef NDEBUG
+                        int rc;
+#endif
+                        rc = intel_set_systime(&activeContext->intel_device, r->timestamp);
+#ifndef NDEBUG
+                        AvbDbgPhcAfterWrite(activeContext, dbg_arm, TRUE, rc);
+#endif
                         r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                     }
@@ -4062,9 +4290,53 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     } else {
                         /* Call intel_set_systime directly - bypasses the 30s monotonicity guard
                          * in SET_TIMESTAMP, so small backward corrections succeed. */
+#ifndef NDEBUG
+                        BOOLEAN dbg_invalid = FALSE;
+                        {   /* #505: a Debug PHC reseed hold after the validation, immediately before the physical write */
+                            avb_u64 dbg_arm = AvbDbgPhcBeforeWrite(phcCtx, AVB_DEBUG_PHC_HOLD_SRC_PHC_OFFSET_ADJUST);
+                            BOOLEAN dbg_write = TRUE;
+                            if (dbg_arm != 0) {
+                                /* The hold delayed this step. Re-derive its target from the PHC now, by the same read and
+                                 * rules as above, so the held step still moves the PHC by exactly offset_ns (its real
+                                 * operation), not by offset_ns minus the hold */
+                                ULONGLONG now_t = 0;
+                                rc = intel_gettime(&phcCtx->intel_device, 0, &now_t, NULL);
+                                if (rc != 0) {
+                                    rc = AvbReadTimestamp(&phcCtx->intel_device, &now_t);
+                                }
+                                if (rc != 0) {
+                                    dbg_write = FALSE;   /* no current PHC: no write, as for the first read */
+                                } else if (off_req->offset_ns < 0) {
+                                    ULONGLONG abs_off = (ULONGLONG)(-(off_req->offset_ns));
+                                    if (abs_off > now_t) {
+                                        dbg_write = FALSE;
+                                        dbg_invalid = TRUE;
+                                        rc = -1;
+                                    } else {
+                                        new_ts = now_t - abs_off;
+                                    }
+                                } else {
+                                    new_ts = now_t + (ULONGLONG)off_req->offset_ns;
+                                }
+                            }
+                            if (dbg_write) {
+                                AvbDbgPhcWriteEnter(phcCtx, dbg_arm);
+                                rc = intel_set_systime(&phcCtx->intel_device, new_ts);
+                            }
+                            AvbDbgPhcAfterWrite(phcCtx, dbg_arm, dbg_write, rc);
+                        }
+                        if (dbg_invalid) {
+                            off_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                            status = STATUS_INVALID_PARAMETER;
+                        } else {
+                            off_req->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
+                            status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        }
+#else
                         rc = intel_set_systime(&phcCtx->intel_device, new_ts);
                         off_req->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+#endif
                     }
                 }
                 info = sizeof(*off_req);
@@ -4598,6 +4870,13 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+#ifndef NDEBUG
+    case IOCTL_AVB_DEBUG_PHC_RESEED_HOLD:
+        /* #505 Debug-only test control; device.c routes bound handles only (unbound: STATUS_INVALID_DEVICE_STATE) */
+        status = AvbDbgPhcHoldControl(currentContext, buf, inLen, outLen, &info);
+        break;
+#endif
+
     case IOCTL_AVB_QUERY_HW_SNAPSHOT:
         /* Read-only HIL restoration verification (Q 2026-10-22), Debug and Release.  device.c routes bound handles
          * only.  One entry per AVB_HWREG_* id: the family's intel-ethernet-regs offset map (device HAL) selects the
@@ -4940,10 +5219,16 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             avb_u32 result = AVB_TAS_ACT_INVALID, before = 0, after = 0, link_mbps = 0;
             avb_u64 gen_before = 0, gen_after = 0, epoch = 0;
             BOOLEAN ran = FALSE;
+#ifndef NDEBUG
+            avb_u64 dbg_commit_seq = 0;   /* #505: marker taken where the record is published after writes */
+#endif
 
             RtlZeroMemory(&oc, sizeof(oc));
             status = avb_tas_op_header(r, bound_luid);                                     /* step 1 */
             if (NT_SUCCESS(status)) {
+#ifndef NDEBUG
+                AvbDbgActivateArrival(activeContext, r->client_op_id);   /* #505: header-valid arrival, before the claim */
+#endif
                 if (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS) {
                     result = AVB_TAS_ACT_INVALID;                                          /* step 2 */
                 } else if (r->pre_activation == AVB_TAS_PRE_PASS) {
@@ -4995,6 +5280,11 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                 InterlockedExchange(&activeContext->tas_unverified_active, 1);
                             }
                             InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+#ifndef NDEBUG
+                            if (oc.write_attempted) {
+                                dbg_commit_seq = (avb_u64)InterlockedIncrement64(&activeContext->dbg_seq);   /* #505, no logging */
+                            }
+#endif
                             (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "activate");
                         }
                     }
@@ -5002,6 +5292,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     avb_tas_op_release(activeContext);
                 }
                 status = (NTSTATUS)avb_tas_op_completion(result);
+#ifndef NDEBUG
+                AvbDbgActivateDone(activeContext, r->client_op_id, result, dbg_commit_seq);   /* #505, outside every lock */
+#endif
                 if (result == AVB_TAS_ACT_COMMITTED) {
                     /* bytes 136-143 only; bytes 0-135 come back as the caller wrote them (13.1) */
                     r->out_flags = oc.acceptance_acted ? AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE : 0u;

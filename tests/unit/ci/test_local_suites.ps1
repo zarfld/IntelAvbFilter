@@ -394,6 +394,101 @@ tc_check 'TEST-LOCALSUITES-024-elevated-whole-suite-runs-every-registered-entry-
      ($cmdW -notmatch ' -Tests ') -and ($cmdW -notmatch 'Run-Tests\.ps1') -and (@($wPsErr).Count -eq 0) -and ($elSrc -notmatch '-Suite requires -TestName')) `
     $(if ($wErr) { "error: $wErr" } else { "cmd: $cmdW" })
 
+# --- 036 (#480): the default outer deadline of the elevated child covers the budget of what it runs --------------------
+# Expected values are written out from the documented per-adapter budgets (n x 980 + n x (n-1) x 5 s and 1960 / 10 s) and the
+# HardwareIntegration suite default of 600 s, plus the wrapper's own 300 s and 60 s per item.  Nothing is executed.
+$dlBad = @()
+try { Import-Functions $ElevPath @('Get-AvbElevatedBudget', 'Resolve-AvbElevatedDeadline', 'Get-AvbFilterAdapterBound') } catch { $dlBad += $_.Exception.Message }
+if ($dlBad.Count -eq 0) {
+    $dlCi = Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'; $dlFe = Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'
+    $bud = { param([string]$Name, [string]$TArgs, [int]$N, [string]$S = '', [bool]$F = $false) Get-AvbElevatedBudget -RunCiScript $dlCi -FrontEndScript $dlFe -Suite $S -TestName $Name -TestArgs $TArgs -Full $F -AdapterCount $N }
+    $hold = { param([int]$n) $m = [Math]::Max(1, $n); 980 * $m + 5 * $m * ($m - 1) }
+    foreach ($n in -1, 0, 1, 3, 9) {
+        $b = & $bud 'test_tas_activate' '--hold' $n $(if ($n -eq 3) { '' } else { 'HardwareIntegration' }); if ($b.Seconds -ne (& $hold $n) + 360) { $dlBad += "--hold with $n adapter(s): $($b.Seconds) s, expected $((& $hold $n) + 360) s" }
+        $all = 3 * (& $hold $n) + 2 * (& $hold $n) + 600 + 5 * 60 + 300
+        foreach ($s in $(if ($n -eq 3) { '', 'HardwareIntegration' } else { 'HardwareIntegration' })) {
+            $b = & $bud 'test_tas_activate' '' $n $s
+            if ($b.Seconds -ne $all -or @($b.Entries).Count -ne 5) { $dlBad += "bare program (suite '$s') with $n adapter(s): $($b.Seconds) s for $(@($b.Entries).Count) entries, expected $all s for 5" }
+        }
+    }
+    $b = & $bud 'test_tas_activate.exe' '--phc-hold-control' 3; if ($b.Seconds -ne 960) { $dlBad += "--phc-hold-control: $($b.Seconds) s, expected 960 s" }
+    $b = & $bud 'test_x_not_registered' '' 3; if ($b.Seconds -ne 960 -or -not $b.Note) { $dlBad += "unregistered name: $($b.Seconds) s, note '$($b.Note)'" }
+    $b = & $bud 'Test-DebugLevelVerbosity.ps1' '' 3; if (@($b.Entries).Count -ne 1 -or $b.Seconds -lt 960) { $dlBad += "registered script: $($b.Seconds) s for $(@($b.Entries) -join '|')" }
+    $hi = & $bud '' '' 3 'HardwareIntegration'; $hu = & $bud '' '' 3 'HardwareUnit'; $full = & $bud '' '' 3 '' $true
+    if (@($hu.Entries).Count -lt 50 -or $hu.Seconds -le 1800 -or @($hi.Entries).Count -lt 40 -or $hi.Seconds -le 1800) { $dlBad += "suite budgets: HardwareUnit $($hu.Seconds) s / $(@($hu.Entries).Count), HardwareIntegration $($hi.Seconds) s / $(@($hi.Entries).Count)" }
+    if ($full.Seconds -le $hi.Seconds + $hu.Seconds - 300) { $dlBad += "full run $($full.Seconds) s does not cover its suites ($($hu.Seconds) + $($hi.Seconds) s)" }
+    if ((& $bud '' '' 9 'HardwareIntegration').Seconds -le $hi.Seconds) { $dlBad += 'the suite budget does not scale with the adapters' }
+    # below, at and above the former fixed default; explicit values keep their meaning and never shrink silently
+    $at = @{ Seconds = 1800; Entries = @('x'); Note = '' }; $above = @{ Seconds = 16050; Entries = @('x'); Note = '' }; $below = @{ Seconds = 960; Entries = @('x'); Note = '' }
+    foreach ($c in @(@($at, 0, 1800, $false), @($above, 0, 16050, $false), @($below, 0, 960, $false), @($above, 1200, 1200, $true), @($above, 16050, 16050, $false), @($above, 20000, 20000, $false), @($below, 959, 959, $true))) {
+        $r = Resolve-AvbElevatedDeadline -Requested $c[1] -Budget $c[0]
+        if ($r.Seconds -ne $c[2] -or [bool]$r.Warning -ne $c[3] -or ($c[3] -and ($r.Warning -notmatch [string]$c[1] -or $r.Warning -notmatch [string]$c[0].Seconds))) { $dlBad += "requested $($c[1]) for budget $($c[0].Seconds): $($r.Seconds) s, warning '$($r.Warning)'" }
+    }
+    $unk = & $bud 'test_tas_activate' '--hold' -1 'HardwareIntegration'; if (-not $unk.Note) { $dlBad += 'an unknown adapter count is not reported' }
+    $n0 = Get-AvbFilterAdapterBound; if ($n0 -isnot [int] -or $n0 -lt -1) { $dlBad += "adapter bound '$n0'" }
+    # STATIC: the script itself uses the computed deadline, keeps the verified tree termination, and records both values.
+    $elA = [System.Management.Automation.Language.Parser]::ParseFile($ElevPath, [ref]$null, [ref]$null)
+    $tp = @($elA.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'TimeoutSeconds' })
+    if ($tp.Count -ne 1 -or $tp[0].DefaultValue.Extent.Text -ne '0') { $dlBad += "TimeoutSeconds default '$($tp[0].DefaultValue)'" }
+    $elT = [System.IO.File]::ReadAllText($ElevPath)
+    if ($elT -notmatch 'Wait-AvbElevatedChild -Process \$childProc -Deadline \$deadline -Requested \$TimeoutSeconds') { $dlBad += 'the child is not waited for with the resolved deadline' }
+    if ($elT -notmatch 'Stop-AvbProcessTree -Process \$childProc') { $dlBad += 'the timed-out tree is no longer terminated and verified' }
+    foreach ($f in 'timeoutSeconds', 'timeoutBudgetSeconds') { if ($elT -notmatch "\b$f\s*=") { $dlBad += "capture record lacks $f" } }
+}
+tc_check 'TEST-LOCALSUITES-036-the-default-elevated-deadline-covers-the-budget-of-what-it-runs' ($dlBad.Count -eq 0) ($dlBad -join ' ### ')
+
+# --- 037 (#480, PR #518 review): parent count unknown, the elevated runner enumerates three adapters ---------------------
+# The runner reports the count it budgets with (real function of Run-Tests-CI.ps1); the wrapper reconciles its DEFAULT deadline
+# with it while it waits.  Explicit deadlines, a smaller count or an unreadable report change nothing.  Real child processes; no
+# elevation, no driver.
+$rcBad = @()
+try { Import-Functions $ElevPath @('Get-AvbElevatedBudget', 'Resolve-AvbElevatedDeadline', 'Read-AvbObservedInventory', 'Update-AvbElevatedDeadline', 'Wait-AvbElevatedChild') } catch { $rcBad += $_.Exception.Message }
+try { Import-Functions (Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1') @('Write-AvbObservedInventory') } catch { $rcBad += $_.Exception.Message }
+if ($rcBad.Count -eq 0) {
+    $rcBudget = { param([int]$n) Get-AvbElevatedBudget -RunCiScript (Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1') -FrontEndScript (Join-Path $RepoRoot 'tools\test\Run-Tests.ps1') -Suite 'HardwareIntegration' -TestName 'test_tas_activate' -TestArgs '--hold' -AdapterCount $n }
+    $inv = Join-Path $Tmp 'inventory.txt'
+    $b0 = & $rcBudget -1
+    $d0 = Resolve-AvbElevatedDeadline -Requested 0 -Budget $b0
+    # the review's case: outside unknown, inside three (inner allowance 2970 s)
+    Write-AvbObservedInventory -Path $inv -AdapterCount 3
+    $d1 = Update-AvbElevatedDeadline -Deadline $d0 -Requested 0 -BudgetedCount -1 -Observed (Read-AvbObservedInventory $inv) -BudgetFor $rcBudget
+    if ($d1.Deadline.Seconds -lt 2970 + 360 -or $d1.BudgetedCount -ne 3) { $rcBad += "unknown outside, three inside: deadline $($d1.Deadline.Seconds) s for $($d1.BudgetedCount) adapter(s), the runner allows 2970 s" }
+    # fewer bindings than enumerated adapters (count known, too small)
+    $d2 = Update-AvbElevatedDeadline -Deadline (Resolve-AvbElevatedDeadline -Requested 0 -Budget (& $rcBudget 2)) -Requested 0 -BudgetedCount 2 -Observed 9 -BudgetFor $rcBudget
+    if ($d2.Deadline.Seconds -ne 980 * 9 + 5 * 72 + 360) { $rcBad += "two outside, nine inside: $($d2.Deadline.Seconds) s" }
+    foreach ($c in @(@(3, 1), @(3, 3), @(3, -1), @(3, 0))) {
+        $k = Resolve-AvbElevatedDeadline -Requested 0 -Budget (& $rcBudget $c[0])
+        $u = Update-AvbElevatedDeadline -Deadline $k -Requested 0 -BudgetedCount $c[0] -Observed $c[1] -BudgetFor $rcBudget
+        if ($u.Deadline.Seconds -ne $k.Seconds -or $u.BudgetedCount -ne $c[0]) { $rcBad += "budgeted $($c[0]), observed $($c[1]): the deadline changed to $($u.Deadline.Seconds) s" }
+    }
+    $ex = Resolve-AvbElevatedDeadline -Requested 1200 -Budget $b0
+    if ((Update-AvbElevatedDeadline -Deadline $ex -Requested 1200 -BudgetedCount -1 -Observed 3 -BudgetFor $rcBudget).Deadline.Seconds -ne 1200) { $rcBad += 'an explicit deadline was changed' }
+    # the report: largest count wins, nothing is written for an unobserved inventory, unreadable content is "not observed"
+    Write-AvbObservedInventory -Path $inv -AdapterCount 2; if ((Read-AvbObservedInventory $inv) -ne 2 -and (Read-AvbObservedInventory $inv) -ne 3) { $rcBad += 'a later report is not readable' }
+    $none = Join-Path $Tmp 'inventory-none.txt'; Write-AvbObservedInventory -Path $none -AdapterCount -1; if (Test-Path -LiteralPath $none) { $rcBad += 'an unobserved inventory was reported' }
+    Write-AvbObservedInventory -Path '' -AdapterCount 3   # no report requested: no error
+    foreach ($t in 'x', '', '-5', '3 adapters') { [System.IO.File]::WriteAllText($none, $t); if ((Read-AvbObservedInventory $none) -ne -1) { $rcBad += "report '$t' read as a count" } }
+    if ((Read-AvbObservedInventory (Join-Path $Tmp 'absent.txt')) -ne -1) { $rcBad += 'a missing report read as a count' }
+    # the wait itself: a child that outlives the first deadline is not ended when the runner reports three adapters, and is without it
+    $fast = { param([int]$n) @{ Seconds = $(if ($n -ge 3) { 60 } else { 4 }); Entries = @('x'); Note = '' } }
+    foreach ($c in @(@('reported', $true, $true), @('not reported', $false, $false))) {
+        $f = Join-Path $Tmp "wait-$($c[0] -replace ' ','').txt"
+        $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-Command', "Start-Sleep -Milliseconds 700; if ('$($c[1])' -eq 'True') { [IO.File]::WriteAllText('$f', '3') }; Start-Sleep -Seconds 6; exit 7" -PassThru -WindowStyle Hidden
+        $null = $p.Handle
+        $w = Wait-AvbElevatedChild -Process $p -Deadline (Resolve-AvbElevatedDeadline -Requested 0 -Budget (& $fast -1)) -Requested 0 -BudgetedCount -1 -InventoryFile $f -BudgetFor $fast
+        if ([bool]$w.Exited -ne $c[2]) { $rcBad += "child with inventory $($c[0]): exited=$($w.Exited) deadline $($w.Deadline.Seconds) s" }
+        if ($c[2] -and ($p.ExitCode -ne 7 -or $w.Deadline.Seconds -ne 60)) { $rcBad += "reconciled wait: exit $($p.ExitCode), deadline $($w.Deadline.Seconds) s" }
+        if (-not $p.HasExited) { $p.Kill(); [void]$p.WaitForExit(5000) }
+    }
+    # STATIC: the runner reports exactly the count it budgets the item with; the wrapper hands the path to the elevated child and waits through it
+    $ciT = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1')); $elT2 = [System.IO.File]::ReadAllText($ElevPath)
+    if ($ciT -notmatch 'Write-AvbObservedInventory -Path \$env:AVB_ELEVATED_INVENTORY_FILE -AdapterCount \$enumeratedAdapters') { $rcBad += 'the runner does not report its enumeration' }
+    if ($elT2 -notmatch 'Wait-AvbElevatedChild -Process \$childProc') { $rcBad += 'the wrapper does not wait through the reconciliation' }
+    $cmdI = New-AvbElevatedCommand -Configuration 'Debug' -TestName 'test_x' -TestArgs '' -TestExecutable '' -Full $false -LogFile '' -Suite 'HardwareUnit' -ResultsJson '' -LegacyScript 'C:\t\a.ps1' -RunCiScript 'C:\t\b.ps1' -InventoryFile "C:\l\it's.txt"
+    if ($cmdI -notmatch [regex]::Escape("`$env:AVB_ELEVATED_INVENTORY_FILE = 'C:\l\it''s.txt'; ")) { $rcBad += 'the path is not handed to the elevated child' }
+}
+tc_check 'TEST-LOCALSUITES-037-an-unknown-outer-adapter-count-is-reconciled-with-the-runners-enumeration' ($rcBad.Count -eq 0) ($rcBad -join ' ### ')
+
 # --- 025 (STATIC): FullSuite.ps1 dispatches the canonical suite sequence through the runner gates -------------------
 # Defects in FullSuite_20261103_063836.log: a bare Run-Tests-CI.ps1 call (default Unit/Debug in both configurations),
 # the suite list overwritten by @("All") and -CaptureDbgView passed to Run-Tests-CI.ps1 (rejected, nothing ran).  The

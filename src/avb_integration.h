@@ -379,6 +379,19 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE. Set when such a commit leaves a schedule; cleared only when the retained state is
      * actually removed (a successful disarm), not because another request failed. A new context starts with 0. Interlocked. */
     volatile LONG tas_unverified_active;
+
+#ifndef NDEBUG
+    /* #505 Debug-only PHC reseed hold control (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD). dbg_phc_lock guards dbg_phc and
+     * dbg_phc_deadline; it is held only for short field updates, never while waiting and never with logging. dbg_phc holds
+     * the current or last arm's evidence in its wire layout. dbg_seq is the per-context marker counter (Interlocked). A held
+     * PHC reseed keeps the IOCTL remove lock, so a detach waits for the bounded hold to end. */
+    KSPIN_LOCK dbg_phc_lock;
+    AVB_DEBUG_PHC_HOLD_REQUEST dbg_phc;
+    ULONGLONG dbg_phc_deadline;   /* KeQueryInterruptTime (100 ns) at which an unused arm expires */
+    avb_u64 dbg_phc_next_arm;
+    avb_u64 dbg_phc_write_arm;    /* arm whose held reseed's write is still in flight (0 = none); ARM is BUSY meanwhile */
+    volatile LONG64 dbg_seq;
+#endif
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*

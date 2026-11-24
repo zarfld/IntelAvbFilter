@@ -586,8 +586,10 @@ $HardwareIntegrationTests = @(
     # its setup, restoration and final-state report; a failure is recorded, never a reason to withhold it.
     "test_ptp_phc_lifecycle",                 # UT-CORR-009: driver reinstall by process creation, restoration verified by the test
     "test_control_device_lifecycle",          # TC-LCY-328: service stop/restart cycles, recovery verified by the test
-    "test_tas_activate --fault-versioned"     # #482 TEST-TASACT-FAULT-001 F1/F2 on 0x80C (Debug fault injection; Release: not sent),
+    "test_tas_activate --fault-versioned",    # #482 TEST-TASACT-FAULT-001 F1/F2 on 0x80C (Debug fault injection; Release: not sent),
                                               # each case with its own pre-state, observer and owned NIC-cycle cleanup. Unsafe
+    "test_tas_activate --phc-hold-control"    # #505 TC-TASACT-HOLDCTL-001: Debug-only PHC reseed hold control on every PHC adapter
+                                              # (Release: every line INCONCLUSIVE). Unsafe (shared source; no NIC cycle in this mode)
 )
 
 # ===========================
@@ -771,6 +773,7 @@ $HilTestSafety = @{
     'test_tas_activate --pass'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #370)
     'test_tas_activate --fault'        = 'Unsafe'     # TAS_ACTIVATE fault path plus CM_Disable_DevNode / CM_Enable_DevNode (#357)
     'test_tas_activate --fault-versioned' = 'Unsafe'  # #482 F1/F2: versioned TAS_ACTIVATE fault path, owned CM_Disable_DevNode / CM_Enable_DevNode per case
+    'test_tas_activate --phc-hold-control' = 'Unsafe'  # #505: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD (Debug), PHC_OFFSET_ADJUST steps compensated to net 0, TAS_ACTIVATE with a zero metadata pair (refused before any write); this mode performs no NIC cycle, the class follows the shared source's NIC administration (HILGATE-009)
     'test_tas_query_clean'             = 'Unsafe'     # read-only TAS_QUERY_HW checks plus the owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#366)
     'test_tas_query_clean --hw-verified' = 'Unsafe'   # TAS_ACTIVATE HOLD, TAS_QUERY_HW past BaseT, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#381)
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
@@ -820,8 +823,31 @@ $HilTestSafety = @{
 # ===========================
 # Resolve which tests to run
 # ===========================
+# A program named in -Tests without arguments that is no entry itself stands for all its registered modes of the suite, each
+# once (#473; the same rule as Run-Tests.ps1 Resolve-AvbRunnerEntry).  Every entry is dispatched once whichever selector supplied
+# it, in any order (PR #518): the first mention keeps its place, and a registered entry is passed on in its registered spelling.
+# An unregistered name is passed on unchanged and still fails closed at dispatch.
+function Expand-AvbBareProgram {
+    param([string[]]$Names, [string[]]$Registered, [string[]]$Classified)
+    $reg = @($Registered | ForEach-Object { $_ -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' } | Select-Object -Unique)
+    $out = @(); $seen = @()
+    foreach ($n in $Names) {
+        $b = $n.Trim(); if (-not $b.StartsWith('ps1:')) { $b = ($b -replace '\s+', ' ') -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' }
+        $modes = @(if ($b -notmatch '[\s:]' -and $reg -notcontains $b -and $Classified -notcontains $b) { $reg | Where-Object { ($_ -split '\s+', 2)[0] -eq $b } })
+        foreach ($k in $(if ($modes.Count -gt 0) { $modes } else { $b })) {
+            if ($seen -contains $k) { continue }
+            $seen += $k
+            $out += $(if ($reg -contains $k) { @($reg | Where-Object { $_ -eq $k })[0] } else { $n })
+        }
+    }
+    return $out
+}
 if ($Tests.Count -gt 0) {
-    $TestList = $Tests
+    $TestList = @(Expand-AvbBareProgram -Names $Tests -Classified @($HilTestSafety.Keys) -Registered $(switch ($Suite) {
+        'HardwareUnit'        { @($HardwareUnitTests) + @($HardwareUnitCoverageGaps.Keys) }
+        'HardwareIntegration' { @($HardwareIntegrationTests) + @($HardwareIntegrationCoverageGaps.Keys) + @($HardwareIntegrationAttendedOnly.Keys) }
+        default               { @($UnitTests) + @($IntegrationTests) }
+    }))
     # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list (the behavioral sentinel
     # test injects a custom list while exercising the hardware-suite control flow).
 } else {
@@ -1956,6 +1982,15 @@ function Get-AvbTestTimeoutSeconds {
     return [Math]::Max($SuiteSeconds, $own)
 }
 
+# The adapter count an item is budgeted with, reported to Run-Tests-Elevated.ps1 (AVB_ELEVATED_INVENTORY_FILE) so that its default
+# outer deadline covers this runner's own budget (#480, PR #518).  Nothing is reported without an observed enumeration.
+function Write-AvbObservedInventory {
+    param([string]$Path, [int]$AdapterCount)
+    if (-not $Path -or $AdapterCount -lt 0) { return }
+    try { [System.IO.File]::WriteAllText($Path, [string]$AdapterCount) }
+    catch { Write-Host "  [WARN] adapter count $AdapterCount not reported to the elevated wrapper ($($_.Exception.Message)): its deadline may be shorter than this runner's budget" -ForegroundColor Yellow }
+}
+
 # Incremental capture of one redirected stream (#458, PR #485 r4629829999), plain PowerShell (no compiled helper: a
 # per-process Add-Type cost about 250 ms in every runner start).  One ReadAsync is outstanding per stream; the runner
 # collects completed reads while it polls the process (Update-AvbStreamCapture) and waits for EOF only for a bounded
@@ -2936,6 +2971,7 @@ foreach ($WorkItem in $WorkItems) {
     $timedOut  = $false
     # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
     $enumeratedAdapters = if ($script:HilBaseline -and $script:HilBaseline.ClockOk) { @($script:HilBaseline.Clock).Count } else { -1 }
+    Write-AvbObservedInventory -Path $env:AVB_ELEVATED_INVENTORY_FILE -AdapterCount $enumeratedAdapters
     $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds -AdapterCount $enumeratedAdapters
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
     if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }

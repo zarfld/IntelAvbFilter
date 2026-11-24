@@ -613,6 +613,63 @@ typedef struct AVB_REGISTER_REQUEST {
     avb_u32 value;   /* in for WRITE, out for READ */
     avb_u32 status;  /* NDIS_STATUS value */
 } AVB_REGISTER_REQUEST, *PAVB_REGISTER_REQUEST;
+
+/* #505 Debug-only test control: a bound-adapter-only, one-shot, bounded hold of the next PHC reseed (SET_TIMESTAMP or
+ * PHC_OFFSET_ADJUST) immediately before its physical write, plus driver-side sequenced evidence of the hold, the PHC write
+ * and IOCTL_AVB_TAS_ACTIVATE arrival/commit, so a test can prove the internal order of a PHC write and a TAS commit. Not
+ * compiled into Release drivers: a Release driver completes the code STATUS_INVALID_DEVICE_REQUEST. Vendor-range function
+ * 0x8F1 after the Debug control 0x8F0 (#412); FILE_WRITE_ACCESS because ARM/DISARM change driver state. It performs no
+ * register access itself and changes no result or status of any other IOCTL. */
+#define IOCTL_AVB_DEBUG_PHC_RESEED_HOLD CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x8F1, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A3C4 (#505) */
+
+#define AVB_DEBUG_PHC_HOLD_VERSION            1u
+#define AVB_DEBUG_PHC_HOLD_ARM                1u   /* arm one hold of the next eligible PHC reseed on the bound context */
+#define AVB_DEBUG_PHC_HOLD_QUERY              2u   /* report state and evidence; never waits for a TAS claim or order lock */
+#define AVB_DEBUG_PHC_HOLD_DISARM             3u   /* cancel an unused ARMED control; no-op in any other state */
+#define AVB_DEBUG_PHC_HOLD_MIN_HOLD_MS        1u
+#define AVB_DEBUG_PHC_HOLD_MAX_HOLD_MS        2000u
+#define AVB_DEBUG_PHC_HOLD_MIN_ARM_TIMEOUT_MS 1u
+#define AVB_DEBUG_PHC_HOLD_MAX_ARM_TIMEOUT_MS 10000u
+
+#define AVB_DEBUG_PHC_HOLD_IDLE     0u   /* no arm on this context (initial, or after DISARM of an unused arm) */
+#define AVB_DEBUG_PHC_HOLD_ARMED    1u   /* armed, not yet consumed */
+#define AVB_DEBUG_PHC_HOLD_HOLDING  2u   /* consumed: a PHC reseed is waiting before its write */
+#define AVB_DEBUG_PHC_HOLD_RELEASED 3u   /* the hold ended and its PHC write proceeded (see the write markers) */
+#define AVB_DEBUG_PHC_HOLD_EXPIRED  4u   /* the arm was not consumed within arm_timeout_ms */
+
+#define AVB_DEBUG_PHC_HOLD_SRC_SET_TIMESTAMP     1u
+#define AVB_DEBUG_PHC_HOLD_SRC_PHC_OFFSET_ADJUST 2u
+
+/* Sequenced markers: values of one per-context counter that every marker increments (0 = not observed). Their order is the
+ * driver-internal order of the events; a test never infers it from IOCTL return times. The ACTIVATE markers belong to the
+ * first IOCTL_AVB_TAS_ACTIVATE that arrived while this arm was ARMED or HOLDING (activate_op_id); its commit marker is taken
+ * where the record is published after its writes */
+typedef struct AVB_DEBUG_PHC_HOLD_REQUEST {
+    avb_u32 version;              /*   0 in:  AVB_DEBUG_PHC_HOLD_VERSION */
+    avb_u32 action;               /*   4 in:  AVB_DEBUG_PHC_HOLD_ARM / _QUERY / _DISARM */
+    avb_u32 hold_ms;              /*   8 in:  ARM 1..2000; QUERY/DISARM 0. out: the arm's hold_ms */
+    avb_u32 arm_timeout_ms;       /*  12 in:  ARM 1..10000; QUERY/DISARM 0. out: the arm's timeout */
+    avb_u64 reserved_in;          /*  16 in:  0 */
+    avb_u64 arm_id;               /*  24 out: the arm the evidence belongs to (per context, non-zero); 0 = never armed */
+    avb_u64 context_epoch;        /*  32 out: TAS context epoch of the bound adapter context (#352) */
+    avb_u64 net_luid;             /*  40 out: NET_LUID.Value of the bound adapter */
+    avb_u32 state;                /*  48 out: AVB_DEBUG_PHC_HOLD_IDLE .. _EXPIRED */
+    avb_u32 holds_completed;      /*  52 out: holds consumed on this context (all arms) */
+    avb_u32 phc_source;           /*  56 out: AVB_DEBUG_PHC_HOLD_SRC_* of the consuming reseed; 0 none */
+    avb_i32 phc_rc;               /*  60 out: result of that real PHC write (0 success); valid when phc_write_done_seq != 0 */
+    avb_u64 armed_seq;            /*  64 out: marker: ARM accepted */
+    avb_u64 hold_begin_seq;       /*  72 out: marker: the reseed consumed the arm and starts waiting */
+    avb_u64 hold_end_seq;         /*  80 out: marker: the wait ended */
+    avb_u64 phc_write_enter_seq;  /*  88 out: marker: immediately before the physical PHC write */
+    avb_u64 phc_write_done_seq;   /*  96 out: marker: immediately after it */
+    avb_u64 activate_arrival_seq; /* 104 out: marker: that ACTIVATE reached its handler */
+    avb_u64 activate_commit_seq;  /* 112 out: marker: that ACTIVATE published its record after writes; 0 = no commit */
+    avb_u64 activate_op_id;       /* 120 out: client_op_id of that ACTIVATE */
+    avb_u32 hold_elapsed_us;      /* 128 out: measured wait (kernel interrupt time), not a scheduling bound */
+    avb_u32 activate_result;      /* 132 out: AVB_TAS_ACT_* of that ACTIVATE; 0xFFFFFFFF = none or not completed */
+    avb_u32 status;               /* 136 out: NDIS_STATUS */
+    avb_u32 reserved_out;         /* 140 out: 0 */
+} AVB_DEBUG_PHC_HOLD_REQUEST, *PAVB_DEBUG_PHC_HOLD_REQUEST;   /* 144 bytes */
 #endif
 
 typedef struct AVB_TIMESTAMP_REQUEST {

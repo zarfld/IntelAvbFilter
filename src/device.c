@@ -790,6 +790,9 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_DISARM_TAS:                // Fix #328: test-state-restoration disarm (code 66)
         case IOCTL_AVB_QUERY_HW_SNAPSHOT:         // HIL restoration verification (code 70); bound handles only, see gate
         case IOCTL_AVB_TAS_QUERY_HW:              // Implements #350 (read-only TAS hardware query, 0x80B); bound handles only, see gate
+#ifndef NDEBUG
+        case IOCTL_AVB_DEBUG_PHC_RESEED_HOLD:     // #505 Debug-only PHC reseed hold control (0x8F1); bound handles only, see gate
+#endif
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
@@ -823,6 +826,13 @@ IntelAvbFilterDeviceIoControl(
                     Status = STATUS_INVALID_DEVICE_STATE;
                     break;
                 }
+#ifndef NDEBUG
+                /* #505: the Debug PHC reseed hold control is bound-only; an unbound handle changes no control state */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_DEBUG_PHC_RESEED_HOLD) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+#endif
                 // Fall back to searching for any Intel filter (single-adapter mode)
                 DEBUGP(DL_WARN, "DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();

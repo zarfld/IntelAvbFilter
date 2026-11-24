@@ -40,6 +40,8 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/owned_worker.h"         /* #505: worker ownership, PR #518 review */
+#include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 
 /* =========================================================================
@@ -1916,6 +1918,182 @@ static void test_63_hold_generation(void) {
     EXPECT_EQ("IO_TIMEOUT (BASE_PASSED) with generation unchanged is FAIL", tas_hold_generation(&e, &n), TAS_HOLD_GEN_FAIL);
 }
 
+/* TC-MOCK-064: the cases contained in test_tas_activate.exe, their selection and the exit status of a run (#487; test logic only).
+ * No argument selects every contained case; explicit arguments select exactly those; an unknown argument runs nothing. A run is
+ * successful only when every selected case is: a later success never covers an earlier failure, block or unexecuted case */
+static void test_64_activate_cases(void)
+{
+    BOOL sel[TAS_ACT_CASE_COUNT];
+    int ex[TAS_ACT_CASE_COUNT];
+    unsigned k, j, seen[MODE_COUNT] = {0}, n = 0;
+    char *none[] = { "test_tas_activate.exe" };
+    char *bad[] = { "test_tas_activate.exe", "--unknown" };
+    char *prefix[] = { "test_tas_activate.exe", "--fault-" };
+    char *mixed[] = { "test_tas_activate.exe", "--hold", "--unknown" };
+    char *twice[] = { "test_tas_activate.exe", "--hold", "--phc-hold-control", "--hold" };
+
+    printf("\n[TC-MOCK-064] #487 contained cases, selection and exit status (test logic only)\n");
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        EXPECT_EQ("a case has a mode", g_tas_act_cases[k].mode > MODE_NONE && g_tas_act_cases[k].mode < MODE_COUNT, 1);
+        EXPECT_EQ("a case has an argument and an id", g_tas_act_cases[k].arg[0] == '-' && g_tas_act_cases[k].case_id[0] != 0, 1);
+        seen[g_tas_act_cases[k].mode]++;
+        for (j = 0; j < k; j++) {
+            EXPECT_EQ("arguments are distinct", strcmp(g_tas_act_cases[k].arg, g_tas_act_cases[j].arg) != 0, 1);
+        }
+    }
+    for (k = MODE_NONE + 1; k < MODE_COUNT; k++) {
+        EXPECT_EQ("every mode of the program is a contained case, once", seen[k], 1);
+    }
+
+    EXPECT_EQ("no argument is a valid selection", tas_act_select(1, none, sel), TRUE);
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        EXPECT_EQ("no argument selects every contained case", sel[k], TRUE);
+    }
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        char *one[2];
+        one[0] = none[0];
+        one[1] = (char *)g_tas_act_cases[k].arg;
+        EXPECT_EQ("an explicit argument is a valid selection", tas_act_select(2, one, sel), TRUE);
+        for (j = 0; j < TAS_ACT_CASE_COUNT; j++) {
+            EXPECT_EQ("an explicit argument selects only its case", sel[j], (j == k));
+        }
+    }
+    EXPECT_EQ("an unknown argument is refused", tas_act_select(2, bad, sel), FALSE);
+    EXPECT_EQ("a prefix of an argument is refused", tas_act_select(2, prefix, sel), FALSE);
+    EXPECT_EQ("an unknown argument beside a known one is refused", tas_act_select(3, mixed, sel), FALSE);
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        EXPECT_EQ("a refused command line selects nothing", sel[k], FALSE);
+    }
+    EXPECT_EQ("several arguments select a subset", tas_act_select(4, twice, sel), TRUE);
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        n += sel[k] ? 1u : 0u;
+    }
+    EXPECT_EQ("a repeated argument selects its case once", n, 2);
+
+    EXPECT_EQ("all checks passed", tas_act_case_exit(2, 0, 0), 0);
+    EXPECT_EQ("a nonpassing verdict", tas_act_case_exit(2, 1, 3), 1);
+    EXPECT_EQ("blocked", tas_act_case_exit(1, 0, 1), 3);
+    EXPECT_EQ("nothing applicable", tas_act_case_exit(0, 0, 0), 2);
+    EXPECT_EQ("blocked before anything ran is not an unsupported result", tas_act_case_exit(0, 0, 1), 3);
+    EXPECT_EQ("a failure before anything ran is not an unsupported result", tas_act_case_exit(0, 1, 0), 1);
+
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        sel[k] = TRUE;
+        ex[k] = 0;
+    }
+    EXPECT_EQ("every case passed", tas_act_run_exit(sel, ex), 0);
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        int v;
+        for (v = 1; v <= 3; v++) {
+            ex[k] = v;
+            EXPECT_EQ("one nonpassing case decides the run, wherever it is", tas_act_run_exit(sel, ex), v);
+        }
+        ex[k] = 0;
+    }
+    ex[0] = 3;
+    ex[1] = 1;
+    EXPECT_EQ("a failure outweighs a block", tas_act_run_exit(sel, ex), 1);
+    ex[1] = 2;
+    EXPECT_EQ("a block outweighs nothing applicable", tas_act_run_exit(sel, ex), 3);
+    ex[0] = 99;
+    EXPECT_EQ("an unknown status is a failure", tas_act_run_exit(sel, ex), 1);
+    for (k = 0; k < TAS_ACT_CASE_COUNT; k++) {
+        sel[k] = FALSE;
+        ex[k] = 1;
+    }
+    sel[1] = TRUE;
+    ex[1] = 0;
+    EXPECT_EQ("an unselected case does not count", tas_act_run_exit(sel, ex), 0);
+    sel[1] = FALSE;
+    EXPECT_EQ("a run without any case is never successful", tas_act_run_exit(sel, ex) != 0, 1);
+}
+
+/* TC-MOCK-065: a worker that outlives a bounded wait stays owned until its completion is established (#505, PR #518 review; test logic
+ * only, real threads, no driver). Its storage is not read, reused or freed before, a wait that fails settles nothing, a late completion
+ * is collected with its real result, and no cleanup is judged as verified while an operation may still be running */
+typedef struct {
+    HANDLE go;
+    volatile LONG *observed;   /* what the worker saw in its own storage after the caller had given up waiting */
+    LONG input;
+    LONG output;
+} OWNED_WORKER_JOB;
+
+static DWORD WINAPI owned_worker_late(LPVOID p)
+{
+    OWNED_WORKER_JOB *job = (OWNED_WORKER_JOB *)p;
+
+    if (WaitForSingleObject(job->go, 20000) != WAIT_OBJECT_0) {
+        return 1;
+    }
+    InterlockedExchange(job->observed, job->input);
+    job->output = job->input + 1;
+    return 0;
+}
+
+static void test_65_owned_worker(void)
+{
+    volatile LONG observed = 0;
+    OWNED_WORKER w;
+    OWNED_WORKER_JOB init, *res;
+    HANDLE go = CreateEventA(NULL, TRUE, FALSE, NULL), full, limited = NULL;
+    DWORD t0;
+
+    printf("\n[TC-MOCK-065] #505 worker ownership beyond a bounded wait (test logic only)\n");
+    if (go == NULL) {
+        EXPECT_EQ("event available", 0, 1);
+        return;
+    }
+    init.go = go;
+    init.observed = &observed;
+    init.input = 41;
+    init.output = 0;
+    EXPECT_EQ("the worker starts", owned_worker_start(&w, owned_worker_late, &init, sizeof(init)), TRUE);
+    EXPECT_EQ("its storage is not the caller's", w.ctx != (void *)&init, 1);
+    memset(&init, 0xEE, sizeof(init));   /* the caller reuses its own object, as ONESHOT did */
+
+    EXPECT_EQ("a wait that times out leaves it running", owned_worker_wait(&w, 50), OWNED_WORKER_RUNNING);
+    EXPECT_EQ("no result before completion", owned_worker_result(&w) == NULL, 1);
+    EXPECT_EQ("a running worker is not released", owned_worker_release(&w), FALSE);
+    EXPECT_EQ("its storage stays owned", w.ctx != NULL, 1);
+    EXPECT_EQ("its handle stays owned", w.thread != NULL, 1);
+
+    /* A wait that FAILS (no SYNCHRONIZE right) settles nothing either */
+    full = w.thread;
+    if (full != NULL && DuplicateHandle(GetCurrentProcess(), full, GetCurrentProcess(), &limited, THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+        w.thread = limited;
+        w.state = OWNED_WORKER_RUNNING;
+        EXPECT_EQ("a failed wait leaves it running", owned_worker_wait(&w, 50), OWNED_WORKER_RUNNING);
+        EXPECT_EQ("no result after a failed wait", owned_worker_result(&w) == NULL, 1);
+        CloseHandle(limited);
+        w.thread = full;
+        w.state = OWNED_WORKER_RUNNING;
+    } else {
+        EXPECT_EQ("limited handle available", 0, 1);
+    }
+
+    /* The late completion is collected with its real result */
+    SetEvent(go);
+    EXPECT_EQ("a late completion is established", owned_worker_wait(&w, 10000), OWNED_WORKER_DONE);
+    for (t0 = GetTickCount(); observed == 0 && GetTickCount() - t0 < 5000;) {
+        Sleep(5);
+    }
+    EXPECT_EQ("the worker used its own storage, not the reused object", (int)observed, 41);
+    res = (OWNED_WORKER_JOB *)owned_worker_result(&w);
+    EXPECT_EQ("its result is readable after completion", res != NULL && res->output == 42, 1);
+    EXPECT_EQ("a finished worker is released", owned_worker_release(&w), TRUE);
+    EXPECT_EQ("nothing is owned afterwards", w.thread == NULL && w.ctx == NULL && w.state == OWNED_WORKER_NONE, 1);
+    EXPECT_EQ("a wait without a worker settles nothing", owned_worker_wait(&w, 0), OWNED_WORKER_NONE);
+    CloseHandle(go);
+
+    EXPECT_EQ("settled, nothing found: PASS", holdctl_cleanup(TRUE, FALSE, FALSE), HOLDCTL_CLEANUP_PASS);
+    EXPECT_EQ("settled, deviation: FAILED", holdctl_cleanup(TRUE, TRUE, FALSE), HOLDCTL_CLEANUP_FAILED);
+    EXPECT_EQ("settled, deviation and unmeasured: FAILED", holdctl_cleanup(TRUE, TRUE, TRUE), HOLDCTL_CLEANUP_FAILED);
+    EXPECT_EQ("settled, unmeasured: INCONCLUSIVE", holdctl_cleanup(TRUE, FALSE, TRUE), HOLDCTL_CLEANUP_INCONCLUSIVE);
+    EXPECT_EQ("unsettled, nothing found: never PASS", holdctl_cleanup(FALSE, FALSE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
+    EXPECT_EQ("unsettled, unmeasured: unsettled", holdctl_cleanup(FALSE, FALSE, TRUE), HOLDCTL_CLEANUP_UNSETTLED);
+    EXPECT_EQ("unsettled, deviation measured: the final state is unsettled", holdctl_cleanup(FALSE, TRUE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1963,6 +2141,8 @@ int main(void) {
     test_61_invalid_window_min();
     test_62_hold_commit();
     test_63_hold_generation();
+    test_64_activate_cases();
+    test_65_owned_worker();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
