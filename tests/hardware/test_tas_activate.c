@@ -87,6 +87,19 @@
  *                         change is FAIL, a missing measurement INCONCLUSIVE.
  *            It proves only that function 71 is refused: never fault/rollback evidence, which is --fault-versioned's. No link is
  *            required; the cleanup's TX probe still needs one. Expected RED before the cutover: function 71 is still served.
+ *   --phc-hold-control  case TC-TASACT-HOLDCTL-001 (#505): the Debug-only one-shot PHC reseed hold control
+ *            (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, 0x0017A3C4) on every adapter advertising INTEL_CAP_BASIC_1588, through independent
+ *            handles each bound to that adapter. Lines: UNBOUND (STATUS_INVALID_DEVICE_STATE), MALFORMED (exact refusals, state
+ *            unchanged), ARM (new arm id and identity; a second ARM STATUS_DEVICE_BUSY), HOLD (a PHC_OFFSET_ADJUST on its own handle
+ *            is observed HOLDING, then performs its real write and returns STATUS_SUCCESS; driver markers strictly ordered),
+ *            ONESHOT, DISARM, EXPIRY, ACTIVATE_ARRIVAL (TSN_TAS adapters: an ACTIVATE with a zero metadata pair arriving while
+ *            armed is recorded with its op id and STATE_CONFLICT, no commit) and CLEANUP (PHC steps compensated, then verified
+ *            independently: snapshot registers read VALID before and after unchanged, the PHC continuous against wall time within
+ *            1 ms, a readable control state neither ARMED nor HOLDING; a measured deviation is CLEANUP_FAILED, anything unmeasured
+ *            INCONCLUSIVE). Against a Release driver (GET_VERSION, decided at run time: Release test builds do not define
+ *            NDEBUG) the line RELEASE_ABSENT requires STATUS_INVALID_DEVICE_REQUEST and every other line is INCONCLUSIVE,
+ *            never PASS. This is
+ *            the control's own verification, not the #357 F1/F2 race result.
  *   --fault-versioned  TEST-TASACT-FAULT-001 (#482, Verifies #357 and #352), cases TC-TASACT-FAULT-001-F1 and -F2 on the 144-byte
  *            version-1 AVB_TAS_OP_REQUEST on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): HOLD, the bound NET_LUID, a distinct non-zero
  *            client_op_id, generation and epoch from the test's own query (0 printed "(not reported)", never fabricated),
@@ -239,7 +252,7 @@
 #define FILETIME_TO_UNIX_US  11644473600000000LL
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
-typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV } RUN_MODE;
+typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV, MODE_HOLDCTL } RUN_MODE;
 
 /* #482: the common numbered-write contract - N = 1 is the first schedule write for every backend (published, not a commit index) */
 #define FAULTV_FIRST_SCHEDULE_WRITE 1u
@@ -2240,6 +2253,682 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
 }
 
+/* --phc-hold-control (#505, TC-TASACT-HOLDCTL-001): the Debug-only one-shot PHC reseed hold control. Independent handles, each
+ * bound to the adapter under test: one for control (ARM/QUERY/DISARM), one per PHC reseed (a worker thread), one for ACTIVATE.
+ * Each line is its own measurement; a prerequisite that is not established makes the dependent line INCONCLUSIVE, never PASS */
+typedef struct {
+    avb_u64 luid;
+    INT64 offset_ns;
+    BOOL opened;
+    LONG st;
+    avb_u32 status;
+    DWORD ms;
+} HOLDCTL_PHC_JOB;
+
+static DWORD WINAPI holdctl_phc_worker(LPVOID p)
+{
+    HOLDCTL_PHC_JOB *job = (HOLDCTL_PHC_JOB *)p;
+    AVB_OFFSET_REQUEST off;
+    DWORD info = 0, t0;
+    HANDLE h = open_bound(GENERIC_READ | GENERIC_WRITE, job->luid);
+
+    job->opened = (h != INVALID_HANDLE_VALUE);
+    job->st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    if (!job->opened) {
+        return 0;
+    }
+    ZeroMemory(&off, sizeof(off));
+    off.offset_ns = job->offset_ns;
+    t0 = GetTickCount();
+    job->st = avb_ioctl_ntstatus(h, IOCTL_AVB_PHC_OFFSET_ADJUST, &off, sizeof(off), &off, sizeof(off), &info);
+    job->ms = GetTickCount() - t0;
+    job->status = off.status;
+    CloseHandle(h);
+    return 0;
+}
+
+#ifndef NDEBUG
+static LONG holdctl(HANDLE h, avb_u32 action, avb_u32 hold_ms, avb_u32 timeout_ms, AVB_DEBUG_PHC_HOLD_REQUEST *out, DWORD *info)
+{
+    LONG st;
+
+    ZeroMemory(out, sizeof(*out));
+    out->version = AVB_DEBUG_PHC_HOLD_VERSION;
+    out->action = action;
+    out->hold_ms = hold_ms;
+    out->arm_timeout_ms = timeout_ms;
+    *info = 0;
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, out, sizeof(*out), out, sizeof(*out), info);
+    return st;
+}
+
+static void holdctl_print(const char *label, LONG st, DWORD info, const AVB_DEBUG_PHC_HOLD_REQUEST *r)
+{
+    printf("    [EVIDENCE] %s: ntstatus=0x%08lX information=%lu", label, (unsigned long)st, (unsigned long)info);
+    if (st == 0) {
+        printf(" arm=%llu state=%u holds=%u src=%u rc=%d luid=0x%016llX epoch=%llu seq armed=%llu hold=%llu..%llu write=%llu..%llu "
+               "act=%llu/%llu op=0x%016llX res=0x%X elapsed_us=%u", r->arm_id, r->state, r->holds_completed, r->phc_source, r->phc_rc,
+               r->net_luid, r->context_epoch, r->armed_seq, r->hold_begin_seq, r->hold_end_seq, r->phc_write_enter_seq,
+               r->phc_write_done_seq, r->activate_arrival_seq, r->activate_commit_seq, r->activate_op_id, r->activate_result,
+               r->hold_elapsed_us);
+    }
+    printf("\n");
+}
+
+/* Test-owned restoration evidence: the version-1 register snapshot of the bound adapter (#456) and a PHC/QPC pair. The PHC is
+ * a running clock, so its restoration is judged as continuity against wall time, never from the sum of the steps sent */
+#define HOLDCTL_PHC_TOLERANCE_NS (1000000LL)   /* 1 ms: detects a lost step back or a reseed, not residual offsets of a few us */
+
+typedef struct {
+    BOOL snap_ok;
+    AVB_HW_SNAPSHOT_REQUEST snap;
+    BOOL phc_ok;
+    long long phc;
+    LARGE_INTEGER qpc;
+    BOOL phc_running;   /* pre-state only: the PHC advanced by more than half the wall time across a 50 ms probe */
+} HOLDCTL_STATE;
+
+static void holdctl_capture(HANDLE h, HOLDCTL_STATE *s, BOOL probe_rate)
+{
+    DWORD info = 0;
+    LONG st;
+    long long phc2 = 0;
+
+    ZeroMemory(s, sizeof(*s));
+    s->snap.version = AVB_HW_SNAPSHOT_VERSION;
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s->snap, sizeof(s->snap), &s->snap, sizeof(s->snap), &info);
+    s->snap_ok = (st == 0 && info == sizeof(s->snap) && s->snap.status == 0 && s->snap.count == AVB_HWREG_COUNT);
+    s->phc_ok = read_phc(h, &s->phc);
+    QueryPerformanceCounter(&s->qpc);
+    if (probe_rate && s->phc_ok) {
+        Sleep(50);
+        s->phc_running = read_phc(h, &phc2) && (phc2 - s->phc) > 25LL * NS_PER_MS;
+    }
+}
+
+/* Every snapshot register id is accounted for, none skipped silently: VALID on both sides is compared (a different value is
+ * a difference); the same not-applicable state on both sides (NOT_IN_SSOT, NO_HAL, NO_MMIO) is not applicable; READ_FAILED on
+ * either side or a state that changed between before and after is unmeasured. Each difference and each unmeasured id is
+ * printed. Returns the number of differences; -1 when a snapshot itself is missing (everything unmeasured) */
+static int holdctl_regs_differing(const HOLDCTL_STATE *a, const HOLDCTL_STATE *b, unsigned *compared, unsigned *not_applicable,
+                                  unsigned *unmeasured)
+{
+    unsigned i;
+    int differing = 0;
+
+    *compared = 0;
+    *not_applicable = 0;
+    *unmeasured = 0;
+    if (!a->snap_ok || !b->snap_ok) {
+        *unmeasured = AVB_HWREG_COUNT;
+        return -1;
+    }
+    for (i = 0; i < AVB_HWREG_COUNT; i++) {
+        const AVB_HWREG_ENTRY *x = &a->snap.entries[i], *y = &b->snap.entries[i];
+        if (x->state == AVB_HWREG_STATE_VALID && y->state == AVB_HWREG_STATE_VALID) {
+            (*compared)++;
+            if (x->value != y->value) {
+                differing++;
+                printf("    [EVIDENCE] register id %u (offset 0x%05X) before=0x%08X after=0x%08X\n", x->id, x->offset, x->value, y->value);
+            }
+        } else if (x->state == y->state && x->state != AVB_HWREG_STATE_READ_FAILED) {
+            (*not_applicable)++;
+        } else {
+            (*unmeasured)++;
+            printf("    [EVIDENCE] register id %u unmeasured: state before %u, after %u\n", x->id, x->state, y->state);
+        }
+    }
+    return differing;
+}
+
+/* Diagnostic anchors (#505 I226 drift plan, Q 2026-11-22): evidence only, never a verdict. Each anchor reads the PHC three times
+ * through GET_CLOCK_CONFIG and three times through GET_TIMESTAMP (both read-only, routed to the handle's bound adapter), each
+ * read bracketed by QPC. A failed read, a wrong length or a non-success status is never the anchor's measurement. Neither
+ * reply reports a software fallback, so a fallback is not detectable here (stated in the output). The extra reads change the
+ * test's timing. */
+#define HOLDCTL_DIAG_READS   3
+#define HOLDCTL_DIAG_ANCHORS 16
+
+typedef struct {
+    LONG st;
+    DWORD info;
+    avb_u32 status;
+    long long phc;
+    LONGLONG q0, q1;   /* QPC ticks before and after the IOCTL */
+} HOLDCTL_DIAG_READ;
+
+typedef struct {
+    const char *label;
+    BOOL valid;          /* a usable GET_CLOCK_CONFIG read exists */
+    double mid_ns;       /* best GET_CLOCK_CONFIG bracket centre, ns since the first anchor's first read */
+    double half_ns;      /* half its QPC bracket width */
+    long long phc;       /* its PHC */
+} HOLDCTL_DIAG_ANCHOR;
+
+typedef struct {
+    HOLDCTL_DIAG_ANCHOR a[HOLDCTL_DIAG_ANCHORS];
+    int n;
+    LONGLONG base, freq;
+    INT64 pending_ns;    /* requested offsets of the steps that completed STATUS_SUCCESS since the previous anchor */
+    int pending_steps;   /* steps (any outcome) since the previous anchor */
+} HOLDCTL_DIAG;
+
+static double holdctl_diag_ns(const HOLDCTL_DIAG *d, LONGLONG q)
+{
+    return (double)(q - d->base) * 1e9 / (double)d->freq;
+}
+
+/* Records that one PHC step happened since the previous anchor; its offset counts only when it completed STATUS_SUCCESS */
+static void holdctl_diag_step(HOLDCTL_DIAG *d, INT64 offset_ns, BOOL ok)
+{
+    d->pending_steps++;
+    if (ok) {
+        d->pending_ns += offset_ns;
+    }
+}
+
+static void holdctl_diag_anchor(HOLDCTL_DIAG *d, HANDLE h, const AVB_ADAPTER_IDENTITY_REQUEST *id, const char *label)
+{
+    HOLDCTL_DIAG_READ cc[HOLDCTL_DIAG_READS], ts[HOLDCTL_DIAG_READS];
+    LARGE_INTEGER t;
+    int i, bc = -1, bt = -1;
+    HOLDCTL_DIAG_ANCHOR *a;
+
+    if (d->n >= HOLDCTL_DIAG_ANCHORS) {
+        printf("    [DIAG] anchor '%s' not taken: anchor table full\n", label);
+        return;
+    }
+    if (d->n == 0) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        d->freq = f.QuadPart;
+        QueryPerformanceCounter(&t);
+        d->base = t.QuadPart;
+    }
+    for (i = 0; i < HOLDCTL_DIAG_READS; i++) {
+        AVB_CLOCK_CONFIG c;
+        AVB_TIMESTAMP_REQUEST r;
+        ZeroMemory(&c, sizeof(c));
+        QueryPerformanceCounter(&t);
+        cc[i].q0 = t.QuadPart;
+        cc[i].st = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_CLOCK_CONFIG, &c, sizeof(c), &c, sizeof(c), &cc[i].info);
+        QueryPerformanceCounter(&t);
+        cc[i].q1 = t.QuadPart;
+        cc[i].status = c.status;
+        cc[i].phc = (long long)c.systim;
+        ZeroMemory(&r, sizeof(r));
+        QueryPerformanceCounter(&t);
+        ts[i].q0 = t.QuadPart;
+        ts[i].st = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_TIMESTAMP, &r, sizeof(r), &r, sizeof(r), &ts[i].info);
+        QueryPerformanceCounter(&t);
+        ts[i].q1 = t.QuadPart;
+        ts[i].status = r.status;
+        ts[i].phc = (long long)r.timestamp;
+    }
+    for (i = 0; i < HOLDCTL_DIAG_READS; i++) {
+        BOOL okc = cc[i].st == 0 && cc[i].info == sizeof(AVB_CLOCK_CONFIG) && cc[i].status == 0;
+        BOOL okt = ts[i].st == 0 && ts[i].info == sizeof(AVB_TIMESTAMP_REQUEST) && ts[i].status == 0;
+        printf("    [DIAG] A%d '%s' did=0x%04X luid=0x%016llX CLOCK_CONFIG#%d qpc=[%.0f,%.0f]ns width=%.0fns phc=%lld st=0x%08lX info=%lu status=0x%X%s\n",
+               d->n, label, id->device_id, id->net_luid, i, holdctl_diag_ns(d, cc[i].q0), holdctl_diag_ns(d, cc[i].q1),
+               holdctl_diag_ns(d, cc[i].q1) - holdctl_diag_ns(d, cc[i].q0), cc[i].phc, (unsigned long)cc[i].st, (unsigned long)cc[i].info,
+               cc[i].status, okc ? "" : " EXCLUDED");
+        printf("    [DIAG] A%d '%s' did=0x%04X luid=0x%016llX TIMESTAMP#%d    qpc=[%.0f,%.0f]ns width=%.0fns phc=%lld st=0x%08lX info=%lu status=0x%X%s\n",
+               d->n, label, id->device_id, id->net_luid, i, holdctl_diag_ns(d, ts[i].q0), holdctl_diag_ns(d, ts[i].q1),
+               holdctl_diag_ns(d, ts[i].q1) - holdctl_diag_ns(d, ts[i].q0), ts[i].phc, (unsigned long)ts[i].st, (unsigned long)ts[i].info,
+               ts[i].status, okt ? "" : " EXCLUDED");
+        if (okc && (bc < 0 || (cc[i].q1 - cc[i].q0) < (cc[bc].q1 - cc[bc].q0))) {
+            bc = i;
+        }
+        if (okt && (bt < 0 || (ts[i].q1 - ts[i].q0) < (ts[bt].q1 - ts[bt].q0))) {
+            bt = i;
+        }
+    }
+    a = &d->a[d->n];
+    a->label = label;
+    a->valid = (bc >= 0);
+    if (a->valid) {
+        a->mid_ns = (holdctl_diag_ns(d, cc[bc].q0) + holdctl_diag_ns(d, cc[bc].q1)) / 2.0;
+        a->half_ns = (holdctl_diag_ns(d, cc[bc].q1) - holdctl_diag_ns(d, cc[bc].q0)) / 2.0;
+        a->phc = cc[bc].phc;
+        printf("    [DIAG] A%d '%s' best CLOCK_CONFIG#%d mid=%.0fns +-%.0fns phc=%lld\n", d->n, label, bc, a->mid_ns, a->half_ns, a->phc);
+        if (bt >= 0) {
+            double tmid = (holdctl_diag_ns(d, ts[bt].q0) + holdctl_diag_ns(d, ts[bt].q1)) / 2.0;
+            double thalf = (holdctl_diag_ns(d, ts[bt].q1) - holdctl_diag_ns(d, ts[bt].q0)) / 2.0;
+            /* the two paths are read one after the other: compare after removing the read-time difference */
+            printf("    [DIAG] A%d '%s' TIMESTAMP#%d minus CLOCK_CONFIG#%d = %lld ns raw, %.0f ns after removing the %.0f ns read-time difference, "
+                   "+-%.0f ns\n", d->n, label, bt, bc, ts[bt].phc - a->phc, (double)(ts[bt].phc - a->phc) - (tmid - a->mid_ns),
+                   tmid - a->mid_ns, a->half_ns + thalf);
+        } else {
+            printf("    [DIAG] A%d '%s' no usable TIMESTAMP read: path comparison unmeasured\n", d->n, label);
+        }
+    } else {
+        printf("    [DIAG] A%d '%s' no usable CLOCK_CONFIG read: this anchor is unmeasured\n", d->n, label);
+    }
+    if (d->n > 0) {
+        const HOLDCTL_DIAG_ANCHOR *p = &d->a[d->n - 1];
+        if (p->valid && a->valid) {
+            double dwall = a->mid_ns - p->mid_ns;
+            double dphc = (double)(a->phc - p->phc);
+            double resid = dphc - dwall - (double)d->pending_ns;
+            printf("    [DIAG] interval A%d->A%d %s (%d step(s), counted offset %lld ns): dWall=%.0fns dPHC=%.0fns residual=%.0fns +-%.0fns "
+                   "(%.1f ppm of dWall)\n", d->n - 1, d->n, d->pending_steps ? "STEP" : "FREE", d->pending_steps, (long long)d->pending_ns,
+                   dwall, dphc, resid, p->half_ns + a->half_ns, dwall > 0 ? resid * 1e6 / dwall : 0.0);
+        } else {
+            printf("    [DIAG] interval A%d->A%d %s: unmeasured (an anchor has no usable read)\n", d->n - 1, d->n, d->pending_steps ? "STEP" : "FREE");
+        }
+    }
+    d->pending_ns = 0;
+    d->pending_steps = 0;
+    d->n++;
+}
+
+/* One synchronous PHC offset step on its own bound handle; returns TRUE when it completed STATUS_SUCCESS */
+static BOOL holdctl_step(avb_u64 luid, INT64 ns, HOLDCTL_PHC_JOB *job)
+{
+    ZeroMemory(job, sizeof(*job));
+    job->luid = luid;
+    job->offset_ns = ns;
+    (void)holdctl_phc_worker(job);
+    printf("    [EVIDENCE] PHC_OFFSET_ADJUST %+lld ns: opened=%d ntstatus=0x%08lX status=0x%X %lu ms\n", (long long)ns, job->opened,
+           (unsigned long)job->st, job->status, (unsigned long)job->ms);
+    return job->opened && job->st == 0;
+}
+#endif
+
+static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
+{
+#ifdef NDEBUG
+    static const char *lines[] = { "UNBOUND", "MALFORMED", "ARM", "HOLD", "ONESHOT", "DISARM", "EXPIRY", "ACTIVATE_ARRIVAL", "CLEANUP" };
+    unsigned i;
+
+    g_ran++;
+    for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+        verdict("INCONCLUSIVE", lines[i], index, id->device_id,
+                "Release build: the #505 Debug-only control is not compiled, so this line is not exercised (never PASS)");
+    }
+#else
+    char why[512];
+    AVB_DEBUG_PHC_HOLD_REQUEST r, base, armed;
+    HOLDCTL_PHC_JOB job;
+    HANDLE hc, hu;
+    LONG st;
+    DWORD info;
+    INT64 net_ns = 0;   /* sum of the PHC steps that completed; compensated in CLEANUP */
+    BOOL armed_ok = FALSE;
+    const avb_u32 HOLD_MS = 400u;
+    HOLDCTL_STATE pre;
+    HOLDCTL_DIAG diag;   /* #505 I226 drift diagnosis: evidence only, no verdict */
+
+    g_ran++;
+    printf("\n=== %s adapter:%u did=0x%04X luid=0x%016llX caps=0x%08X ===\n", g_case, index, id->device_id, id->net_luid, id->capabilities);
+    hc = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
+    if (hc == INVALID_HANDLE_VALUE) {
+        verdict("BLOCKED", "SETUP", index, id->device_id, "no handle could be bound to this adapter (OPEN_ADAPTER_BY_LUID)");
+        return;
+    }
+    {   /* The driver build decides, at run time: Release test builds do not define NDEBUG either (#505 finding), so the
+         * compile-time branch above cannot tell a Release driver. A Release driver must refuse the control as an unserved code
+         * (negative probe); every other line is then not executable there, never PASS */
+        IOCTL_VERSION ver = {0};
+        DWORD br = 0;
+        if (!DeviceIoControl(hc, IOCTL_AVB_GET_VERSION, &ver, sizeof(ver), &ver, sizeof(ver), &br, NULL)) {
+            verdict("BLOCKED", "SETUP", index, id->device_id, "GET_VERSION failed: the driver build (Debug or Release) is unknown");
+            CloseHandle(hc);
+            return;
+        }
+        if (!(ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
+            static const char *lines[] = { "UNBOUND", "MALFORMED", "ARM", "HOLD", "ONESHOT", "DISARM", "EXPIRY", "ACTIVATE_ARRIVAL", "CLEANUP" };
+            unsigned i;
+            st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+            sprintf_s(why, sizeof(why), "Release driver (flags 0x%04X): QUERY completed 0x%08lX, required STATUS_INVALID_DEVICE_REQUEST (code not served)",
+                      ver.Flags, (unsigned long)st);
+            verdict(st == (LONG)STATUS_INVALID_DEVICE_REQUEST ? "PASS" : "FAIL", "RELEASE_ABSENT", index, id->device_id, why);
+            for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+                verdict("INCONCLUSIVE", lines[i], index, id->device_id, "Release driver: the Debug-only control is not served, so this line is not exercised (never PASS)");
+            }
+            CloseHandle(hc);
+            return;
+        }
+    }
+    holdctl_capture(hc, &pre, TRUE);   /* test-owned pre-state for CLEANUP: register snapshot, a PHC/QPC pair and the PHC rate */
+    printf("    [EVIDENCE] pre-state: snapshot %s, PHC %s (%lld), PHC %s\n", pre.snap_ok ? "read" : "NOT read", pre.phc_ok ? "read" : "NOT read",
+           pre.phc, pre.phc_running ? "running" : "NOT running (judged as unchanged, not as continuous)");
+    ZeroMemory(&diag, sizeof(diag));
+    printf("    [DIAG] PHC drift diagnosis (#505 plan): anchors of 3 GET_CLOCK_CONFIG + 3 GET_TIMESTAMP reads on this bound handle; neither "
+           "reply reports a software fallback, so a fallback is not detectable here; the extra reads change the test's timing\n");
+    holdctl_diag_anchor(&diag, hc, id, "start");
+
+    /* UNBOUND: an unbound handle is refused STATUS_INVALID_DEVICE_STATE with no control-state change */
+    hu = open_device(GENERIC_READ | GENERIC_WRITE);
+    st = (hu != INVALID_HANDLE_VALUE) ? holdctl(hu, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &r, &info) : (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    holdctl_print("ARM on an unbound handle", st, info, &r);
+    if (hu != INVALID_HANDLE_VALUE) {
+        CloseHandle(hu);
+    }
+    sprintf_s(why, sizeof(why), "unbound ARM completed 0x%08lX, required STATUS_INVALID_DEVICE_STATE", (unsigned long)st);
+    verdict(st == (LONG)STATUS_INVALID_DEVICE_STATE ? "PASS" : "FAIL", "UNBOUND", index, id->device_id, why);
+
+    /* MALFORMED: every refusal before any state change, then a QUERY shows the state unchanged */
+    st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &base, &info);
+    holdctl_print("QUERY baseline", st, info, &base);
+    if (st != 0 || info != sizeof(base)) {
+        sprintf_s(why, sizeof(why), "baseline QUERY completed 0x%08lX with %lu bytes, required STATUS_SUCCESS and %u bytes",
+                  (unsigned long)st, (unsigned long)info, (unsigned)sizeof(base));
+        verdict("FAIL", "MALFORMED", index, id->device_id, why);
+    } else {
+        struct { const char *what; avb_u32 version, action, hold, timeout; avb_u64 reserved; DWORD size; LONG want; } cases[] = {
+            { "version 2",            2u, AVB_DEBUG_PHC_HOLD_QUERY, 0u, 0u, 0u, sizeof(r), (LONG)STATUS_REVISION_MISMATCH },
+            { "4 bytes short",        AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_QUERY, 0u, 0u, 0u, sizeof(r) - 4, (LONG)STATUS_BUFFER_TOO_SMALL },
+            { "unknown action 9",     AVB_DEBUG_PHC_HOLD_VERSION, 9u, 0u, 0u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "reserved_in 1",        AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_QUERY, 0u, 0u, 1u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "ARM hold_ms 0",        AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_ARM, 0u, 5000u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "ARM hold_ms 2001",     AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_ARM, 2001u, 5000u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "ARM timeout 0",        AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 0u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "ARM timeout 10001",    AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 10001u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "QUERY with hold_ms 5", AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_QUERY, 5u, 0u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+            { "DISARM with timeout",  AVB_DEBUG_PHC_HOLD_VERSION, AVB_DEBUG_PHC_HOLD_DISARM, 0u, 5u, 0u, sizeof(r), (LONG)STATUS_INVALID_PARAMETER },
+        };
+        unsigned i, bad = 0;
+        char list[256] = "";
+
+        for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            ZeroMemory(&r, sizeof(r));
+            r.version = cases[i].version;
+            r.action = cases[i].action;
+            r.hold_ms = cases[i].hold;
+            r.arm_timeout_ms = cases[i].timeout;
+            r.reserved_in = cases[i].reserved;
+            st = avb_ioctl_ntstatus(hc, IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, &r, cases[i].size, &r, cases[i].size, &info);
+            printf("    [EVIDENCE] %s: ntstatus=0x%08lX (required 0x%08lX) information=%lu\n", cases[i].what, (unsigned long)st,
+                   (unsigned long)cases[i].want, (unsigned long)info);
+            if (st != cases[i].want) {
+                bad++;
+                strcat_s(list, sizeof(list), cases[i].what);
+                strcat_s(list, sizeof(list), "; ");
+            }
+        }
+        st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+        holdctl_print("QUERY after the malformed requests", st, info, &r);
+        if (st != 0 || r.arm_id != base.arm_id || r.state != base.state) {
+            bad++;
+            strcat_s(list, sizeof(list), "state changed or QUERY failed; ");
+        }
+        sprintf_s(why, sizeof(why), "%u deviation(s) from the required refusals and the unchanged state%s%s", bad, bad ? ": " : "", list);
+        verdict(bad == 0 ? "PASS" : "FAIL", "MALFORMED", index, id->device_id, why);
+    }
+
+    /* ARM: accepted once with identity and a fresh arm id; a second ARM while ARMED is STATUS_DEVICE_BUSY and changes nothing */
+    st = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &armed, &info);
+    holdctl_print("ARM 400 ms / 5000 ms", st, info, &armed);
+    if (st != 0 || info != sizeof(armed) || armed.state != AVB_DEBUG_PHC_HOLD_ARMED || armed.arm_id == 0 || armed.arm_id == base.arm_id ||
+        armed.net_luid != id->net_luid || armed.armed_seq == 0 || armed.hold_ms != HOLD_MS) {
+        sprintf_s(why, sizeof(why), "ARM completed 0x%08lX (%lu bytes) state %u arm %llu (before %llu) luid 0x%016llX armed_seq %llu: required "
+                  "STATUS_SUCCESS, ARMED, a new arm id, this adapter's LUID", (unsigned long)st, (unsigned long)info, armed.state,
+                  armed.arm_id, base.arm_id, armed.net_luid, armed.armed_seq);
+        verdict("FAIL", "ARM", index, id->device_id, why);
+    } else {
+        LONG st2 = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &r, &info);
+        AVB_DEBUG_PHC_HOLD_REQUEST q;
+        LONG stq;
+        holdctl_print("second ARM while ARMED", st2, info, &r);
+        stq = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &q, &info);
+        holdctl_print("QUERY after the second ARM", stq, info, &q);
+        armed_ok = TRUE;
+        if (st2 == (LONG)STATUS_DEVICE_BUSY && stq == 0 && q.arm_id == armed.arm_id && q.state == AVB_DEBUG_PHC_HOLD_ARMED) {
+            verdict("PASS", "ARM", index, id->device_id, "ARMED with a new arm id and this adapter's identity; a second ARM was STATUS_DEVICE_BUSY and changed nothing");
+        } else {
+            sprintf_s(why, sizeof(why), "second ARM completed 0x%08lX (required STATUS_DEVICE_BUSY); afterwards arm %llu state %u (required %llu, ARMED)",
+                      (unsigned long)st2, q.arm_id, q.state, armed.arm_id);
+            verdict("FAIL", "ARM", index, id->device_id, why);
+        }
+    }
+
+    /* HOLD: a PHC reseed on its own handle consumes the arm, is observed HOLDING through the control handle, then performs its
+     * real write and returns its real result; the markers show hold begin < hold end < write enter < write done */
+    if (!armed_ok) {
+        verdict("INCONCLUSIVE", "HOLD", index, id->device_id, "no accepted arm (see ARM): the hold cannot be exercised");
+    } else {
+        HANDLE th;
+        DWORD t0 = GetTickCount();
+        BOOL seen = FALSE;
+        unsigned polls = 0;
+
+        ZeroMemory(&job, sizeof(job));
+        job.luid = id->net_luid;
+        job.offset_ns = 1000;
+        holdctl_diag_anchor(&diag, hc, id, "before HOLD step");
+        th = CreateThread(NULL, 0, holdctl_phc_worker, &job, 0, NULL);
+        while (th != NULL && GetTickCount() - t0 < 3000u) {
+            st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+            polls++;
+            if (st == 0 && r.state == AVB_DEBUG_PHC_HOLD_HOLDING) {
+                seen = TRUE;
+                holdctl_print("QUERY while the reseed is held", st, info, &r);
+                break;
+            }
+            Sleep(2);
+        }
+        if (th != NULL) {
+            (void)WaitForSingleObject(th, 10000u);
+            CloseHandle(th);
+        }
+        printf("    [EVIDENCE] held PHC_OFFSET_ADJUST +1000 ns: opened=%d ntstatus=0x%08lX status=0x%X %lu ms; HOLDING observed=%d after %u polls\n",
+               job.opened, (unsigned long)job.st, job.status, (unsigned long)job.ms, seen, polls);
+        if (job.opened && job.st == 0) {
+            net_ns += 1000;
+        }
+        holdctl_diag_step(&diag, 1000, job.opened && job.st == 0);
+        holdctl_diag_anchor(&diag, hc, id, "after HOLD step (+1000 held)");
+        st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+        holdctl_print("QUERY after the held reseed", st, info, &r);
+        if (th == NULL || !seen || !job.opened || job.st != 0 || st != 0 || r.arm_id != armed.arm_id || r.state != AVB_DEBUG_PHC_HOLD_RELEASED ||
+            r.holds_completed != armed.holds_completed + 1 || r.phc_source != AVB_DEBUG_PHC_HOLD_SRC_PHC_OFFSET_ADJUST || r.phc_rc != 0 ||
+            !(r.armed_seq < r.hold_begin_seq && r.hold_begin_seq < r.hold_end_seq && r.hold_end_seq < r.phc_write_enter_seq &&
+              r.phc_write_enter_seq < r.phc_write_done_seq) || r.hold_elapsed_us < HOLD_MS * 900u) {
+            sprintf_s(why, sizeof(why), "HOLDING seen %d, reseed ntstatus 0x%08lX, state %u, holds %u (before %u), src %u, rc %d, markers %llu<%llu<%llu<%llu<%llu, "
+                      "elapsed %u us: required HOLDING observed, STATUS_SUCCESS, RELEASED, +1 hold, PHC_OFFSET_ADJUST, rc 0, strictly ordered markers, "
+                      ">= %u us", seen, (unsigned long)job.st, r.state, r.holds_completed, armed.holds_completed, r.phc_source, r.phc_rc, r.armed_seq,
+                      r.hold_begin_seq, r.hold_end_seq, r.phc_write_enter_seq, r.phc_write_done_seq, r.hold_elapsed_us, HOLD_MS * 900u);
+            verdict("FAIL", "HOLD", index, id->device_id, why);
+        } else {
+            sprintf_s(why, sizeof(why), "held %u us, observed HOLDING through an independent handle, then the real write completed STATUS_SUCCESS "
+                      "(markers %llu<%llu<%llu<%llu<%llu)", r.hold_elapsed_us, r.armed_seq, r.hold_begin_seq, r.hold_end_seq, r.phc_write_enter_seq,
+                      r.phc_write_done_seq);
+            verdict("PASS", "HOLD", index, id->device_id, why);
+        }
+    }
+
+    /* ONESHOT: the consumed arm does not hold a second reseed */
+    if (!armed_ok) {
+        verdict("INCONCLUSIVE", "ONESHOT", index, id->device_id, "no accepted arm (see ARM)");
+    } else {
+        AVB_DEBUG_PHC_HOLD_REQUEST before;
+        LONG stb = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &before, &info);
+        BOOL ok = holdctl_step(id->net_luid, -1000, &job);
+        if (ok) {
+            net_ns -= 1000;
+        }
+        holdctl_diag_step(&diag, -1000, ok);
+        holdctl_diag_anchor(&diag, hc, id, "after ONESHOT step (-1000)");
+        st = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+        holdctl_print("QUERY after a second reseed", st, info, &r);
+        sprintf_s(why, sizeof(why), "second reseed ntstatus 0x%08lX in %lu ms; holds %u -> %u, state %u -> %u, write marker %llu -> %llu",
+                  (unsigned long)job.st, (unsigned long)job.ms, before.holds_completed, r.holds_completed, before.state, r.state,
+                  before.phc_write_done_seq, r.phc_write_done_seq);
+        verdict(stb == 0 && st == 0 && ok && r.holds_completed == before.holds_completed && r.state == before.state &&
+                r.phc_write_done_seq == before.phc_write_done_seq ? "PASS" : "FAIL", "ONESHOT", index, id->device_id, why);
+    }
+
+    /* DISARM: an unused arm is cancelled (IDLE) and holds nothing; a DISARM in a terminal or IDLE state is a no-op */
+    {
+        AVB_DEBUG_PHC_HOLD_REQUEST a, d, q;
+        LONG sta = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &a, &info);
+        LONG std = holdctl(hc, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &info);
+        BOOL ok;
+        LONG std2, stq;
+        holdctl_diag_anchor(&diag, hc, id, "before DISARM step");
+        ok = holdctl_step(id->net_luid, 1000, &job);
+        if (ok) {
+            net_ns += 1000;
+        }
+        holdctl_diag_step(&diag, 1000, ok);
+        holdctl_diag_anchor(&diag, hc, id, "after DISARM step (+1000)");
+        std2 = holdctl(hc, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &q, &info);
+        stq = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &q, &info);
+        holdctl_print("ARM", sta, info, &a);
+        holdctl_print("DISARM", std, info, &d);
+        holdctl_print("QUERY after DISARM, a reseed and a second DISARM", stq, info, &q);
+        sprintf_s(why, sizeof(why), "ARM 0x%08lX, DISARM 0x%08lX -> state %u, reseed 0x%08lX, second DISARM 0x%08lX, holds %u -> %u, state %u",
+                  (unsigned long)sta, (unsigned long)std, d.state, (unsigned long)job.st, (unsigned long)std2, a.holds_completed,
+                  q.holds_completed, q.state);
+        verdict(sta == 0 && std == 0 && d.state == AVB_DEBUG_PHC_HOLD_IDLE && ok && std2 == 0 && stq == 0 &&
+                q.holds_completed == a.holds_completed && q.state == AVB_DEBUG_PHC_HOLD_IDLE ? "PASS" : "FAIL", "DISARM", index, id->device_id, why);
+    }
+
+    /* EXPIRY: an unused arm expires at arm_timeout_ms and holds nothing afterwards */
+    {
+        AVB_DEBUG_PHC_HOLD_REQUEST a, q;
+        LONG sta = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 300u, &a, &info);
+        LONG stq;
+        BOOL ok;
+        holdctl_diag_anchor(&diag, hc, id, "EXPIRY wait begins");
+        Sleep(800);
+        stq = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &q, &info);
+        holdctl_print("QUERY 800 ms after ARM (timeout 300 ms)", stq, info, &q);
+        holdctl_diag_anchor(&diag, hc, id, "EXPIRY wait ended, before step");
+        ok = holdctl_step(id->net_luid, -1000, &job);
+        if (ok) {
+            net_ns -= 1000;
+        }
+        holdctl_diag_step(&diag, -1000, ok);
+        holdctl_diag_anchor(&diag, hc, id, "after EXPIRY step (-1000)");
+        sprintf_s(why, sizeof(why), "ARM 0x%08lX; 800 ms later state %u (required EXPIRED), reseed 0x%08lX in %lu ms, holds %u -> %u",
+                  (unsigned long)sta, q.state, (unsigned long)job.st, (unsigned long)job.ms, a.holds_completed, q.holds_completed);
+        {
+            AVB_DEBUG_PHC_HOLD_REQUEST q2;
+            LONG stq2 = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &q2, &info);
+            verdict(sta == 0 && stq == 0 && q.state == AVB_DEBUG_PHC_HOLD_EXPIRED && ok && stq2 == 0 && q2.holds_completed == a.holds_completed &&
+                    q2.state == AVB_DEBUG_PHC_HOLD_EXPIRED ? "PASS" : "FAIL", "EXPIRY", index, id->device_id, why);
+        }
+    }
+
+    /* ACTIVATE_ARRIVAL (TAS adapters): an ACTIVATE that arrives while armed is recorded with its op id and result. A zero
+     * metadata pair is refused STATE_CONFLICT before any write (#352 R1 L6), so nothing to restore; no commit marker */
+    if (!(id->capabilities & INTEL_CAP_TSN_TAS)) {
+        printf("[SKIP_UNSUPPORTED] %s-ACTIVATE_ARRIVAL/adapter:%u did=0x%04X: adapter does not advertise INTEL_CAP_TSN_TAS\n", g_case, index,
+               id->device_id);
+    } else {
+        AVB_DEBUG_PHC_HOLD_REQUEST a, q, d;
+        AVB_TAS_OP_REQUEST op;
+        QUERY_READ qr;
+        long long phc = 0;
+        HANDLE ha = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
+        LONG sta = holdctl(hc, AVB_DEBUG_PHC_HOLD_ARM, HOLD_MS, 5000u, &a, &info);
+        LONG stact = (LONG)AVB_NTSTATUS_UNAVAILABLE, stq;
+        DWORD ainfo = 0;
+
+        ZeroMemory(&op, sizeof(op));
+        if (ha != INVALID_HANDLE_VALUE && read_phc(ha, &phc)) {
+            query(ha, &qr);
+            build_op(&op, id->net_luid, &qr.q, (phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS, 1522u);
+            op.expected_generation = 0;   /* zero pair: STATE_CONFLICT before any write */
+            stact = avb_ioctl_ntstatus(ha, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &ainfo);
+        }
+        printf("    [EVIDENCE] ACTIVATE (zero metadata) op=0x%016llX: ntstatus=0x%08lX information=%lu\n", op.client_op_id,
+               (unsigned long)stact, (unsigned long)ainfo);
+        if (ha != INVALID_HANDLE_VALUE) {
+            CloseHandle(ha);
+        }
+        stq = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &q, &info);
+        holdctl_print("QUERY after the ACTIVATE", stq, info, &q);
+        (void)holdctl(hc, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &info);
+        sprintf_s(why, sizeof(why), "ARM 0x%08lX, ACTIVATE 0x%08lX; arrival %llu (armed %llu), op 0x%016llX (sent 0x%016llX), result 0x%X, commit %llu: "
+                  "required arrival after ARM, this op id, STATE_CONFLICT (12), no commit", (unsigned long)sta, (unsigned long)stact,
+                  q.activate_arrival_seq, q.armed_seq, q.activate_op_id, op.client_op_id, q.activate_result, q.activate_commit_seq);
+        verdict(sta == 0 && stact == (LONG)STATUS_INVALID_DEVICE_STATE && stq == 0 && q.arm_id == a.arm_id && q.activate_arrival_seq > q.armed_seq &&
+                q.activate_op_id == op.client_op_id && q.activate_result == AVB_TAS_ACT_STATE_CONFLICT && q.activate_commit_seq == 0 ? "PASS" : "FAIL",
+                "ACTIVATE_ARRIVAL", index, id->device_id, why);
+    }
+
+    /* CLEANUP (test-owned): compensate the PHC steps, disarm, then verify independently against the hardware and the driver:
+     * every snapshot register read VALID before and after unchanged, the PHC continuous against wall time (within 1 ms), and a
+     * readable control state that is neither ARMED nor HOLDING. A measured deviation is CLEANUP_FAILED; anything not measured is
+     * INCONCLUSIVE, never PASS (the step sum alone proves no restoration) */
+    {
+        BOOL comp = TRUE, failed = FALSE, unmeasured = FALSE;
+        LONG stq;
+        HOLDCTL_STATE post;
+        TAS_ACT_PHC_FACT phc;
+        long long wall_ns = 0;
+        LARGE_INTEGER freq;
+        unsigned compared = 0, not_applicable = 0, unmeasured_regs = 0;
+        int differing;
+        char part[160];
+
+        holdctl_diag_anchor(&diag, hc, id, "before cleanup compensation");
+        if (net_ns != 0) {
+            INT64 comp_ns = -net_ns;
+            comp = holdctl_step(id->net_luid, comp_ns, &job);
+            if (comp) {
+                net_ns = 0;
+            }
+            holdctl_diag_step(&diag, comp_ns, comp);
+            printf("    [DIAG] cleanup compensation %+lld ns: %s\n", (long long)comp_ns, comp ? "completed" : "FAILED");
+        } else {
+            printf("    [DIAG] cleanup compensation: none needed (net of the completed steps 0 ns)\n");
+        }
+        holdctl_diag_anchor(&diag, hc, id, "end (after compensation)");
+        (void)holdctl(hc, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &r, &info);
+        stq = holdctl(hc, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+        holdctl_print("QUERY at cleanup", stq, info, &r);
+        holdctl_capture(hc, &post, FALSE);
+        differing = holdctl_regs_differing(&pre, &post, &compared, &not_applicable, &unmeasured_regs);
+        QueryPerformanceFrequency(&freq);
+        wall_ns = (long long)((double)(post.qpc.QuadPart - pre.qpc.QuadPart) * 1e9 / (double)freq.QuadPart);
+        /* A running PHC must stay continuous against wall time; a PHC that was not running before (e.g. #389) must be unchanged */
+        phc = tas_act_phc(pre.phc_ok && post.phc_ok, post.phc - pre.phc, pre.phc_running ? wall_ns : 0, HOLDCTL_PHC_TOLERANCE_NS);
+        printf("    [EVIDENCE] PHC across the test: %s (before=%lld after=%lld wallNs=%lld drift=%lld ns, tolerance %lld ns)\n",
+               tas_act_phc_name(phc), pre.phc, post.phc, wall_ns, (post.phc - pre.phc) - wall_ns, (long long)HOLDCTL_PHC_TOLERANCE_NS);
+
+        why[0] = '\0';
+        if (!comp || net_ns != 0) {
+            failed = TRUE;
+            sprintf_s(part, sizeof(part), "PHC compensation step failed (net %lld ns); ", (long long)net_ns);
+            strcat_s(why, sizeof(why), part);
+        }
+        if (differing < 0) {
+            unmeasured = TRUE;
+            strcat_s(why, sizeof(why), "registers not measured (snapshot unavailable before or after); ");
+        } else {
+            sprintf_s(part, sizeof(part), "%d of %u compared snapshot registers differ, %u unmeasured, %u not applicable; ", differing, compared,
+                      unmeasured_regs, not_applicable);
+            strcat_s(why, sizeof(why), part);
+            failed = failed || differing != 0;
+            unmeasured = unmeasured || unmeasured_regs != 0;
+        }
+        if (phc == TAS_ACT_PHC_UNMEASURED) {
+            unmeasured = TRUE;
+            strcat_s(why, sizeof(why), "PHC continuity not measured; ");
+        } else {
+            sprintf_s(part, sizeof(part), "PHC %s; ", tas_act_phc_name(phc));
+            strcat_s(why, sizeof(why), part);
+            failed = failed || phc != TAS_ACT_PHC_CONTINUOUS;
+        }
+        if (stq != 0) {
+            unmeasured = TRUE;
+            sprintf_s(part, sizeof(part), "control state not readable (QUERY 0x%08lX)", (unsigned long)stq);
+            strcat_s(why, sizeof(why), part);
+        } else {
+            sprintf_s(part, sizeof(part), "control state %u", r.state);
+            strcat_s(why, sizeof(why), part);
+            failed = failed || r.state == AVB_DEBUG_PHC_HOLD_ARMED || r.state == AVB_DEBUG_PHC_HOLD_HOLDING;
+        }
+        verdict(failed ? "CLEANUP_FAILED" : (unmeasured ? "INCONCLUSIVE" : "PASS"), "CLEANUP", index, id->device_id, why);
+    }
+    CloseHandle(hc);
+#endif
+}
+
 int main(int argc, char **argv)
 {
     AVB_ADAPTER_IDENTITY_REQUEST *ids = NULL, *all = NULL, first;
@@ -2257,9 +2946,10 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--pass") == 0) { g_mode = MODE_PASS; g_case = "TC-TASAPI-005"; }
     if (argc == 2 && strcmp(argv[1], "--fault") == 0) { g_mode = MODE_FAULT; g_case = "TC-TASACT-FAULT-001"; }
     if (argc == 2 && strcmp(argv[1], "--fault-versioned") == 0) { g_mode = MODE_FAULTV; g_case = "TC-TASACT-FAULT-001"; }
+    if (argc == 2 && strcmp(argv[1], "--phc-hold-control") == 0) { g_mode = MODE_HOLDCTL; g_case = "TC-TASACT-HOLDCTL-001"; }
     printf("=== IntelAvbFilter - IOCTL_AVB_TAS_ACTIVATE on real hardware (#357) ===\n");
     if (g_mode == MODE_NONE) {
-        printf("[BLOCKED] TC-TASAPI-004: usage: test_tas_activate --hold | --pass | --fault | --fault-versioned\n");
+        printf("[BLOCKED] TC-TASAPI-004: usage: test_tas_activate --hold | --pass | --fault | --fault-versioned | --phc-hold-control\n");
         return 3;
     }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -2291,7 +2981,9 @@ int main(int argc, char **argv)
                 break;
             }
             all[nall++] = id;
-            if (id.capabilities & INTEL_CAP_TSN_TAS) {
+            if (g_mode == MODE_HOLDCTL) {
+                /* #505: the PHC hold applies to every adapter with a PHC; the ACTIVATE line inside checks TSN_TAS itself */
+            } else if (id.capabilities & INTEL_CAP_TSN_TAS) {
                 ids[stored++] = id;
             } else {
                 printf("[SKIP_UNSUPPORTED] %s-COMMIT/adapter:%u did=0x%04X: adapter does not advertise INTEL_CAP_TSN_TAS\n", g_case, i, id.device_id);
@@ -2306,6 +2998,16 @@ int main(int argc, char **argv)
     }
     g_all = all;
     g_nall = nall;
+    if (g_mode == MODE_HOLDCTL) {
+        for (i = 0; i < nall; i++) {   /* #505: every enumerated adapter that advertises a PHC, no fixed limit */
+            if (all[i].capabilities & INTEL_CAP_BASIC_1588) {
+                run_holdctl_adapter(all[i].index, &all[i]);
+            } else {
+                printf("[SKIP_UNSUPPORTED] %s/adapter:%u did=0x%04X: adapter does not advertise INTEL_CAP_BASIC_1588\n", g_case, all[i].index,
+                       all[i].device_id);
+            }
+        }
+    }
     for (i = 0; i < stored; i++) {   /* every TAS adapter, no fixed limit */
         g_tas_adapters++;
         if (g_mode == MODE_FAULTV) {

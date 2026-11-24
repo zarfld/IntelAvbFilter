@@ -91,6 +91,9 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_SETUP_TAS,
         IOCTL_AVB_TAS_ACTIVATE,               /* 0x80C; IOCTL_AVB_TAS_ACTIVATE_80C is the same code (TC-ABI-028) */
         IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,   /* function 71, withdrawn (TC-ABI-024) */
+#ifndef NDEBUG
+        IOCTL_AVB_DEBUG_PHC_RESEED_HOLD,      /* 0x8F1, Debug-only (#505, TC-ABI-037) */
+#endif
         IOCTL_AVB_TAS_QUERY_HW,
         IOCTL_AVB_TARGET_TIME_V2_QUERY,       /* 0x80D (#515, TC-ABI-034) */
         IOCTL_AVB_TARGET_TIME_V2_ARM,         /* 0x80E (#515, TC-ABI-034) */
@@ -339,6 +342,24 @@ static void test_struct_sizes(void)
                 offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, device_id) == offsetof(AVB_HW_SNAPSHOT_REQUEST, device_id) &&
                 offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, status) == offsetof(AVB_HW_SNAPSHOT_REQUEST, status),
                 "version 2 header fields at the version-1 offsets");
+#ifndef NDEBUG
+    TEST_CASE("TC-ABI-037: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD (#505, Debug-only): 0x0017A3C4, 144-byte request, field offsets");
+    TEST_ASSERT(IOCTL_AVB_DEBUG_PHC_RESEED_HOLD == 0x0017A3C4u, "IOCTL_AVB_DEBUG_PHC_RESEED_HOLD == 0x0017A3C4 (function 0x8F1, FILE_WRITE_ACCESS)");
+    TEST_ASSERT(sizeof(AVB_DEBUG_PHC_HOLD_REQUEST) == 144, "sizeof(AVB_DEBUG_PHC_HOLD_REQUEST) == 144");
+    TEST_ASSERT(offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, reserved_in) == 16 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, arm_id) == 24 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, net_luid) == 40 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, state) == 48 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, armed_seq) == 64 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, activate_op_id) == 120 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, hold_elapsed_us) == 128 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, status) == 136,
+                "field offsets reserved_in 16, arm_id 24, net_luid 40, state 48, armed_seq 64, activate_op_id 120, hold_elapsed_us 128, status 136");
+    TEST_ASSERT(AVB_DEBUG_PHC_HOLD_MAX_HOLD_MS == 2000u && AVB_DEBUG_PHC_HOLD_MAX_ARM_TIMEOUT_MS == 10000u &&
+                AVB_DEBUG_PHC_HOLD_MIN_HOLD_MS == 1u && AVB_DEBUG_PHC_HOLD_MIN_ARM_TIMEOUT_MS == 1u, "ARM bounds 1..2000 ms, 1..10000 ms");
+#else
+#ifdef IOCTL_AVB_DEBUG_PHC_RESEED_HOLD
+#error "#505: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD must not be declared in a Release (NDEBUG) build"
+#endif
+    TEST_CASE("TC-ABI-037: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD absent in Release (#505)");
+    TEST_ASSERT(1, "not declared under NDEBUG (compile-time check above)");
+#endif
     TEST_CASE("TC-ABI-023: HIL state IOCTL function numbers 68/69/70");
     TEST_ASSERT(IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110u, "IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110");
     TEST_ASSERT(IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114u, "IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114");
