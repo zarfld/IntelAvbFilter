@@ -1,4 +1,4 @@
-# test_hil_safety_gate.ps1
+﻿# test_hil_safety_gate.ps1
 # TEST-HILGATE-001..: HIL safety gate and adapter/PHC state integrity enforced by Run-Tests-CI.ps1 (#343).
 #
 # The HIL tests are the Hardware* suites run by Run-Tests-CI.ps1 on the self-hosted runner.  This test

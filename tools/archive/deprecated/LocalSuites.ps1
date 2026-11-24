@@ -1,7 +1,7 @@
 # LocalSuites.ps1 - operator-driven local pre-commit HIL run, Debug and Release.
 #
 # Usage (elevated PowerShell, repository root; no GitHub variables, artifacts, SHA input, prior CI or push needed):
-#   .\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\LocalSuites$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+#   .\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\LocalSuites_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 #
 # Per configuration, strictly sequential (the next configuration is installed only after this one is finished):
 #   1. build the driver            tools\build\Build-Driver.ps1
