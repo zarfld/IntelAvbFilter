@@ -620,6 +620,18 @@ if ($feBad.Count -eq 0) {
             @('Unit', @('test_tas_activate'), 'test_tas_activate'),
             @('Unit', @('ps1:tests/unit/ci/test_local_suites.ps1'), 'ps1:tests/unit/ci/test_local_suites.ps1'))
         foreach ($c in $ciCases) { $o = @(& $ciRun $c[0] $c[1]); if ((@($o | Sort-Object) -join '|') -ne (@($c[2] -split '\|' | Sort-Object) -join '|')) { $mdBad += "Run-Tests-CI -Suite $($c[0]) -Tests $($c[1] -join ',') -> [$($o -join '|')], expected [$($c[2])]" } }
+        # PR #518 review: an entry is dispatched once whichever selector supplied it, in both orders; the first mention keeps its place.
+        $onceCases = [ordered]@{
+            'program, then mode'            = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate --hold'), ($want -join '|'))
+            'mode, then program'            = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate'), ($want -join '|'))
+            'program twice'                 = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate.exe'), ($want -join '|'))
+            'mode between two programs'     = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate --hold', 'test_tas_activate'), ($want -join '|'))
+            'mode twice, one with .exe'     = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate.exe --hold'), 'test_tas_activate --hold')
+            'mode with other spacing'       = @('HardwareIntegration', @('test_tas_activate', ' test_tas_activate   --hold '), ($want -join '|'))
+            'script entry twice'            = @('Unit', @('ps1:tests/unit/ci/test_local_suites.ps1', 'ps1:tests/unit/ci/test_local_suites.ps1'), 'ps1:tests/unit/ci/test_local_suites.ps1')
+            'different modes stay'          = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate --pass'), 'test_tas_activate --hold|test_tas_activate --pass') }
+        foreach ($k in $onceCases.Keys) { $c = $onceCases[$k]; $o = @(& $ciRun $c[0] $c[1]); if ((@($o | Sort-Object) -join '|') -ne (@($c[2] -split '\|' | Sort-Object) -join '|')) { $mdBad += "once per mode, ${k}: [$($o -join '|')], expected [$($c[2])]" } }
+        $o = @(& $ciRun 'HardwareIntegration' @('test_tas_activate --pass', 'test_tas_activate')); if ($o[0] -ne 'test_tas_activate --pass') { $mdBad += "the first mention does not keep its place: [$($o -join '|')]" }
         if (@(& $ciRun 'HardwareUnit' @()).Count -lt 10) { $mdBad += 'an empty -Tests no longer selects the suite list' }
     }
 }

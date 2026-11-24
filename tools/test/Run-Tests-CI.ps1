@@ -824,16 +824,21 @@ $HilTestSafety = @{
 # Resolve which tests to run
 # ===========================
 # A program named in -Tests without arguments that is no entry itself stands for all its registered modes of the suite, each
-# once (#473; the same rule as Run-Tests.ps1 Resolve-AvbRunnerEntry).  Everything else is passed on unchanged: an unregistered
-# name still fails closed at dispatch.
+# once (#473; the same rule as Run-Tests.ps1 Resolve-AvbRunnerEntry).  Every entry is dispatched once whichever selector supplied
+# it, in any order (PR #518): the first mention keeps its place, and a registered entry is passed on in its registered spelling.
+# An unregistered name is passed on unchanged and still fails closed at dispatch.
 function Expand-AvbBareProgram {
     param([string[]]$Names, [string[]]$Registered, [string[]]$Classified)
     $reg = @($Registered | ForEach-Object { $_ -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' } | Select-Object -Unique)
-    $out = @()
+    $out = @(); $seen = @()
     foreach ($n in $Names) {
-        $b = $n.Trim() -replace '\.exe$', ''
+        $b = $n.Trim(); if (-not $b.StartsWith('ps1:')) { $b = ($b -replace '\s+', ' ') -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' }
         $modes = @(if ($b -notmatch '[\s:]' -and $reg -notcontains $b -and $Classified -notcontains $b) { $reg | Where-Object { ($_ -split '\s+', 2)[0] -eq $b } })
-        if ($modes.Count -gt 0) { $out += @($modes | Where-Object { $out -notcontains $_ }) } else { $out += $n }
+        foreach ($k in $(if ($modes.Count -gt 0) { $modes } else { $b })) {
+            if ($seen -contains $k) { continue }
+            $seen += $k
+            $out += $(if ($reg -contains $k) { @($reg | Where-Object { $_ -eq $k })[0] } else { $n })
+        }
     }
     return $out
 }
