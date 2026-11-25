@@ -802,7 +802,7 @@ NTSTATUS AvbCreateMinimalContext(
     /* #505: the Debug PHC reseed hold control starts IDLE with no ACTIVATE result (the rest is zeroed above) */
     KeInitializeSpinLock(&ctx->dbg_phc_lock);
     ctx->dbg_phc.state = AVB_DEBUG_PHC_HOLD_IDLE;
-    ctx->dbg_phc.activate_result = 0xFFFFFFFFu;
+    ctx->dbg_phc.activate_result = AVB_DBG_ACTIVATE_NONE;
 #endif
     
     ctx->filter_instance = FilterModule;
