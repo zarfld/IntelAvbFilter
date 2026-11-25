@@ -17,6 +17,7 @@ Abstract:
 #include "precomp.h"
 /* Share IOCTL ABI (codes and request structs) with user-mode */
 #include "include/avb_ioctl.h"
+#include "src/avb_tas_retained.h"         /* AVB_TAS_RETAINED: the retained commit of an adapter context (#350) */
 #include "include/avb_init_fault_dbg.h"   /* #412: shared layout of the Debug-only initialization fault mechanism */
 
 // Intel constants
@@ -344,9 +345,15 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * operation and record update, after they took tas_op_claim. The query tries it once in shared mode and never waits:
      * not obtained, it reads nothing and reports OP_IN_PROGRESS. No other lock is taken under it and the code under it
      * does not log; the hold time (from acquisition to release, without any wait for it) is logged after release
-     * (avb_tas_reg_unlock). Other register writers, such as PHC adjustment or the diagnostic register IOCTLs, do not take
-     * it (#45 is not implemented for them). */
+     * (avb_tas_reg_unlock). A PHC operation or a device initialization under a retained schedule holds it for its two short
+     * publications of tas_retained only, never across its register writes (avb_tas_phc_begin / avb_tas_phc_end, #350). Other
+     * register writers, such as the diagnostic register IOCTLs, do not take it (#45 is not implemented for them). */
     EX_SPIN_LOCK tas_reg_lock;
+
+    /* The schedule and commit bracket the last TAS commit of this context left (#350, C6 of #365; src/avb_tas_retained.h). Written
+     * under tas_meta_order and tas_reg_lock exclusive, in the lock section that also publishes the record or the generation it
+     * belongs to; read under tas_reg_lock. Zero in a new context (#352 R1 L11): nothing retained. */
+    AVB_TAS_RETAINED tas_retained;
 
     /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's register pass (#350): the query reads registers only while it
      * holds this rundown, and reads nothing when it cannot acquire it. FilterPause waits for the current holders before it

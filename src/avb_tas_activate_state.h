@@ -24,6 +24,7 @@ typedef struct AVB_TAS_OP_OUTCOME {
     int mode_written;           /* the transmit-mode write reached the adapter (#362 decision 4, R8) */
     int acceptance_acted;       /* the commit executed under explicit unverified acceptance (#365 R4: out_flags bit 0) */
     avb_u64 phc_before_ns;      /* step 7 PHC read, 0 if none */
+    avb_u64 phc_recheck_ns;     /* the R8 PHC read right before the BaseT writes, 0 if none: the start of the commit bracket (#350) */
     avb_u64 phc_at_commit_ns;   /* PHC read after the commit write, 0 if none */
     avb_u32 failed_write;       /* number of the schedule write that failed, 0 if none */
 } AVB_TAS_OP_OUTCOME;

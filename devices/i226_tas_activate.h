@@ -287,6 +287,15 @@ static __inline avb_u32 i226_tas_tier_hold(void)
 
 typedef AVB_TAS_OP_OUTCOME I226_TAS_OP_OUTCOME;   /* src/avb_tas_activate_state.h */
 
+/* TAS-DR-05: the window is above 1.1 x the transmit time of max(512 bytes, max_frame_bytes) at this link speed (DOC 8.12.12), widened
+ * arithmetic. One rule for the validation and for the query's LINK_SPEED_CHANGED (DES 4.3, #350). Expects start < end */
+static __inline int i226_tas_window_fits(const AVB_TAS_QUEUE_WINDOW *w, avb_u32 link_mbps)
+{
+    avb_u32 floor_bytes = w->max_frame_bytes > I226_TAS_WINDOW_FLOOR ? w->max_frame_bytes : I226_TAS_WINDOW_FLOOR;
+
+    return (avb_u64)(w->end_ns - w->start_ns) * (avb_u64)link_mbps > (avb_u64)floor_bytes * I226_TAS_WINDOW_FACTOR;
+}
+
 /* Step 6, TAS-DR-03 to TAS-DR-07 in numeric order (TAS-DR-08's PHC margin is step 7, TAS-DR-09's Strict flags step 8), only
  * device and SSOT ranges, at the driver-owned link speed sampled once under the claim (#351 R2). Reads no hardware */
 static __inline avb_u32 i226_tas_op_validate(const AVB_TAS_SCHEDULE *s, avb_u32 link_mbps)
@@ -302,7 +311,6 @@ static __inline avb_u32 i226_tas_op_validate(const AVB_TAS_SCHEDULE *s, avb_u32 
      * max(512 bytes, max_frame_bytes) at the current link speed (DOC 8.12.12), widened arithmetic */
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
         const AVB_TAS_QUEUE_WINDOW *w = &s->queue[q];
-        avb_u32 floor_bytes;
 
         if (w->max_frame_bytes < I226_TAS_MIN_FRAME_BYTES || w->max_frame_bytes > I226_TAS_MAX_FRAME_BYTES) {
             return AVB_TAS_ACT_INVALID;
@@ -310,8 +318,7 @@ static __inline avb_u32 i226_tas_op_validate(const AVB_TAS_SCHEDULE *s, avb_u32 
         if (w->start_ns >= w->end_ns || w->end_ns > s->cycle_ns) {
             return AVB_TAS_ACT_INVALID;
         }
-        floor_bytes = w->max_frame_bytes > I226_TAS_WINDOW_FLOOR ? w->max_frame_bytes : I226_TAS_WINDOW_FLOOR;
-        if ((avb_u64)(w->end_ns - w->start_ns) * (avb_u64)link_mbps <= (avb_u64)floor_bytes * I226_TAS_WINDOW_FACTOR) {
+        if (!i226_tas_window_fits(w, link_mbps)) {
             return AVB_TAS_ACT_INVALID;
         }
     }
@@ -558,6 +565,7 @@ static __inline void i226_tas_op_hold(const I226_TAS_IO *io, const AVB_TAS_SCHED
         out->result = i226_tas_op_rollback(&f, saved, attempted);   /* no write failed: failed_write stays 0 */
         return;
     }
+    out->phc_recheck_ns = recheck;   /* t0 of the commit bracket (#350) */
     attempted++;
     if (i226_tas_op_write(&f, I226_BASET_H, (avb_u32)(s->base_time_ns / NSEC_PER_SEC)) != 0) {
         goto rollback;

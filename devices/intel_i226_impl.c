@@ -326,58 +326,62 @@ static int get_info(device_t *dev, char *buffer, ULONG size)
     return 0;
 }
 
+static int phc_set_read(void *ctx, avb_u32 offset, avb_u32 *value)
+{
+    uint32_t read = 0;
+    int result = ndis_platform_ops.mmio_read((device_t *)ctx, offset, &read);
+
+    *value = read;
+    return result;
+}
+
+static int phc_set_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
 /**
- * @brief Set I226 system time (SYSTIM registers)
+ * @brief Set I226 system time (SYSTIM registers) with a report (intel_device_ops_t.set_systime_reported, #350)
  * @param dev Device handle
  * @param systime 64-bit time value in nanoseconds
+ * @param effect Out (may be NULL): AVB_PHC_EFFECT_*, what was issued (i226_phc_set)
  * @return 0 on success, <0 on error
  */
-static int set_systime(device_t *dev, uint64_t systime)
+static int set_systime_reported(device_t *dev, uint64_t systime, int *effect)
 {
     uint32_t sec, nsec;
-    uint32_t tsauxc_val = 0;
-    int result;
-    
+    int result, issued = AVB_PHC_EFFECT_NONE;
+
     DEBUGP(DL_TRACE, "==>i226_set_systime: 0x%llx\n", systime);
-    
+
+    if (effect != NULL) {
+        *effect = AVB_PHC_EFFECT_NONE;
+    }
     if (dev == NULL) {
         return -1;
     }
-    
+
     // I226/I225: split format -- SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
     // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) -- that is the I210 flat format
     sec  = (uint32_t)(systime / 1000000000ULL);
     nsec = (uint32_t)(systime % 1000000000ULL);
     
-    // Step 1: Disable SYSTIM counter for an atomic write sequence.
-    // TSAUXC (0xB640) bit 31 halts the SYSTIM increment logic.
-    // Note: The SSOT header labels this bit PLLLOCKED but the hardware spec defines it
-    // as "Disable systime" -- confirmed via IEEE 1588 I226 hardware manual.
-    ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val);
-    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val | (1UL << 31));
-    if (result != 0) {
-        DEBUGP(DL_WARN, "i226_set_systime: failed to disable SYSTIM via TSAUXC, proceeding\n");
+    /* TSAUXC, SYSTIML, SYSTIMH, TSAUXC: the sequence and what it reports are in i226_phc_set (i226_phc_seed.h) */
+    result = i226_phc_set(phc_set_read, phc_set_write, dev, sec, nsec, &issued);
+    if (effect != NULL) {
+        *effect = issued;
     }
-    
-    // Step 2: Write nanoseconds to SYSTIML
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIML, nsec);
     if (result != 0) {
-        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
+        DEBUGP(DL_WARN, "i226_set_systime: failed (%d), reported effect %d\n", result, issued);
         return result;
     }
-    
-    // Step 3: Write seconds to SYSTIMH
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, sec);
-    if (result != 0) {
-        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
-        return result;
-    }
-    
-    // Step 4: Re-enable SYSTIM counter
-    ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val & ~(1UL << 31));
-    
     DEBUGP(DL_TRACE, "<==i226_set_systime: sec=%u nsec=%u Success\n", sec, nsec);
     return 0;
+}
+
+static int set_systime(device_t *dev, uint64_t systime)
+{
+    return set_systime_reported(dev, systime, NULL);
 }
 
 /**
@@ -679,7 +683,7 @@ static void activate_tas_hold(device_t *dev, const struct AVB_TAS_SCHEDULE *sche
  * DISPATCH_LEVEL with the adapter's TAS register lock held in shared mode, or with contended set and no register access
  * allowed; the caller logs the reply after releasing it */
 static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
-                     int op_in_progress, int contended)
+                     int op_in_progress, int contended, const struct AVB_TAS_RETAINED *retained)
 {
     I226_TAS_IO io;
 
@@ -688,7 +692,7 @@ static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int 
     io.write = NULL;
     io.phc = activate_phc;
     io.fault_injection = 0;
-    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, reply);
+    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, retained, reply);
     return 0;
 }
 
@@ -1715,6 +1719,7 @@ const intel_device_ops_t i226_ops = {
     
     // PTP operations - clean generic names
     .set_systime = set_systime,
+    .set_systime_reported = set_systime_reported,
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
