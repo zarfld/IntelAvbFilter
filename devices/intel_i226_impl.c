@@ -561,9 +561,10 @@ static int init_ptp(device_t *dev)
  * Implementation matches ChatGPT5 validation sequence
  * @param dev Device handle
  * @param config TAS configuration
+ * @param write_attempted Out (may be NULL): 0 until the first TAS register write is attempted, then 1 (#352 R1 L9)
  * @return 0 on success, <0 on error
  */
-static int setup_tas(device_t *dev, struct tsn_tas_config *config)
+static int setup_tas(device_t *dev, struct tsn_tas_config *config, int *write_attempted)
 {
     PAVB_DEVICE_CONTEXT context;
     uint32_t regValue;
@@ -571,6 +572,9 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     uint64_t systim_current;
     uint32_t cycle_time_ns;
 
+    if (write_attempted != NULL) {
+        *write_attempted = 0;
+    }
     /* Called with the adapter's TAS register lock held (IOCTL_AVB_SETUP_TAS, #350): no logging here. The caller logs the
      * result and the configuration after the release; the step traces this function had were removed with that change */
     if (dev == NULL || config == NULL) {
@@ -595,6 +599,9 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     // Set TSN mode and enhanced QAV
     regValue |= I226_TQAVCTRL_TRANSMIT_MODE_TSN | I226_TQAVCTRL_ENHANCED_QAV;
 
+    if (write_attempted != NULL) {
+        *write_attempted = 1;   /* the first TAS register write is attempted now, whatever its result (#352 R1 L9) */
+    }
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
 

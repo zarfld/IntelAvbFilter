@@ -90,6 +90,43 @@
  *                         change is FAIL, a missing measurement INCONCLUSIVE.
  *            It proves only that function 71 is refused: never fault/rollback evidence, which is --fault-versioned's. No link is
  *            required; the cleanup's TX probe still needs one. Expected RED before the cutover: function 71 is still served.
+ *   --metadata-events  case TC-TASACT-META-001 (#357 producer; #352 R1 L9 and L10). Per TAS adapter, from the proved pre-state,
+ *            each line one generation measurement across one event (meta_line: two valid replies with a non-zero pair in the
+ *            same context, else INCONCLUSIVE; any other measured move FAIL):
+ *              CLEAN_EVENT    PHC_OFFSET_ADJUST +1 us while the record is CLEAN: +0 (L10 applies to a retained schedule only).
+ *              COMMIT         the versioned HOLD (explicit acceptance, the pair just queried) commits: the retained schedule
+ *                             the L10 lines need; without it they are BLOCKED (prerequisite), never judged.
+ *              RESEED_SET     SET_TIMESTAMP (current PHC + 1 s, a PHC reseed) with the schedule retained: +1 (L10).
+ *              ONCE           a second query after the same event: +0 (L10: once per event, never per query).
+ *              RESEED_OFFSET  PHC_OFFSET_ADJUST +1 us with the schedule retained: +1 (L10, another reseed event).
+ *              DISARM_NOWRITE DISARM_TAS completing STATUS_NOT_SUPPORTED (its device path writes nothing): +0 (L9).
+ *              SETUP_WRITE    SETUP_TAS completing STATUS_SUCCESS (registers written): exactly +1 (L9).
+ *              SETUP_NOWRITE  SETUP_TAS refused before its first TAS write: +0 (L9, #503). SYSTIM frozen (SET_HW_TIMESTAMPING
+ *                             enable=0) and zeroed through the Debug-only WRITE_REGISTER at the SYSTIML/SYSTIMH offsets the HAL
+ *                             reports in QUERY_HW_SNAPSHOT version 2 (no offset in this test); each unestablished setup step is
+ *                             INCONCLUSIVE, and on a Release build the line is INCONCLUSIVE (never PASS).
+ *            Then the owned NIC-cycle cleanup. Not reachable here and therefore not judged: a failed register read before the
+ *            first write in the legacy setup_tas, and the bring-up init_ptp reseed (L10).
+ *            Per TAS adapter a second case follows, TC-TASACT-META-002 (#357 F1; #352 R1 L8/L10), a complete run of its own with its own
+ *            handles, proved pre-state and owned NIC-cycle cleanup: the same ordering question made deterministic by the Debug-only
+ *            hold control (#505, no repetition). On the CLEAN record one PHC_OFFSET_ADJUST (+1 us) is held before its physical write
+ *            and a HOLD ACTIVATE (explicit acceptance, the pair just queried) is sent while it is held. Judged from the driver's
+ *            markers of this arm and this op id, never from the order in which the IOCTLs return:
+ *              WINDOW      the ACTIVATE arrived between hold begin and hold end, both operations really completed (the write
+ *                          STATUS_SUCCESS, the ACTIVATE COMMITTED) and commit and write do not overlap. Both orders are valid; the
+ *                          observed one is printed, none is prescribed. Anything else is not the controlled interleaving:
+ *                          INCONCLUSIVE, and GENERATION with it, never PASS (tas_race_order, TC-MOCK-066).
+ *              GENERATION  commit before the write entry: the reseed hit a retained schedule, +2 in total (commit +1, L10 +1).
+ *                          Write done before the commit: the reseed hit a CLEAN record, +1 in total.
+ *              SETTLED     both operations ended within their bounds; otherwise INCONCLUSIVE. While one has not ended when the
+ *                          cleanup starts (after a further bounded wait), CLEANUP and RESTORE are INCONCLUSIVE_RESTORATION at best,
+ *                          a measured failure stays CLEANUP_FAILED, and a later case on this adapter is BLOCKED (TC-MOCK-067).
+ *            TC-TASACT-META-003, a third complete run: the same interleaving, but the held reseed steps the PHC back (5 s) and BaseT had
+ *            already passed on the old PHC, which refuses it (STATUS_INVALID_PARAMETER, TAS-DR-08). Additional line:
+ *              NEW_PHC     write before commit and the request COMMITTED: it was judged by the new PHC (tas_race_phc_used). A commit
+ *                          before the write would have committed a passed BaseT: FAIL. No commit (the old PHC refused it):
+ *                          INCONCLUSIVE, as WINDOW and GENERATION; never PASS.
+ *            A Release driver does not serve the control: every line INCONCLUSIVE, never PASS.
  *   --phc-hold-control  case TC-TASACT-HOLDCTL-001 (#505): the Debug-only one-shot PHC reseed hold control
  *            (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, 0x0017A3C4) on every adapter advertising INTEL_CAP_BASIC_1588, through independent
  *            handles each bound to that adapter. Lines: UNBOUND (STATUS_INVALID_DEVICE_STATE), MALFORMED (exact refusals, state
@@ -201,7 +238,8 @@
  * Mutations: TAS_ACTIVATE, bounded broadcast UDP and ICMP on the adapter under test, and the NIC cycle of that adapter
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
  * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
- * WRITE_REGISTER. Runs on Debug and Release drivers.
+ * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER); that mode also
+ * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS and SET_HW_TIMESTAMPING. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -260,7 +298,13 @@
 /* #482: the common numbered-write contract - N = 1 is the first schedule write for every backend (published, not a commit index) */
 #define FAULTV_FIRST_SCHEDULE_WRITE 1u
 
+#define META_OFFSET_NS        1000LL                  /* --metadata-events: the PHC_OFFSET_ADJUST step (+1 us) */
+#define META_SET_AHEAD_NS     NS_PER_SEC              /* --metadata-events: SET_TIMESTAMP to the current PHC + 1 s (forward) */
+#define META_RACE_HOLD_MS     1000u                   /* META-002: the reseed is held this long; the ACTIVATE must arrive in it */
+
 static RUN_MODE g_mode;
+#define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
+static int g_meta_case;                              /* --metadata-events: 1 to 3 = META-001 to -003 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
 static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
@@ -271,6 +315,8 @@ static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 static const AVB_ADAPTER_IDENTITY_REQUEST *g_all;   /* every validated identity: the observer candidates */
 static UINT32 g_nall;
 static BOOL g_cleanup_link_was_up = TRUE;            /* cleanup: the link before the test (an adapter down before is not a failure) */
+static OWNED_OP *g_ops;                              /* operations this process issued in workers and has not seen end (key: NET_LUID) */
+#define OPS_SETTLE_MS        30000u                  /* further bounded wait per such operation when the cleanup starts */
 static avb_u64 g_op_id;                              /* client_op_id of the next versioned request: non-zero, distinct */
 
 #define LEAD_HEADROOM_NS     (500LL * NS_PER_MS)    /* test scheduling headroom above an established limits.min_margin_ns */
@@ -942,6 +988,12 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     ZeroMemory(&e, sizeof(e));
     e.phc = TAS_ACT_PHC_UNMEASURED;
     printf("\n  --- Primary cleanup: NIC cycle of this adapter ---\n");
+    /* The cleanup judges a final state only when no operation of this test can still change it. The cycle runs either way: it is the
+     * recovery, bounded, and an open operation may hold the disable back */
+    e.operations_pending = !owned_ops_settled(&g_ops, id->net_luid, OPS_SETTLE_MS);
+    if (e.operations_pending) {
+        printf("    [EVIDENCE] an operation of this test on this adapter has not been observed to end: whatever is measured below is not final\n");
+    }
     if (find_devinst(id->net_luid, &inst)) {
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
         h = INVALID_HANDLE_VALUE;
@@ -959,10 +1011,21 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     fresh = e.cycle_completed ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
     e.adapter_returned = (fresh != INVALID_HANDLE_VALUE);
     InterlockedExchange(&g_pending_adapter, -1);
-    verdict(e.cycle_completed && e.adapter_returned ? "PASS" : "CLEANUP_FAILED", "CLEANUP", index, id->device_id,
-            e.cycle_completed && e.adapter_returned ? NULL
-                                                    : "the NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
-                                                      "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+    switch (tas_act_cycle(&e)) {
+    case TAS_ACT_RESTORE_COMPLETE:
+        verdict("PASS", "CLEANUP", index, id->device_id, NULL);
+        break;
+    case TAS_ACT_RESTORE_UNVERIFIED:
+        verdict("INCONCLUSIVE_RESTORATION", "CLEANUP", index, id->device_id,
+                "the NIC cycle ran and the adapter returned, but an operation of this test had not been observed to end before it and may still "
+                "change the state. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+        break;
+    default:
+        verdict("CLEANUP_FAILED", "CLEANUP", index, id->device_id,
+                "the NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
+                "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+        break;
+    }
 
     if (e.adapter_returned) {
         AVB_DRIVER_STATISTICS stats_after;
@@ -1059,8 +1122,8 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
         CloseHandle(fresh);
     }
     printf("    evidence: cycle=%d returned=%d attach=%d driverClean=%d regsMeasured=%d regsDiffering=%u tsnOff=%d link=%d txProbed=%d "
-           "txOnWire=%d\n", e.cycle_completed, e.adapter_returned, attach, e.driver_clean, e.regs_measured, e.regs_differing,
-           e.tsn_mode_off, link_up, e.tx_probed, e.tx_on_wire);
+           "txOnWire=%d opsPending=%d\n", e.cycle_completed, e.adapter_returned, attach, e.driver_clean, e.regs_measured, e.regs_differing,
+           e.tsn_mode_off, link_up, e.tx_probed, e.tx_on_wire, e.operations_pending);
     restore = tas_act_restore(&e);
     /* A separate outcome (#361): the cycle reseeds the PHC, which is reported, not judged as restoration */
     printf("    [EVIDENCE] PHC across the cleanup: %s (before=%lld after=%lld wallNs=%lld)\n", tas_act_phc_name(e.phc), phc_before,
@@ -1072,6 +1135,8 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
         break;
     case TAS_ACT_RESTORE_UNVERIFIED:
         verdict("INCONCLUSIVE_RESTORATION", "RESTORE", index, id->device_id,
+                e.operations_pending ? "nothing observed failed, but an operation of this test had not been observed to end before the cycle: the "
+                "measured state is not final" :
                 "nothing observed failed, but the restoration set (no valid query before and after) or the wire was not measured; see the evidence line");
         break;
     default:
@@ -1333,6 +1398,38 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     return h;
 }
 
+/** --metadata-events: one generation measurement across an event (#352 R1). PASS when both replies are valid, report a
+ *  non-zero pair in the same context and the generation moved by exactly `expected`; FAIL on any other measured move (a
+ *  decrease included); INCONCLUSIVE when a reply is not valid, reports 0 (not reported, never a value) or names another
+ *  context (epoch changed). Every value is printed */
+static void meta_line(const char *check, UINT32 index, avb_u16 did, const QUERY_READ *a, const QUERY_READ *b, avb_u64 expected,
+                      const char *what)
+{
+    char reason[420];
+
+    if (!query_valid(a) || !query_valid(b) || a->q.generation == 0 || a->q.context_epoch == 0 || b->q.generation == 0 ||
+        b->q.context_epoch == 0) {
+        sprintf_s(reason, sizeof(reason), "%s: not measured: before valid %d gen %llu epoch %llu, after valid %d gen %llu epoch %llu "
+                  "(0 = not reported, never a value)", what, query_valid(a), a->q.generation, a->q.context_epoch, query_valid(b),
+                  b->q.generation, b->q.context_epoch);
+        verdict("INCONCLUSIVE", check, index, did, reason);
+    } else if (b->q.context_epoch != a->q.context_epoch) {
+        sprintf_s(reason, sizeof(reason), "%s: the epoch changed (%llu -> %llu): another context, the generations are not comparable",
+                  what, a->q.context_epoch, b->q.context_epoch);
+        verdict("INCONCLUSIVE", check, index, did, reason);
+    } else if (b->q.generation >= a->q.generation && b->q.generation - a->q.generation == expected) {
+        sprintf_s(reason, sizeof(reason), "%s: generation %llu -> %llu in context %llu (+%llu as required)", what, a->q.generation,
+                  b->q.generation, a->q.context_epoch, expected);
+        verdict("PASS", check, index, did, reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "%s: generation %llu -> %llu in context %llu, required +%llu", what, a->q.generation,
+                  b->q.generation, a->q.context_epoch, expected);
+        verdict("FAIL", check, index, did, reason);
+    }
+}
+
+static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame, BOOL back);
+
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
     static TAS_ACT_FRAME frames[WIRE_MAX_FRAMES];
@@ -1372,6 +1469,11 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     g_next_seq = 0;   /* per adapter run: no capture is active here, so every tag slot is free */
     g_capture_luid = 0;   /* no observer carried over from the previous adapter run; find_observer sets it only when one is found (PR #481) */
     ZeroMemory(&ipv4, sizeof(ipv4));
+    if (!owned_ops_settled(&g_ops, id->net_luid, 0)) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id,
+                "an operation of an earlier case of this process on this adapter has not been observed to end: no pre-state can be established");
+        return;
+    }
     if (!find_devinst(id->net_luid, &inst)) {
         verdict("BLOCKED", "COMMIT", index, id->device_id,
                 "cannot resolve the adapter device node required for NIC-cycle cleanup");
@@ -1466,6 +1568,258 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     /* First mutation. From here the cleanup always runs, whatever TAS_ACTIVATE returns */
     g_pending_did = id->device_id;
     InterlockedExchange(&g_pending_adapter, (LONG)index);
+
+    if (g_mode == MODE_META && g_meta_case != 1) {
+        /* TC-TASACT-META-002 and -003: the F1 interleaving. h controls and measures, h2 sends the ACTIVATE (closed by run_meta_race) */
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        run_meta_race(h, h2, index, id, frame, g_meta_case == 3);
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+        return;
+    }
+
+    if (g_mode == MODE_META) {
+        /* --metadata-events (#352 R1 L9/L10, under #357). Each line is its own measurement; a missing one is named, never read as
+         * unchanged. The owned cleanup below always runs */
+        AVB_TAS_OP_REQUEST op;
+        AVB_TIMESTAMP_REQUEST ts;
+        AVB_OFFSET_REQUEST off;
+        AVB_DISARM_TAS_REQUEST dis;
+        AVB_TAS_REQUEST setup;
+        QUERY_READ qm0, qm1, qa, qb, qc, qd, qe, qf;
+        DWORD information = 0;
+        LONG st;
+        long long phc2 = 0, base2;
+        BOOL retained;
+
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        CloseHandle(h2);
+
+        /* CLEAN_EVENT: a PHC offset step while the record is CLEAN: L10 applies to a retained schedule only, so +0 */
+        query(h, &qm0);
+        print_query("before the clean-state event", &qm0);
+        ZeroMemory(&off, sizeof(off));
+        off.offset_ns = META_OFFSET_NS;
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_PHC_OFFSET_ADJUST, &off, sizeof(off), &off, sizeof(off), &information);
+        printf("    [EVIDENCE] PHC_OFFSET_ADJUST +%lld ns on the CLEAN record: ntstatus=0x%08lX information=%lu status=0x%X\n",
+               (long long)META_OFFSET_NS, (unsigned long)st, information, off.status);
+        query(h, &qm1);
+        print_query("after the clean-state event", &qm1);
+        if (st != 0) {
+            sprintf_s(why, sizeof(why), "the PHC offset step did not complete (ntstatus=0x%08lX): no event to judge", (unsigned long)st);
+            verdict("INCONCLUSIVE", "CLEAN_EVENT", index, id->device_id, why);
+        } else {
+            meta_line("CLEAN_EVENT", index, id->device_id, &qm0, &qm1, 0, "PHC offset step with the record CLEAN (no retained schedule)");
+        }
+
+        /* COMMIT: the retained schedule the L10 events need (HOLD, explicit acceptance, the pair of the query just taken) */
+        retained = FALSE;
+        if (!read_phc(h, &phc2)) {
+            verdict("BLOCKED", "COMMIT", index, id->device_id, "PHC unavailable: no BaseT can be placed for the retained schedule");
+        } else {
+            base2 = (phc2 + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+            build_op(&op, id->net_luid, &qm1.q, base2, frame);
+            op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+            information = 0;
+            st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &information);
+            printf("    [EVIDENCE] activation: op=0x%016llX base=%lld (PHC %lld) gen=%llu epoch=%llu -> ntstatus=0x%08lX information=%lu "
+                   "out_flags=0x%X\n", op.client_op_id, base2, phc2, op.expected_generation, op.context_epoch, (unsigned long)st,
+                   information, op.out_flags);
+            retained = st == 0 && information == (DWORD)sizeof(op);
+            if (retained) {
+                verdict("PASS", "COMMIT", index, id->device_id, "COMMITTED: a schedule is retained for the L10 events");
+            } else {
+                sprintf_s(why, sizeof(why), "the HOLD activation did not commit (ntstatus=0x%08lX information=%lu)", (unsigned long)st,
+                          information);
+                verdict("FAIL", "COMMIT", index, id->device_id, why);
+            }
+        }
+        query(h, &qa);
+        print_query("after the commit", &qa);
+
+        /* RESEED_SET and ONCE: SET_TIMESTAMP (a PHC reseed) while the schedule is retained invalidates the old view exactly
+         * once in that event (L10); repeated queries do not advance it */
+        if (!retained) {
+            verdict("BLOCKED", "RESEED_SET", index, id->device_id, "no retained schedule (see COMMIT): the L10 event cannot be judged");
+            verdict("BLOCKED", "ONCE", index, id->device_id, "no retained schedule (see COMMIT)");
+            verdict("BLOCKED", "RESEED_OFFSET", index, id->device_id, "no retained schedule (see COMMIT)");
+        } else {
+            ZeroMemory(&ts, sizeof(ts));
+            st = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_TIMESTAMP, &ts, sizeof(ts), &ts, sizeof(ts), &information);
+            if (st != 0) {
+                sprintf_s(why, sizeof(why), "GET_TIMESTAMP failed (ntstatus=0x%08lX): no SET_TIMESTAMP target", (unsigned long)st);
+                verdict("INCONCLUSIVE", "RESEED_SET", index, id->device_id, why);
+                verdict("INCONCLUSIVE", "ONCE", index, id->device_id, "the reseed was not performed (see RESEED_SET)");
+            } else {
+                avb_u64 target = ts.timestamp + (avb_u64)META_SET_AHEAD_NS;
+                ZeroMemory(&ts, sizeof(ts));
+                ts.timestamp = target;
+                st = avb_ioctl_ntstatus(h, IOCTL_AVB_SET_TIMESTAMP, &ts, sizeof(ts), &ts, sizeof(ts), &information);
+                printf("    [EVIDENCE] SET_TIMESTAMP %llu with the schedule retained: ntstatus=0x%08lX status=0x%X\n", target,
+                       (unsigned long)st, ts.status);
+                query(h, &qb);
+                print_query("after SET_TIMESTAMP", &qb);
+                query(h, &qc);
+                print_query("queried again", &qc);
+                if (st != 0) {
+                    sprintf_s(why, sizeof(why), "SET_TIMESTAMP did not complete (ntstatus=0x%08lX): no reseed to judge", (unsigned long)st);
+                    verdict("INCONCLUSIVE", "RESEED_SET", index, id->device_id, why);
+                } else {
+                    meta_line("RESEED_SET", index, id->device_id, &qa, &qb, 1, "SET_TIMESTAMP (PHC reseed) with a retained schedule");
+                }
+                meta_line("ONCE", index, id->device_id, &qb, &qc, 0, "a second query after the same event");
+            }
+            /* RESEED_OFFSET: a PHC offset step with the schedule still retained is another reseed event: +1 once */
+            query(h, &qc);
+            ZeroMemory(&off, sizeof(off));
+            off.offset_ns = META_OFFSET_NS;
+            st = avb_ioctl_ntstatus(h, IOCTL_AVB_PHC_OFFSET_ADJUST, &off, sizeof(off), &off, sizeof(off), &information);
+            printf("    [EVIDENCE] PHC_OFFSET_ADJUST +%lld ns with the schedule retained: ntstatus=0x%08lX status=0x%X\n",
+                   (long long)META_OFFSET_NS, (unsigned long)st, off.status);
+            query(h, &qd);
+            print_query("after PHC_OFFSET_ADJUST", &qd);
+            if (st != 0) {
+                sprintf_s(why, sizeof(why), "PHC_OFFSET_ADJUST did not complete (ntstatus=0x%08lX): no event to judge", (unsigned long)st);
+                verdict("INCONCLUSIVE", "RESEED_OFFSET", index, id->device_id, why);
+            } else {
+                meta_line("RESEED_OFFSET", index, id->device_id, &qc, &qd, 1, "PHC offset step with a retained schedule");
+            }
+        }
+
+        /* DISARM_NOWRITE (L9): a disarm whose device path writes nothing (STATUS_NOT_SUPPORTED: -ENOTSUP) does not advance */
+        query(h, &qd);
+        ZeroMemory(&dis, sizeof(dis));
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_DISARM_TAS, &dis, sizeof(dis), &dis, sizeof(dis), &information);
+        printf("    [EVIDENCE] DISARM_TAS: ntstatus=0x%08lX status=0x%X\n", (unsigned long)st, dis.status);
+        query(h, &qe);
+        print_query("after DISARM_TAS", &qe);
+        if (st == (LONG)STATUS_NOT_SUPPORTED) {
+            meta_line("DISARM_NOWRITE", index, id->device_id, &qd, &qe, 0, "DISARM_TAS on its no-write path (STATUS_NOT_SUPPORTED)");
+        } else {
+            sprintf_s(why, sizeof(why), "DISARM_TAS completed 0x%08lX, not the no-write path this line judges; whether it attempted a "
+                      "write is not observable here (generation %llu -> %llu printed)", (unsigned long)st, qd.q.generation, qe.q.generation);
+            verdict("INCONCLUSIVE", "DISARM_NOWRITE", index, id->device_id, why);
+        }
+
+        /* SETUP_WRITE (L9): a SETUP_TAS that completes STATUS_SUCCESS wrote registers: exactly +1 */
+        ZeroMemory(&setup, sizeof(setup));
+        setup.config.base_time_s = (uint64_t)((phc2 + BASE_LEAD_NS) / NS_PER_SEC);
+        setup.config.cycle_time_s = (uint32_t)(CYCLE_NS / NS_PER_SEC);
+        setup.config.cycle_time_ns = (uint32_t)(CYCLE_NS % NS_PER_SEC);
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_SETUP_TAS, &setup, sizeof(setup), &setup, sizeof(setup), &information);
+        printf("    [EVIDENCE] SETUP_TAS: ntstatus=0x%08lX status=0x%X\n", (unsigned long)st, setup.status);
+        query(h, &qf);
+        print_query("after SETUP_TAS", &qf);
+        if (st == 0) {
+            meta_line("SETUP_WRITE", index, id->device_id, &qe, &qf, 1, "SETUP_TAS that completed STATUS_SUCCESS (registers written)");
+        } else {
+            sprintf_s(why, sizeof(why), "SETUP_TAS completed 0x%08lX: whether its device path attempted a write is not observable here "
+                      "(generation %llu -> %llu printed)", (unsigned long)st, qe.q.generation, qf.q.generation);
+            verdict("INCONCLUSIVE", "SETUP_WRITE", index, id->device_id, why);
+        }
+
+        /* SETUP_NOWRITE (L9, #503): a SETUP_TAS whose device path attempts no TAS write does not advance. The path is "PHC not
+         * running": SYSTIM reads 0 before the first write. SYSTIM is frozen generically (SET_HW_TIMESTAMPING enable=0) and zeroed
+         * through the Debug-only WRITE_REGISTER at the SYSTIML/SYSTIMH offsets the driver's HAL reports in QUERY_HW_SNAPSHOT
+         * version 2; this test holds no register offset and selects no family. Each setup step that does not establish the
+         * frozen zero is named (INCONCLUSIVE), never judged as L9. Owned restoration: the NIC cycle below (bring-up reseeds
+         * SYSTIM); timestamping is re-enabled first, reported only */
+#ifndef NDEBUG
+        {
+            AVB_HW_SNAPSHOT_REQUEST_V2 snap2;
+            AVB_HW_TIMESTAMPING_REQUEST hts;
+            AVB_REGISTER_REQUEST wr;
+            QUERY_READ qg, qh;
+            const AVB_HWREG_ENTRY *lo, *hi;
+            avb_u32 offL = 0, offH = 0;
+            LONG wst;
+
+            ZeroMemory(&snap2, sizeof(snap2));
+            snap2.version = AVB_HW_SNAPSHOT_VERSION_2;
+            information = 0;
+            st = avb_ioctl_ntstatus(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &snap2, sizeof(snap2), &snap2, sizeof(snap2), &information);
+            lo = &snap2.entries[AVB_HWREG_SYSTIML - 1];
+            hi = &snap2.entries[AVB_HWREG_SYSTIMH - 1];
+            printf("    [EVIDENCE] snapshot v2: ntstatus=0x%08lX information=%lu did=0x%04X luid=0x%016llX SYSTIML offset=0x%05X "
+                   "value=0x%08X state=%u, SYSTIMH offset=0x%05X value=0x%08X state=%u\n", (unsigned long)st, information,
+                   snap2.device_id, snap2.net_luid, lo->offset, lo->value, lo->state, hi->offset, hi->value, hi->state);
+            if (st != 0 || information != (DWORD)sizeof(snap2) || snap2.device_id != id->device_id || snap2.net_luid != id->net_luid ||
+                lo->state != AVB_HWREG_STATE_VALID || hi->state != AVB_HWREG_STATE_VALID) {
+                sprintf_s(why, sizeof(why), "the version-2 snapshot did not report both SYSTIM offsets for this adapter (ntstatus=0x%08lX, "
+                          "%lu bytes, states %u/%u): the no-write path cannot be established", (unsigned long)st, information,
+                          lo->state, hi->state);
+                verdict("INCONCLUSIVE", "SETUP_NOWRITE", index, id->device_id, why);
+            } else {
+                offL = lo->offset;
+                offH = hi->offset;
+                ZeroMemory(&hts, sizeof(hts));
+                hts.enable = 0;
+                hts.timer_mask = 0x1;
+                information = 0;
+                st = avb_ioctl_ntstatus(h, IOCTL_AVB_SET_HW_TIMESTAMPING, &hts, sizeof(hts), &hts, sizeof(hts), &information);
+                printf("    [EVIDENCE] SET_HW_TIMESTAMPING enable=0: ntstatus=0x%08lX TSAUXC 0x%08X -> 0x%08X\n", (unsigned long)st,
+                       hts.previous_tsauxc, hts.current_tsauxc);
+                wst = (LONG)0xFFFFFFFF;
+                if (st == 0) {
+                    ZeroMemory(&wr, sizeof(wr));
+                    wr.offset = offL;
+                    wr.value = 0;
+                    wst = avb_ioctl_ntstatus(h, IOCTL_AVB_WRITE_REGISTER, &wr, sizeof(wr), &wr, sizeof(wr), &information);
+                    if (wst == 0) {
+                        ZeroMemory(&wr, sizeof(wr));
+                        wr.offset = offH;
+                        wr.value = 0;
+                        wst = avb_ioctl_ntstatus(h, IOCTL_AVB_WRITE_REGISTER, &wr, sizeof(wr), &wr, sizeof(wr), &information);
+                    }
+                    printf("    [EVIDENCE] WRITE_REGISTER SYSTIML(0x%05X)=0, SYSTIMH(0x%05X)=0: ntstatus=0x%08lX\n", offL, offH,
+                           (unsigned long)wst);
+                }
+                ZeroMemory(&snap2, sizeof(snap2));
+                snap2.version = AVB_HW_SNAPSHOT_VERSION_2;
+                (void)avb_ioctl_ntstatus(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &snap2, sizeof(snap2), &snap2, sizeof(snap2), &information);
+                printf("    [EVIDENCE] SYSTIM read back: SYSTIML=0x%08X (state %u) SYSTIMH=0x%08X (state %u)\n", lo->value, lo->state,
+                       hi->value, hi->state);
+                if (st != 0 || wst != 0 || lo->state != AVB_HWREG_STATE_VALID || hi->state != AVB_HWREG_STATE_VALID ||
+                    lo->value != 0 || hi->value != 0) {
+                    sprintf_s(why, sizeof(why), "SYSTIM was not established frozen at 0 (timestamping 0x%08lX, writes 0x%08lX, read back "
+                              "0x%08X/0x%08X): the no-write path was not reached", (unsigned long)st, (unsigned long)wst, lo->value,
+                              hi->value);
+                    verdict("INCONCLUSIVE", "SETUP_NOWRITE", index, id->device_id, why);
+                } else {
+                    query(h, &qg);
+                    print_query("before the no-write SETUP_TAS", &qg);
+                    setup.status = 0;
+                    information = 0;
+                    st = avb_ioctl_ntstatus(h, IOCTL_AVB_SETUP_TAS, &setup, sizeof(setup), &setup, sizeof(setup), &information);
+                    printf("    [EVIDENCE] SETUP_TAS with SYSTIM frozen at 0: ntstatus=0x%08lX status=0x%X\n", (unsigned long)st,
+                           setup.status);
+                    query(h, &qh);
+                    print_query("after the no-write SETUP_TAS", &qh);
+                    if (st == 0) {
+                        sprintf_s(why, sizeof(why), "SETUP_TAS completed STATUS_SUCCESS with SYSTIM frozen at 0: the no-write path was "
+                                  "not taken (generation %llu -> %llu printed)", qg.q.generation, qh.q.generation);
+                        verdict("INCONCLUSIVE", "SETUP_NOWRITE", index, id->device_id, why);
+                    } else {
+                        meta_line("SETUP_NOWRITE", index, id->device_id, &qg, &qh, 0,
+                                  "SETUP_TAS refused before its first TAS write (SYSTIM frozen at 0)");
+                    }
+                }
+                ZeroMemory(&hts, sizeof(hts));
+                hts.enable = 1;
+                hts.timer_mask = 0x1;
+                st = avb_ioctl_ntstatus(h, IOCTL_AVB_SET_HW_TIMESTAMPING, &hts, sizeof(hts), &hts, sizeof(hts), &information);
+                printf("    [EVIDENCE] SET_HW_TIMESTAMPING enable=1 before the cleanup: ntstatus=0x%08lX TSAUXC 0x%08X -> 0x%08X "
+                       "(SYSTIM is reseeded by the NIC cycle)\n", (unsigned long)st, hts.previous_tsauxc, hts.current_tsauxc);
+            }
+        }
+#else
+        verdict("INCONCLUSIVE", "SETUP_NOWRITE", index, id->device_id,
+                "Release build: WRITE_REGISTER is Debug-only, so the L9 no-write path is not executable here (never PASS)");
+#endif
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+        return;
+    }
 
     if (g_mode == MODE_FAULT) {
         /* Function-71 withdrawal check (D-C, Q 2026-11-21, supplementary resolution on #482/#357): the request this legacy
@@ -2585,6 +2939,188 @@ static BOOL holdctl_outstanding(OWNED_WORKER *w, DWORD wait_ms, INT64 *net_ns)
 }
 #endif
 
+/* ---- --metadata-events, TC-TASACT-META-002 and -003: ACTIVATE commits while a PHC reseed is held (#357 F1, #505 control) ---- */
+#ifndef NDEBUG
+#define META_RACE_ARM_MS      5000u
+#define META_RACE_HOLDING_MS  3000u    /* bound for observing HOLDING after the reseed was started */
+#define META_RACE_WORKER_MS   10000u   /* each operation: the driver holds at most 2000 ms */
+
+typedef struct {
+    HANDLE h;
+    AVB_TAS_OP_REQUEST op;
+    LONG st;
+    DWORD information;
+} META_RACE_ACT;
+
+static DWORD WINAPI meta_race_activate(LPVOID p)
+{
+    META_RACE_ACT *a = (META_RACE_ACT *)p;
+
+    a->st = avb_ioctl_ntstatus(a->h, IOCTL_AVB_TAS_ACTIVATE, &a->op, sizeof(a->op), &a->op, sizeof(a->op), &a->information);
+    CloseHandle(a->h);
+    return 0;
+}
+#endif
+
+/** The race was not started: every line of the case is INCONCLUSIVE with the reason, never PASS */
+static void meta_race_not_run(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BOOL back, const char *reason)
+{
+    verdict("INCONCLUSIVE", "WINDOW", index, id->device_id, reason);
+    verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, reason);
+    if (back) {
+        verdict("INCONCLUSIVE", "NEW_PHC", index, id->device_id, reason);
+    }
+}
+
+/** h: bound control and query handle; ha: bound handle of the ACTIVATE, closed here. Every mutation is undone by the caller's
+ *  owned NIC cycle. Each line is its own measurement; what was not established is INCONCLUSIVE, never PASS. back: META-003 */
+static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame, BOOL back)
+{
+#ifdef NDEBUG
+    (void)h; (void)frame;
+    CloseHandle(ha);
+    meta_race_not_run(index, id, back, "Release build: the #505 hold control is Debug-only, not exercised (never PASS)");
+#else
+    IOCTL_VERSION ver = {0};
+    AVB_DEBUG_PHC_HOLD_REQUEST armed, r, d;
+    HOLDCTL_PHC_JOB job, reseed;
+    META_RACE_ACT act, done;
+    OWNED_OP *wp, *wa;   /* registered: cleanup_and_verify waits for them itself and never judges a final state while one is open */
+    QUERY_READ q0, q1;
+    DWORD br = 0, info = 0, t0;
+    LONG st, stq;
+    const INT64 step_ns = back ? -(INT64)META_BACK_NS : (INT64)META_OFFSET_NS;
+    long long phc = 0, phc_after = 0, base;
+    BOOL holding = FALSE, sent = FALSE, held, settled, real, phc_read;
+    TAS_RACE_MARKERS m;
+    TAS_RACE_ORDER order;
+    unsigned polls = 0;
+    char why[700];
+
+    wp = owned_op_new(&g_ops, id->net_luid);
+    wa = owned_op_new(&g_ops, id->net_luid);
+    if (wp == NULL || wa == NULL) {
+        CloseHandle(ha);
+        meta_race_not_run(index, id, back, "no memory to own the operations of the race: not started");
+        return;
+    }
+    if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &ver, sizeof(ver), &ver, sizeof(ver), &br, NULL) || br < sizeof(ver) ||
+        !(ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
+        CloseHandle(ha);
+        meta_race_not_run(index, id, back, "no Debug driver (GET_VERSION): the hold control is not served, not exercised (never PASS)");
+        return;
+    }
+    query(h, &q0);
+    print_query("before the race", &q0);
+    if (!query_valid(&q0) || q0.q.generation == 0 || q0.q.context_epoch == 0 || !read_phc(h, &phc)) {
+        CloseHandle(ha);
+        meta_race_not_run(index, id, back, "no valid non-zero generation/epoch pair or no PHC: the race request cannot be built");
+        return;
+    }
+    /* BaseT leaves the whole hold plus the usual lead, so an ACTIVATE that has to wait for the reseed still has its margin */
+    base = (phc + BASE_LEAD_NS + (long long)META_RACE_HOLD_MS * NS_PER_MS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+    if (back) {   /* META-003: the last cycle boundary the old PHC has passed; seconds ahead once the PHC is stepped back */
+        base = phc / CYCLE_NS * CYCLE_NS;
+        if (phc < 2 * (long long)META_BACK_NS) {
+            CloseHandle(ha);
+            meta_race_not_run(index, id, back, "the PHC is too small to be stepped back by the test's 5 s: not exercised");
+            return;
+        }
+    }
+    ZeroMemory(&act, sizeof(act));
+    act.h = ha;
+    act.st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    build_op(&act.op, id->net_luid, &q0.q, base, frame);
+    act.op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+    done = act;
+    st = holdctl(h, AVB_DEBUG_PHC_HOLD_ARM, META_RACE_HOLD_MS, META_RACE_ARM_MS, &armed, &info);
+    holdctl_print("ARM", st, info, &armed);
+    if (st != 0 || armed.state != AVB_DEBUG_PHC_HOLD_ARMED || armed.arm_id == 0) {
+        CloseHandle(ha);
+        sprintf_s(why, sizeof(why), "ARM completed 0x%08lX: the reseed cannot be held, the race was not started", (unsigned long)st);
+        meta_race_not_run(index, id, back, why);
+        return;
+    }
+    ZeroMemory(&job, sizeof(job));
+    ZeroMemory(&reseed, sizeof(reseed));
+    job.luid = id->net_luid;
+    job.offset_ns = step_ns;
+    reseed.st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    t0 = GetTickCount();
+    held = owned_worker_start(&wp->worker, holdctl_phc_worker, &job, sizeof(job));
+    while (held && !holding && GetTickCount() - t0 < META_RACE_HOLDING_MS) {
+        stq = holdctl(h, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+        polls++;
+        holding = stq == 0 && r.arm_id == armed.arm_id && r.state == AVB_DEBUG_PHC_HOLD_HOLDING;
+        if (!holding) { Sleep(1); }
+    }
+    if (holding) {
+        sent = owned_worker_start(&wa->worker, meta_race_activate, &act, sizeof(act));   /* arrives while the reseed is held */
+    }
+    if (!sent) {
+        CloseHandle(ha);
+    }
+    (void)holdctl(h, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &info);   /* an unused arm only; no-op while HOLDING */
+    (void)owned_worker_wait(&wa->worker, META_RACE_WORKER_MS);
+    (void)owned_worker_wait(&wp->worker, META_RACE_WORKER_MS);
+    settled = wp->worker.state != OWNED_WORKER_RUNNING && wa->worker.state != OWNED_WORKER_RUNNING;
+    if (wp->worker.state == OWNED_WORKER_DONE) { reseed = *(const HOLDCTL_PHC_JOB *)owned_worker_result(&wp->worker); }
+    if (wa->worker.state == OWNED_WORKER_DONE) { done = *(const META_RACE_ACT *)owned_worker_result(&wa->worker); }
+    printf("    [EVIDENCE] HOLDING observed=%d after %u polls; PHC_OFFSET_ADJUST %+lld ns: started=%d ended=%d ntstatus=0x%08lX status=0x%X "
+           "%lu ms; ACTIVATE op=0x%016llX gen=%llu epoch=%llu base=%lld (PHC %lld): sent=%d ended=%d ntstatus=0x%08lX information=%lu\n",
+           holding, polls, (long long)step_ns, held, wp->worker.state == OWNED_WORKER_DONE, (unsigned long)reseed.st, reseed.status,
+           (unsigned long)reseed.ms, act.op.client_op_id, act.op.expected_generation, act.op.context_epoch, base, phc, sent,
+           wa->worker.state == OWNED_WORKER_DONE, (unsigned long)done.st, (unsigned long)done.information);
+    stq = holdctl(h, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
+    holdctl_print("QUERY after the race", stq, info, &r);
+    query(h, &q1);
+    print_query("after the race", &q1);
+
+    phc_read = read_phc(h, &phc_after);
+
+    /* Both operations are this test's own and really took effect; the order then comes from the markers alone */
+    real = settled && sent && stq == 0 && r.arm_id == armed.arm_id && r.net_luid == id->net_luid && r.context_epoch == q0.q.context_epoch &&
+           r.state == AVB_DEBUG_PHC_HOLD_RELEASED && r.phc_source == AVB_DEBUG_PHC_HOLD_SRC_PHC_OFFSET_ADJUST && reseed.opened &&
+           reseed.st == 0 && r.phc_rc == 0 && r.activate_op_id == act.op.client_op_id && r.activate_result == AVB_TAS_ACT_COMMITTED &&
+           done.st == 0 && done.information == (DWORD)sizeof(done.op);
+    m.hold_begin = r.hold_begin_seq;
+    m.hold_end = r.hold_end_seq;
+    m.arrival = r.activate_arrival_seq;
+    m.commit = r.activate_commit_seq;
+    m.write_enter = r.phc_write_enter_seq;
+    m.write_done = r.phc_write_done_seq;
+    order = real ? tas_race_order(&m) : TAS_RACE_NOT_ESTABLISHED;
+    sprintf_s(why, sizeof(why), "markers: hold %llu..%llu, ACTIVATE arrival %llu, commit %llu, PHC write %llu..%llu; reseed 0x%08lX rc %d, ACTIVATE "
+              "0x%08lX result %u, operations ended %d: %s", m.hold_begin, m.hold_end, m.arrival, m.commit, m.write_enter, m.write_done,
+              (unsigned long)reseed.st, r.phc_rc, (unsigned long)done.st, r.activate_result, settled,
+              order == TAS_RACE_COMMIT_FIRST ? "the commit precedes the held PHC write" :
+              (order == TAS_RACE_WRITE_FIRST ? "the held PHC write precedes the commit" : "no order of both operations established (not judged)"));
+    verdict(order != TAS_RACE_NOT_ESTABLISHED ? "PASS" : "INCONCLUSIVE", "WINDOW", index, id->device_id, why);
+    if (order == TAS_RACE_NOT_ESTABLISHED) {
+        sprintf_s(why, sizeof(why), "no established order (see WINDOW): the required step is unknown (generation %llu -> %llu printed)",
+                  q0.q.generation, q1.q.generation);
+        verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, why);
+    } else {
+        meta_line("GENERATION", index, id->device_id, &q0, &q1, tas_race_required_step(order), order == TAS_RACE_COMMIT_FIRST ?
+                  "commit, then the held PHC reseed on the retained schedule (L7 +1, L10 +1)" : "PHC reseed on the CLEAN record, then the commit (L7 +1)");
+    }
+    if (back) {
+        const TAS_RACE_PHC used = phc_read ? tas_race_phc_used(order, base, phc, phc_after) : TAS_RACE_PHC_NOT_SHOWN;
+        sprintf_s(why, sizeof(why), "BaseT %lld, old PHC %lld (BaseT passed on it), PHC after the step %s%lld: %s", base, phc, phc_read ? "" : "unread ",
+                  phc_after, used == TAS_RACE_PHC_NEW ? "committed after the PHC write, so judged by the new PHC" :
+                  (used == TAS_RACE_PHC_PASSED_BASE ? "committed before the PHC write although BaseT had passed" :
+                  "the ACTIVATE did not commit after the PHC write: which PHC it was judged by is not shown"));
+        verdict(used == TAS_RACE_PHC_NEW ? "PASS" : (used == TAS_RACE_PHC_PASSED_BASE ? "FAIL" : "INCONCLUSIVE"), "NEW_PHC", index, id->device_id, why);
+    }
+    if (settled) {
+        verdict("PASS", "SETTLED", index, id->device_id, "the PHC reseed and the ACTIVATE ended within their bounds");
+    } else {
+        verdict("INCONCLUSIVE", "SETTLED", index, id->device_id, "the PHC reseed or the ACTIVATE did not end within its bound: the race is not judged, "
+                "and the cleanup decides whether a final state can be established");
+    }
+#endif
+}
+
 static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
 #ifdef NDEBUG
@@ -3023,6 +3559,7 @@ static void reset_case_state(const TAS_ACT_CASE *c)
     g_mode = c->mode;
     g_case = c->case_id;
     g_fault_case = 0;
+    g_meta_case = 0;
     g_failed = g_blocked = g_ran = 0;
     g_tas_adapters = 0;
     g_capture_luid = 0;
@@ -3117,6 +3654,17 @@ static int run_case(void)
             g_case = "TC-TASACT-FAULT-001-F2";
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-FAULT-001";
+        } else if (g_mode == MODE_META) {
+            /* #357: the sequential events, then the F1 interleaving twice, each a complete run with its own pre-state and owned cleanup */
+            g_meta_case = 1;
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 2;
+            g_case = "TC-TASACT-META-002";
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 3;
+            g_case = "TC-TASACT-META-003";
+            run_adapter(ids[i].index, &ids[i]);
+            g_case = "TC-TASACT-META-001";
         } else {
             run_adapter(ids[i].index, &ids[i]);
         }

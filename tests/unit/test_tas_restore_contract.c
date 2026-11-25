@@ -2008,6 +2008,49 @@ static void test_64_activate_cases(void)
     EXPECT_EQ("a run without any case is never successful", tas_act_run_exit(sel, ex) != 0, 1);
 }
 
+/* TC-MOCK-066: order of a held PHC reseed and an ACTIVATE that arrived during the hold, and the generation step it requires (#357 F1; test
+ * logic only). OBSERVED: the markers of the hardware run 2026-11-24 22:15 (I226 0x125B, Debug driver 9FBE5DCA, test 1BDE3CB8; archived in
+ * logs/issue357/f1-red-20261124/hw-2215-9FBE5DCA): generation 1 -> 2 where +2 is required. Every other marker set is UNVERIFIED */
+static void test_66_race_order(void)
+{
+    const TAS_RACE_MARKERS observed = { 2, 5, 3, 4, 6, 7 };       /* hold_begin, hold_end, arrival, commit, write_enter, write_done */
+    const TAS_RACE_MARKERS write_first = { 2, 4, 3, 7, 5, 6 };    /* UNVERIFIED: the ACTIVATE waited for the reseed */
+    const TAS_RACE_MARKERS after_hold = { 2, 4, 3, 5, 6, 7 };     /* UNVERIFIED: commit between hold end and write entry */
+    TAS_RACE_MARKERS m;
+
+    printf("\n[TC-MOCK-066] #357 order of a held PHC reseed and an ACTIVATE (test logic only)\n");
+    EXPECT_EQ("the observed run: the commit precedes the write", tas_race_order(&observed), TAS_RACE_COMMIT_FIRST);
+    EXPECT_EQ("... requires +2 (the observed +1 is the F1 RED)", tas_race_required_step(tas_race_order(&observed)), 2u);
+    EXPECT_EQ("the write precedes the commit: a valid order, not a lost window", tas_race_order(&write_first), TAS_RACE_WRITE_FIRST);
+    EXPECT_EQ("... requires +1", tas_race_required_step(tas_race_order(&write_first)), 1u);
+    EXPECT_EQ("a commit after the hold but before the write entry precedes the write", tas_race_order(&after_hold), TAS_RACE_COMMIT_FIRST);
+
+    m = observed; m.commit = 0;
+    EXPECT_EQ("no commit establishes no order", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    EXPECT_EQ("... and requires no step", tas_race_required_step(tas_race_order(&m)), 0u);
+    m = observed; m.arrival = 0;
+    EXPECT_EQ("no arrival establishes no order", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = write_first; m.arrival = 1;
+    EXPECT_EQ("an arrival before the hold is not the interleaving", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = write_first; m.hold_end = 3; m.arrival = 4;
+    EXPECT_EQ("an arrival after the hold is not the interleaving", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = observed; m.hold_begin = 0;
+    EXPECT_EQ("a reseed that was not held is not the interleaving", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = observed; m.write_enter = 0; m.write_done = 0;
+    EXPECT_EQ("a reseed without a write establishes no order", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = write_first; m.write_enter = 5; m.commit = 6; m.write_done = 7;
+    EXPECT_EQ("a commit inside the write establishes no order", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+    m = observed; m.commit = 3;
+    EXPECT_EQ("a commit that does not follow its arrival establishes no order", tas_race_order(&m), TAS_RACE_NOT_ESTABLISHED);
+
+    EXPECT_EQ("write first, BaseT passed on the old PHC only: the new PHC was used",
+              tas_race_phc_used(TAS_RACE_WRITE_FIRST, 24, 25, 21), TAS_RACE_PHC_NEW);
+    EXPECT_EQ("commit first with a passed BaseT is a violation", tas_race_phc_used(TAS_RACE_COMMIT_FIRST, 24, 25, 21), TAS_RACE_PHC_PASSED_BASE);
+    EXPECT_EQ("no order: not shown", tas_race_phc_used(TAS_RACE_NOT_ESTABLISHED, 24, 25, 21), TAS_RACE_PHC_NOT_SHOWN);
+    EXPECT_EQ("a BaseT valid on both clocks shows nothing", tas_race_phc_used(TAS_RACE_WRITE_FIRST, 26, 25, 21), TAS_RACE_PHC_NOT_SHOWN);
+    EXPECT_EQ("a clock that was not stepped back shows nothing", tas_race_phc_used(TAS_RACE_WRITE_FIRST, 24, 25, 26), TAS_RACE_PHC_NOT_SHOWN);
+}
+
 /* TC-MOCK-065: a worker that outlives a bounded wait stays owned until its completion is established (#505, PR #518 review; test logic
  * only, real threads, no driver). Its storage is not read, reused or freed before, a wait that fails settles nothing, a late completion
  * is collected with its real result, and no cleanup is judged as verified while an operation may still be running */
@@ -2094,6 +2137,69 @@ static void test_65_owned_worker(void)
     EXPECT_EQ("unsettled, deviation measured: the final state is unsettled", holdctl_cleanup(FALSE, TRUE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
 }
 
+/* TC-MOCK-067: a cleanup while an operation of the test may still be running (#357 race, review 2026-11-25; test logic only, real threads,
+ * no driver). Whatever was measured, no final restoration PASS and no CLEANUP PASS; a measured failure stays a failure; the operation
+ * stays owned until its end was observed; other adapters are not affected */
+static void test_67_pending_operations(void)
+{
+    const unsigned long long adapter_a = 0x0006008006000000ull, adapter_b = 0x0006008005000000ull;
+    volatile LONG observed = 0;
+    OWNED_OP *ops = NULL, *op;
+    OWNED_WORKER_JOB init;
+    TAS_ACT_RESTORE_EVIDENCE e, ok;
+    HANDLE go = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+    printf("\n[TC-MOCK-067] #357 no restoration PASS while an operation of the test may still be running (test logic only)\n");
+    if (go == NULL) {
+        EXPECT_EQ("event available", 0, 1);
+        return;
+    }
+    init.go = go;
+    init.observed = &observed;
+    init.input = 41;
+    init.output = 0;
+    ZeroMemory(&ok, sizeof(ok));
+    ok.cycle_completed = TRUE; ok.adapter_returned = TRUE; ok.driver_clean = TRUE; ok.regs_measured = TRUE;
+    ok.tsn_mode_off = TRUE; ok.tx_probed = TRUE; ok.tx_on_wire = TRUE;
+
+    EXPECT_EQ("no operation issued: settled", owned_ops_settled(&ops, adapter_a, 0), TRUE);
+    op = owned_op_new(&ops, adapter_a);
+    EXPECT_EQ("an operation is registered before it is started", op != NULL && ops == op, 1);
+    EXPECT_EQ("a registered operation that was never started is settled", owned_ops_settled(&ops, adapter_a, 0), TRUE);
+    EXPECT_EQ("... and not kept", ops == NULL, 1);
+
+    (void)owned_op_new(&ops, adapter_b);
+    op = owned_op_new(&ops, adapter_a);
+    EXPECT_EQ("the operation starts", op != NULL && owned_worker_start(&op->worker, owned_worker_late, &init, sizeof(init)), TRUE);
+    EXPECT_EQ("an operation that has not ended is not settled", owned_ops_settled(&ops, adapter_a, 50), FALSE);
+    EXPECT_EQ("... and asking again does not settle it", owned_ops_settled(&ops, adapter_a, 0), FALSE);
+    EXPECT_EQ("... it stays owned with its storage", op != NULL && op->worker.state == OWNED_WORKER_RUNNING && op->worker.ctx != NULL, 1);
+    EXPECT_EQ("another adapter is not affected", owned_ops_settled(&ops, adapter_b, 0), TRUE);
+
+    e = ok;
+    e.operations_pending = !owned_ops_settled(&ops, adapter_a, 0);
+    EXPECT_EQ("everything measured good, operation open: no restoration PASS", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    EXPECT_EQ("cycle completed, operation open: no CLEANUP PASS", tas_act_cycle(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e.regs_measured = FALSE;
+    EXPECT_EQ("unmeasured registers, operation open: unverified", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.operations_pending = TRUE; e.regs_differing = 1;
+    EXPECT_EQ("a measured residue stays a failure while an operation is open", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.operations_pending = TRUE; e.cycle_completed = FALSE;
+    EXPECT_EQ("an incomplete cycle stays a failure while an operation is open", tas_act_cycle(&e), TAS_ACT_RESTORE_INCOMPLETE);
+
+    SetEvent(go);
+    EXPECT_EQ("a late end is established", owned_ops_settled(&ops, adapter_a, 10000), TRUE);
+    EXPECT_EQ("... with its real effect", (int)observed, 41);
+    EXPECT_EQ("... and nothing is owned afterwards", ops == NULL, 1);
+    e = ok;
+    e.operations_pending = !owned_ops_settled(&ops, adapter_a, 0);
+    EXPECT_EQ("settled before the cycle, everything measured good: complete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+    EXPECT_EQ("settled before the cycle, cycle completed: complete", tas_act_cycle(&e), TAS_ACT_RESTORE_COMPLETE);
+    e.adapter_returned = FALSE;
+    EXPECT_EQ("settled, adapter not back: incomplete", tas_act_cycle(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    CloseHandle(go);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2143,6 +2249,8 @@ int main(void) {
     test_63_hold_generation();
     test_64_activate_cases();
     test_65_owned_worker();
+    test_66_race_order();
+    test_67_pending_operations();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

@@ -168,12 +168,14 @@ typedef struct {
     BOOL tx_probed;           /* tagged frames were sent and the observer was alive */
     BOOL tx_on_wire;          /* the baseline share arrived, none held */
     TAS_ACT_PHC_FACT phc;     /* reported, never used below */
+    BOOL operations_pending;  /* an operation this test issued on the adapter was not observed to have ended before the cycle */
 } TAS_ACT_RESTORE_EVIDENCE;
 
 typedef enum {
     TAS_ACT_RESTORE_COMPLETE = 0,
     TAS_ACT_RESTORE_INCOMPLETE,   /* an observed failure: residue, mode on, a dirty record, no TX, or no cycle */
-    TAS_ACT_RESTORE_UNVERIFIED    /* nothing observed failed, but the registers or the wire were not measured */
+    TAS_ACT_RESTORE_UNVERIFIED    /* nothing observed failed, but the registers or the wire were not measured, or an operation of the
+                                     test may still change what was measured */
 } TAS_ACT_RESTORE_CLASS;
 
 static __inline TAS_ACT_RESTORE_CLASS tas_act_restore(const TAS_ACT_RESTORE_EVIDENCE *e)
@@ -182,10 +184,19 @@ static __inline TAS_ACT_RESTORE_CLASS tas_act_restore(const TAS_ACT_RESTORE_EVID
         (e->regs_measured && (e->regs_differing != 0 || !e->tsn_mode_off))) {
         return TAS_ACT_RESTORE_INCOMPLETE;
     }
-    if (!e->regs_measured || !e->tx_probed) {
+    if (!e->regs_measured || !e->tx_probed || e->operations_pending) {
         return TAS_ACT_RESTORE_UNVERIFIED;
     }
     return TAS_ACT_RESTORE_COMPLETE;
+}
+
+/* The CLEANUP line: the NIC cycle itself ran and the adapter came back, with no operation of the test left to undo it */
+static __inline TAS_ACT_RESTORE_CLASS tas_act_cycle(const TAS_ACT_RESTORE_EVIDENCE *e)
+{
+    if (!e->cycle_completed || !e->adapter_returned) {
+        return TAS_ACT_RESTORE_INCOMPLETE;
+    }
+    return e->operations_pending ? TAS_ACT_RESTORE_UNVERIFIED : TAS_ACT_RESTORE_COMPLETE;
 }
 
 /* The PHC across the cycle against wall time. A NIC cycle reseeds it, which #361 reports as a discontinuity */
@@ -658,4 +669,50 @@ static __inline TAS_HOLD_GEN_CLASS tas_hold_generation(const TAS_HOLD_EVIDENCE *
     }
     *transitions = (unsigned)(t0 + t1);
     return e->post_generation - e->pre_generation == (avb_u64)*transitions ? TAS_HOLD_GEN_PASS : TAS_HOLD_GEN_FAIL;
+}
+
+/* ---- --metadata-events, TC-TASACT-META-002/-003 (#357 F1; #352 R1 L7/L8/L10; #505 markers): a PHC reseed held before its physical
+ * write and an ACTIVATE that arrived while it was held. Both orders are valid; the order decides which generation step is required,
+ * and it is taken from the driver's markers only. Pure rules, offline case TC-MOCK-066 */
+typedef struct {
+    unsigned long long hold_begin, hold_end, arrival, commit, write_enter, write_done;   /* 0 = marker not taken */
+} TAS_RACE_MARKERS;
+
+typedef enum { TAS_RACE_NOT_ESTABLISHED = 0, TAS_RACE_COMMIT_FIRST, TAS_RACE_WRITE_FIRST } TAS_RACE_ORDER;
+
+/* The ACTIVATE arrived inside the hold, the write followed the hold, and the commit lies strictly before or after the write.
+ * Anything else (no commit, outside the hold, inside the write) establishes no order */
+static __inline TAS_RACE_ORDER tas_race_order(const TAS_RACE_MARKERS *m)
+{
+    if (m->hold_begin == 0 || m->arrival <= m->hold_begin || m->hold_end <= m->arrival || m->write_enter <= m->hold_end ||
+        m->write_done <= m->write_enter || m->commit <= m->arrival) {
+        return TAS_RACE_NOT_ESTABLISHED;
+    }
+    if (m->commit < m->write_enter) {
+        return TAS_RACE_COMMIT_FIRST;
+    }
+    return m->commit > m->write_done ? TAS_RACE_WRITE_FIRST : TAS_RACE_NOT_ESTABLISHED;
+}
+
+/* Required step of the generation across both operations: commit +1, and +1 more when the reseed hit the retained schedule.
+ * 0 = no order established, no step is required */
+static __inline unsigned tas_race_required_step(TAS_RACE_ORDER order)
+{
+    return order == TAS_RACE_COMMIT_FIRST ? 2u : (order == TAS_RACE_WRITE_FIRST ? 1u : 0u);
+}
+
+/* Which PHC the activation used, when the held reseed steps the PHC back and BaseT had already passed on the old one (base <=
+ * old_phc, read before the race; the old PHC refuses it, TAS-DR-08): only the new PHC permits the commit. phc_after < old_phc shows
+ * independently that the clock was stepped back. A commit before the write is a commit of a passed BaseT */
+typedef enum { TAS_RACE_PHC_NOT_SHOWN = 0, TAS_RACE_PHC_NEW, TAS_RACE_PHC_PASSED_BASE } TAS_RACE_PHC;
+
+static __inline TAS_RACE_PHC tas_race_phc_used(TAS_RACE_ORDER order, long long base, long long old_phc, long long phc_after)
+{
+    if (base > old_phc || phc_after >= old_phc) {
+        return TAS_RACE_PHC_NOT_SHOWN;
+    }
+    if (order == TAS_RACE_WRITE_FIRST) {
+        return TAS_RACE_PHC_NEW;
+    }
+    return order == TAS_RACE_COMMIT_FIRST ? TAS_RACE_PHC_PASSED_BASE : TAS_RACE_PHC_NOT_SHOWN;
 }

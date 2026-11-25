@@ -81,7 +81,10 @@ typedef struct _intel_device_ops {
     int (*clear_aux_timestamp_flag)(device_t *dev, uint8_t aux_index);  // Clear AUTT flag for aux timestamp
     
     // TSN operations (optional - can be NULL for basic devices)
-    int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
+    /* Legacy SETUP_TAS (IOCTL 26). write_attempted (may be NULL): set to 0 on entry and to 1 before the first TAS register
+     * write, also when that write or a later step fails, so the caller advances the TAS generation only for an attempted write
+     * (#352 R1 L9) */
+    int (*setup_tas)(device_t *dev, struct tsn_tas_config *config, int *write_attempted);
     /* First gate schedule on a clean adapter, HOLD, the versioned IOCTL_AVB_TAS_ACTIVATE (#357 producer; #365 R7 steps 6-9,
      * R8). Called under the TAS claim and the TAS register lock (no logging). link_mbps: the driver-owned K8 speed sampled
      * once under the claim (#351 R2, non-zero); flags and debug_fault: from the request, header-validated; min_margin_ns: the
