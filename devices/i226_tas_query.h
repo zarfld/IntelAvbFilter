@@ -10,17 +10,17 @@
  * or without the TAS register lock (contended: a TAS operation holds it or waits for it) nothing is read at all.
  *
  * Status (#365 12.4): S1 unobservable inputs give UNKNOWN. The driver record is the interim three-valued state of #362
- * decision 5 (CLEAN, ARMED, DIRTY). This driver retains no commit timing yet (C6, fed by the activation of #357), and no
- * record field is held for the field-specific reconciliation, so a record that is not CLEAN gives current UNKNOWN
- * COMMIT_INFO_LOST and next UNKNOWN SLOT_UNATTRIBUTED: what cannot be established stays UNKNOWN. Without a record: R3
+ * decision 5 (CLEAN, ARMED, DIRTY), with the schedule and commit bracket the last commit left (C6, src/avb_tas_retained.h).
+ * Under a record: i226_tas_query_record (R1, R2, S2 to S4). What cannot be established stays UNKNOWN. Without a record: R3
  * (TSN on, windows off their baseline or shadow non-zero) gives current INCONSISTENT HW_ARMED_NO_RECORD and next UNKNOWN
  * SLOT_UNATTRIBUTED; R4 gives NONE and NONE. BaseT is reported only; it is used for BASE_FAR_AHEAD in R3 and for
- * BASET_TORN, never compared with a target. HARDWARE_VERIFIED is never set (#381).
+ * BASET_TORN, never compared with a target. HARDWARE_VERIFIED is never set (#381), INFERRED_ACTIVE not while K8 is unverified.
  *
  * Restoration (#365 12.5) is advisory, from the SSOT observed baselines only; ENDQT accepts its _ALT value only as the
  * DES-C-TAS-010 3.6 window alternative. DTXMXPKTSZ is read and decoded with its mask and _SCALE, never substituted.
  */
 #pragma once
+#include "../src/avb_tas_retained.h"
 #include "i226_tas_activate.h"   /* I226_TAS_IO, include/avb_ioctl.h, intel-ethernet-regs/gen/i226_regs.h */
 
 #define I226_TAS_QUERY_REGS      18u                 /* AVB_TAS_REGS read_failed bits 0 to 17 */
@@ -55,12 +55,107 @@ static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
     return 1;
 }
 
+#define I226_TAS_QUERY_INCONSISTENT (AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD | AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | \
+        AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH | \
+        AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH | AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED | AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT)
+
+/* The fields compared under a record (#365 12.4): windows and cycle, through the SSOT masks. Never BASET, the shadow cycle or TXQCTL */
+static __inline avb_u32 i226_tas_query_mismatch(const AVB_TAS_REGS *g, const AVB_TAS_SCHEDULE *s)
+{
+    avb_u32 reasons = 0;
+    unsigned q;
+
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        if (I226_TAS_Q_FIELD(I226_STQT, START_TIME, g->stqt[q]) != s->queue[q].start_ns ||
+            I226_TAS_Q_FIELD(I226_ENDQT, END_TIME, g->endqt[q]) != s->queue[q].end_ns) {
+            reasons |= AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+        }
+    }
+    if (I226_TAS_Q_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, g->qbvcyclet) != s->cycle_ns) {
+        reasons |= AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
+    }
+    return reasons;
+}
+
+/*
+ * The slots and the commit information under a record (ARMED or DIRTY). retained: one published state with the record, NULL when the caller
+ * has no coherent one. Precedence #365 12.4 S1 to S4, every applicable reason bit; nothing is written (the query is an observer).
+ * - A dirty record, or one without a retained schedule (SETUP_TAS on a clean adapter), has no expected windows: UNKNOWN COMMIT_INFO_LOST.
+ * - PHC_RESET_SINCE_COMMIT: a PHC write issued since the commit (either direction), or this pass read the PHC below the commit's own
+ *   reading or moving backward. The target is then not compared with this PHC.
+ * - Past the target: UNKNOWN LINK_EVENTS_UNOBSERVED, never INFERRED_ACTIVE while K8 is unverified. HARDWARE_VERIFIED is never set (#381).
+ */
+static __inline void i226_tas_query_record(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 record, const AVB_TAS_RETAINED *retained, int tsn, int s1)
+{
+    const int schedule = retained != NULL && record == AVB_TAS_STATE_ARMED && (retained->flags & AVB_TAS_RET_SCHEDULE) != 0;
+    const int timed = schedule && avb_tas_retained_timed(retained);
+    int reset = schedule && (retained->flags & AVB_TAS_RET_DISCONTINUOUS) != 0;
+    avb_u32 mismatch = 0, reasons, k;
+
+    if (!s1) {
+        if (record == AVB_TAS_STATE_ARMED && !tsn) {
+            mismatch |= AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+        }
+        if (schedule) {
+            mismatch |= i226_tas_query_mismatch(&q->regs, &retained->schedule);
+            reset = reset || q->phc_after_ns < q->phc_before_ns;
+        }
+        if (timed) {
+            reset = reset || q->phc_before_ns < retained->phc_after_commit_ns || q->phc_after_ns < retained->phc_after_commit_ns;
+        }
+    }
+    if (!timed) {
+        q->current_commit.state = AVB_TAS_COMMIT_LOST;   /* bracket and schedule stay 0 (12.2) */
+    } else {
+        q->current_commit.state = mismatch != 0 ? AVB_TAS_COMMIT_HW_MISMATCH :
+                                  (reset ? AVB_TAS_COMMIT_PHC_DISCONTINUOUS : AVB_TAS_COMMIT_RETAINED);
+        q->current_commit.phc_before_commit_ns = retained->phc_before_commit_ns;
+        q->current_commit.phc_after_commit_ns = retained->phc_after_commit_ns;
+        q->current = retained->schedule;
+    }
+    if (s1) {
+        q->current_status = AVB_TAS_ST_UNKNOWN;
+        q->next_status = AVB_TAS_ST_UNKNOWN;
+        return;
+    }
+    reasons = mismatch | (reset ? AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT : 0u);
+    if (schedule && q->link_speed_mbps != 0) {   /* 4.3; an unknown speed contradicts nothing */
+        for (k = 0; k < AVB_TAS_QUEUES; k++) {
+            if (!i226_tas_window_fits(&retained->schedule.queue[k], q->link_speed_mbps)) {
+                reasons |= AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED;
+            }
+        }
+    }
+    if (!timed) {
+        reasons |= AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST;
+    } else {
+        const avb_u64 target = retained->schedule.base_time_ns;
+
+        if ((retained->flags & AVB_TAS_RET_IN_TIME) == 0) {
+            reasons |= AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS;
+        }
+        if (!reset && q->phc_after_ns >= target) {
+            reasons |= q->phc_before_ns <= target ? AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT : AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED;
+        }
+    }
+    q->current_reasons = reasons;
+    q->current_status = (reasons & I226_TAS_QUERY_INCONSISTENT) != 0 ? AVB_TAS_ST_INCONSISTENT :
+                        (reasons != 0 ? AVB_TAS_ST_UNKNOWN : AVB_TAS_ST_PENDING);
+    if (schedule && mismatch == 0) {
+        q->next_status = AVB_TAS_ST_NONE;        /* R1 */
+    } else {
+        q->next_status = AVB_TAS_ST_UNKNOWN;     /* R2, or nothing to attribute the hardware to */
+        q->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    }
+}
+
 /**
  * Fills the hardware fields of q: hw_read, hw_mode, regs, phc bracket, dtx, limits, slot statuses and reasons,
  * snapshot_reasons, restoration, current_commit and next_commit. The caller has zeroed q and set version, size,
  * lookup_client_op_id, identity, flags, lookup_result and legacy_conflicts.
  * running: the filter is Running. mmio: the BAR is mapped and INTEL_CAP_MMIO is set. record: AVB_TAS_STATE_*.
  * op_in_progress: a TAS operation holds the adapter's claim (the slots are then not advanced, #362).
+ * retained: the context's retained commit under the same shared hold as the record, NULL when there is no coherent one.
  * contended: the caller did not obtain the TAS register lock and never waits for it (#365 12.1 "Never blocking"; #45):
  * no register and no PHC value is read. The register-lock reply of #365 12.10 (Amendment 1): hw_read PARTIAL (incomplete
  * observation, no MMIO implied), every read_failed bit set (not attempted), PHC_BEFORE_INVALID and PHC_AFTER_INVALID,
@@ -69,7 +164,7 @@ static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
  * READ_FAILED clear. Both PHC bits are derived on the common path from phc_before_ok and phc_after_ok (#365 12.2).
  */
 static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
-                                    int contended, AVB_TAS_QUERY_HW_REQUEST *q)
+                                    int contended, const AVB_TAS_RETAINED *retained, AVB_TAS_QUERY_HW_REQUEST *q)
 {
     AVB_TAS_REGS *g = &q->regs;
     avb_u32 failed = 0, snap = 0, h2 = 0, tries, k;
@@ -202,19 +297,13 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
          AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID | AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID | AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED)) != 0 ||
          op_in_progress;
     if (record != AVB_TAS_STATE_CLEAN) {
-        /* A record exists but no commit timing is retained (C6): the bracket stays 0 (#365 12.2) */
-        q->current_commit.state = AVB_TAS_COMMIT_LOST;
-    } else {
-        q->current_commit.state = AVB_TAS_COMMIT_NONE;
+        i226_tas_query_record(q, record, retained, tsn, s1);
+        return;
     }
+    q->current_commit.state = AVB_TAS_COMMIT_NONE;
     if (s1) {
         q->current_status = AVB_TAS_ST_UNKNOWN;
         q->next_status = AVB_TAS_ST_UNKNOWN;
-    } else if (record != AVB_TAS_STATE_CLEAN) {
-        q->current_status = AVB_TAS_ST_UNKNOWN;
-        q->current_reasons = AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST;
-        q->next_status = AVB_TAS_ST_UNKNOWN;
-        q->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
     } else {
         int windows_base = i226_tas_query_windows_baseline(g);
         int shadow_zero = g->qbvcyclet_s == I226_QBVCYCLET_S_BASELINE;

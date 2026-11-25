@@ -115,6 +115,52 @@ static __inline void avb_tas_order_release(PAVB_DEVICE_CONTEXT ctx)
     ExReleaseFastMutex(&ctx->tas_meta_order);
 }
 
+/* A device operation that may replace the PHC while the record is not CLEAN, under tas_meta_order (IRQL <= APC_LEVEL): immediately before
+ * it the commit timing is marked lost, immediately after it its reported effect is published together with the generation step (#350, #352
+ * R1 L10). Each is one short exclusive section of tas_reg_lock (DISPATCH_LEVEL inside it); the device operation itself runs outside it. A
+ * query therefore sees the state before the operation, the lost timing while it runs, or the outcome with its generation */
+static __inline avb_u32 avb_tas_phc_begin(PAVB_DEVICE_CONTEXT ctx)
+{
+    KIRQL irql = ExAcquireSpinLockExclusive(&ctx->tas_reg_lock);
+    avb_u32 before = avb_tas_retained_phc_begin(&ctx->tas_retained);
+
+    ExReleaseSpinLockExclusive(&ctx->tas_reg_lock, irql);
+    return before;
+}
+
+static __inline void avb_tas_phc_end(PAVB_DEVICE_CONTEXT ctx, avb_u32 before, int effect, BOOLEAN advance)
+{
+    KIRQL irql = ExAcquireSpinLockExclusive(&ctx->tas_reg_lock);
+
+    avb_tas_retained_phc_end(&ctx->tas_retained, before, effect);
+    if (advance) {
+        avb_tas_meta_advance(ctx);
+    }
+    ExReleaseSpinLockExclusive(&ctx->tas_reg_lock, irql);
+}
+
+/* The PHC write of SET_TIMESTAMP and PHC_OFFSET_ADJUST, under tas_meta_order. retained: sampled in the same hold. One transition for an
+ * issued write on a retained schedule, whatever the operation's result (L10: the write invalidates, not the completion status); none for
+ * an unknown effect or without a write. The result is the device's and decides the IOCTL's status alone */
+static int AvbPhcSetOrdered(_Inout_ PAVB_DEVICE_CONTEXT ctx, BOOLEAN retained, ULONGLONG systime)
+{
+    const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
+    avb_u32 before = retained ? avb_tas_phc_begin(ctx) : 0u;
+    int effect = AVB_PHC_EFFECT_UNKNOWN;
+    int rc;
+
+    if (ops != NULL && ops->set_systime_reported != NULL) {
+        rc = ops->set_systime_reported(&ctx->intel_device, systime, &effect);
+    } else {
+        rc = intel_set_systime(&ctx->intel_device, systime);
+        effect = (rc == 0) ? AVB_PHC_EFFECT_ISSUED : AVB_PHC_EFFECT_UNKNOWN;
+    }
+    if (retained) {
+        avb_tas_phc_end(ctx, before, effect, (BOOLEAN)(effect == AVB_PHC_EFFECT_ISSUED));
+    }
+    return rc;
+}
+
 /* SETUP_TAS and DISARM_TAS, under their claim: takes the order lock and decides L12 in it. FALSE: refused, not held */
 static __inline BOOLEAN avb_tas_order_enter_mutation(PAVB_DEVICE_CONTEXT ctx)
 {
@@ -648,8 +694,9 @@ static NTSTATUS AvbDeviceInitOrdered(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ AV
 {
     const intel_device_ops_t *ops = intel_get_device_ops(Ctx->intel_device.device_type);
     const BOOLEAN invalidates = (ops != NULL && ops->init_reported != NULL);
-    BOOLEAN retained, refused;
+    BOOLEAN retained, refused, advance;
     avb_u64 epoch, generation;
+    avb_u32 before = 0;
     int invalidated = 0;
 
     *InitResult = -1;
@@ -660,9 +707,19 @@ static NTSTATUS AvbDeviceInitOrdered(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ AV
     if (refused) {
         (void)InterlockedCompareExchange(&Ctx->hw_state, AVB_HW_BAR_MAPPED, AVB_HW_PTP_READY);
     } else {
+        if (retained && invalidates) {
+            before = avb_tas_phc_begin(Ctx);
+        }
         *InitResult = invalidates ? ops->init_reported(&Ctx->intel_device, &invalidated) : intel_init(&Ctx->intel_device);
-        if (avb_tas_init_advances(Event, retained, invalidated, generation)) {
-            avb_tas_meta_advance(Ctx);   /* L10: one transition for this event, published in the hold that performed it */
+        advance = (BOOLEAN)avb_tas_init_advances(Event, retained, invalidated, generation);
+        if (retained && invalidates) {
+            /* #350: a reported reset is discontinuous; without one the initialization may still have written clock control (TSAUXC,
+             * TIMINCA), so its effect is unknown, never shown to be none. L10: one transition for this event, in the same section */
+            avb_tas_phc_end(Ctx, before, invalidated ? AVB_PHC_EFFECT_ISSUED : AVB_PHC_EFFECT_UNKNOWN, advance);
+        } else if (advance) {
+            avb_tas_meta_advance(Ctx);
+        }
+        if (advance) {
             avb_tas_meta_read(Ctx, &epoch, &generation);
             Event->counted = 1;
             Event->counted_generation = generation;
@@ -3785,6 +3842,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                              * is the path that writes nothing (the I226 has no safe in-place disable, P0.2) */
                             avb_tas_meta_advance(AvbContext);
                         }
+                        avb_tas_retained_disarm(&AvbContext->tas_retained, hw_result != -ENOTSUP, hw_result == 0);   /* #350 */
                         if (hw_result == 0) {
                             InterlockedExchange(&AvbContext->tas_armed, 0);
                             InterlockedExchange(&AvbContext->tas_unverified_active, 0);   /* #365 R4: the state is removed */
@@ -3812,6 +3870,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     } else if (ops && ops->setup_tas == NULL) {
                         /* Device never had TAS hardware — driver flag only, no HW action needed */
                         path = 2;
+                        avb_tas_retained_disarm(&AvbContext->tas_retained, 0, 1);
                         InterlockedExchange(&AvbContext->tas_armed, 0);
                         RtlZeroMemory(&AvbContext->last_tas_config, sizeof(AvbContext->last_tas_config));
                         disarm->status = (avb_u32)STATUS_SUCCESS;
@@ -4338,15 +4397,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 #ifdef NDEBUG
                         int rc;
 #endif
-                        rc = intel_set_systime(&activeContext->intel_device, r->timestamp);
+                        rc = AvbPhcSetOrdered(activeContext, retained, r->timestamp);   /* #352 R1 L10: its transition included */
 #ifndef NDEBUG
                         AvbDbgPhcAfterWrite(activeContext, dbg_arm, TRUE, rc);
 #endif
                         r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-                        if (rc == 0 && retained) {
-                            avb_tas_meta_advance(activeContext);   /* #352 R1 L10: one transition for this reseed */
-                        }
                     }
                     avb_tas_order_release(activeContext);
                 } 
@@ -4403,8 +4459,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                          * represent another transition: refused before the write, Information 0 (below) */
                         status = STATUS_INVALID_DEVICE_STATE;
                     } else {
-                        /* Call intel_set_systime directly - bypasses the 30s monotonicity guard
-                         * in SET_TIMESTAMP, so small backward corrections succeed. */
+                        /* The device set directly (AvbPhcSetOrdered, #352 R1 L10: its transition included) - bypasses the 30s
+                         * monotonicity guard in SET_TIMESTAMP, so small backward corrections succeed. */
 #ifndef NDEBUG
                         BOOLEAN dbg_invalid = FALSE;
                         {   /* #505: a Debug PHC reseed hold after the validation, immediately before the physical write */
@@ -4436,7 +4492,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             }
                             if (dbg_write) {
                                 AvbDbgPhcWriteEnter(phcCtx, dbg_arm);
-                                rc = intel_set_systime(&phcCtx->intel_device, new_ts);
+                                rc = AvbPhcSetOrdered(phcCtx, retained, new_ts);
                             }
                             AvbDbgPhcAfterWrite(phcCtx, dbg_arm, dbg_write, rc);
                         }
@@ -4448,13 +4504,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         }
 #else
-                        rc = intel_set_systime(&phcCtx->intel_device, new_ts);
+                        rc = AvbPhcSetOrdered(phcCtx, retained, new_ts);
                         off_req->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 #endif
-                        if (rc == 0 && retained) {
-                            avb_tas_meta_advance(phcCtx);   /* #352 R1 L10: one transition for this reseed */
-                        }
                     }
                 }
                 avb_tas_order_release(phcCtx);
@@ -4909,19 +4962,20 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 KeRaiseIrql(DISPATCH_LEVEL, &irql);
                 /* Lifecycle: registers are read only while this rundown is held. FilterPause waits for its holders before
                  * it publishes FilterPausing, and FilterRestart re-arms it only after a successful hardware bring-up. Not
-                 * acquired: nothing is read (NOT_RUNNING) and the register lock is not touched */
+                 * acquired: nothing is read (NOT_RUNNING) */
                 held = ExAcquireRundownProtection(&currentContext->tas_query_rundown);
                 /* Register access (#45, #52): one shared attempt at the TAS register lock, never a wait (#365 12.1 "Never
                  * blocking"). Obtained: it is held from the state samples to the end of the read pass, and since every TAS
-                 * register write and record update holds it exclusively, the registers read and the record are one state.
-                 * Not obtained: a TAS operation holds it or waits for it (queries share it, and every operation takes the
-                 * claim first), so nothing is read: the register-lock reply of #365 12.10 (Amendment 1), with hw_read PARTIAL
-                 * (an incomplete observation; no MMIO is implied), OP_IN_PROGRESS, every read_failed bit, both PHC values
-                 * invalid, READ_FAILED clear, slots and restoration UNKNOWN. UNVERIFIED on hardware: no test forces it */
-                if (held) {
-                    locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
-                    contended = !locked;
-                }
+                 * register write, record update and publication of the retained commit (#350) holds it exclusively, the
+                 * registers read, the record, the generation and the retained commit are one state.
+                 * Not obtained: a TAS operation, or the short publication of a PHC operation, holds it or waits for it, so
+                 * nothing is read: the register-lock reply of #365 12.10 (Amendment 1), with hw_read PARTIAL (an incomplete
+                 * observation; no MMIO is implied), OP_IN_PROGRESS, every read_failed bit, both PHC values invalid, READ_FAILED
+                 * clear, slots and restoration UNKNOWN, no retained commit. UNVERIFIED on hardware: no test forces it.
+                 * Without the rundown no register is read either way; the lock then only makes the record copy coherent
+                 * (12.3: record fields are still reported as record) */
+                locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
+                contended = held && !locked;
 
                 running = held && currentContext->filter_instance != NULL && currentContext->filter_instance->State == FilterRunning;
                 mmio = currentContext->hw_state >= AVB_HW_BAR_MAPPED && (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) != 0;
@@ -4952,7 +5006,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 avb_tas_meta_read(currentContext, &q->context_epoch, &q->generation);
                 q->lookup_result = (lookup == 0) ? AVB_TAS_LOOKUP_NOT_REQUESTED : AVB_TAS_LOOKUP_NOT_IMPLEMENTED;
                 q->legacy_conflicts = AVB_TAS_NOT_REPORTED_U32;
-                (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended);
+                (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended,
+                                     locked ? &currentContext->tas_retained : NULL);
                 seq1 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
                 if (locked) {
                     lock_t1 = avb_tas_reg_release_shared_at_dpc(currentContext, &lock_freq);
@@ -5276,6 +5331,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                 RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
                             }
                         }
+                        avb_tas_retained_setup(&activeContext->tas_retained, write_attempted,
+                                               (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0));   /* #350 */
                         (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "setup");
                         DEBUGP(DL_ERROR, "!!! DIAG: setup_tas returned: %d (TAS write attempted: %d)\n", rc, write_attempted);
 
@@ -5405,6 +5462,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                 InterlockedExchange(&activeContext->tas_unverified_active, 1);
                             }
                             InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+                            /* #350 (C6): the schedule as handed over and the operation's own readings around the commit write */
+                            avb_tas_retained_activate(&activeContext->tas_retained, result, oc.write_attempted, after, &r->schedule,
+                                                      oc.phc_recheck_ns, oc.phc_at_commit_ns);
 #ifndef NDEBUG
                             if (oc.write_attempted) {
                                 dbg_commit_seq = (avb_u64)InterlockedIncrement64(&activeContext->dbg_seq);   /* #505, no logging */
@@ -5431,11 +5491,11 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             /* After every release: the outcome, never under the lock */
             DEBUGP(DL_ERROR, "!!! [#357] TAS activate 0x80C: op=0x%llX pre=%u flags=0x%X fault=0x%X result=%u ran=%d "
                    "status=0x%08X write=%d mode=%d acted=%d failedWrite=%u before=%u after=%u speed=%u gen=%llu->%llu "
-                   "base=%llu phc=%llu phcAtCommit=%llu\n", (unsigned long long)r->client_op_id, r->pre_activation, r->flags,
+                   "base=%llu phc=%llu phcRecheck=%llu phcAtCommit=%llu\n", (unsigned long long)r->client_op_id, r->pre_activation, r->flags,
                    r->debug_fault, result, ran, (unsigned)status, oc.write_attempted, oc.mode_written,
                    oc.acceptance_acted, oc.failed_write, before, after, link_mbps, (unsigned long long)gen_before,
                    (unsigned long long)gen_after, (unsigned long long)r->schedule.base_time_ns,
-                   (unsigned long long)oc.phc_before_ns, (unsigned long long)oc.phc_at_commit_ns);
+                   (unsigned long long)oc.phc_before_ns, (unsigned long long)oc.phc_recheck_ns, (unsigned long long)oc.phc_at_commit_ns);
         }
         break;
 
