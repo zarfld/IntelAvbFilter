@@ -223,7 +223,21 @@
  *   REFUSE   a further activation on the armed adapter is NOT_CLEAN and changes no reported state.
  *   WIRE     tagged broadcast seen by the established wire observer (see OBSERVER), judged by tests/ioctl/tas_activate_eval.h against
  *            BaseT and the window.
- *   STATUS   (#369 only) PENDING then INFERRED_ACTIVE: #350's status model is not implemented, so SKIP_NOT_IMPLEMENTED.
+ *   STATUS_* (#369 only, for #350) the schedule status from IOCTL_AVB_TAS_QUERY_HW, judged by tas_status_* in
+ *            tests/ioctl/tas_activate_eval.h (TC-MOCK-071) against the published prerequisites only (#350, #365 12.2, 12.4, 12.7). The
+ *            test measures each prerequisite itself: the COMMITTED reply, the PHC bracket on the right side of the requested BaseT, a
+ *            PHC not below its value after the commit, TSN mode, unchanged windows and cycle, the same context and generation, and no
+ *            status, power, pause, restart, attach or detach event with an unchanged link. BLOCKED without a commit; a prerequisite or
+ *            reply not measured is INCONCLUSIVE; an observed wrong or missing driver answer is FAIL, never SKIP. Neither a register
+ *            readback nor BaseT having passed is evidence of an activation, and no line is HARDWARE_VERIFIED.
+ *     STATUS_RECORD   before and past BaseT: current_commit RETAINED, the requested schedule, a bracket that is ordered, ends before
+ *                     BaseT and lies between the test's own PHC readings around the race (C6).
+ *     STATUS_PENDING  the query after REFUSE and LOOKUP, its bracket before BaseT: current PENDING without reasons.
+ *     STATUS_ACTIVE   the first observable query with its bracket past BaseT (bounded wait, with or without a wire observer): current
+ *                     INFERRED_ACTIVE without reasons. UNKNOWN only for LINK_EVENTS_UNOBSERVED or EVENT_UNRECONCILED is named apart:
+ *                     #365 12.4 forbids INFERRED_ACTIVE while K8 is unverified, so this line stays not GREEN until K8 is resolved (12.6).
+ *     STATUS_NEXT     both queries: next NONE, no reasons, no CYCLE_MISMATCH, next_commit NONE (12.7). QBVCYCLET_S is printed only.
+ *     STATUS_READONLY two queries in immediate succession, and across BaseT: generation and epoch unchanged.
  *   CLEANUP  the test's own NIC cycle ran and the adapter came back: primary cleanup, owned by this test.
  *   RESTORE  restoration as #361 states it (tas_act_restore in tests/ioctl/tas_activate_eval.h): restoration-set registers at
  *            baseline, TSN mode off, driver record clean, TX on the wire. The restoration set is DES-C-TAS-010 12.5's: the v1
@@ -1454,6 +1468,140 @@ static void meta_line(const char *check, UINT32 index, avb_u16 did, const QUERY_
     }
 }
 
+/* ---- --hold STATUS_* (#369 for #350): the schedule status, the retained commit and the read-only property of the query ---- */
+#define STATUS_POLL_MS 100u
+
+static void print_status(const char *label, const QUERY_READ *r)
+{
+    char text[64];
+
+    sprintf_s(text, sizeof(text), "status %s", label);
+    print_query(text, r);
+    if (query_valid(r)) {
+        printf("    status %s: current_commit state=%u bracket=[%llu, %llu] record base=%llu cycle=%u q0=[%u, %u] frame=%u; next_commit state=%u\n",
+               label, r->q.current_commit.state, r->q.current_commit.phc_before_commit_ns, r->q.current_commit.phc_after_commit_ns,
+               r->q.current.base_time_ns, r->q.current.cycle_ns, r->q.current.queue[0].start_ns, r->q.current.queue[0].end_ns,
+               r->q.current.queue[0].max_frame_bytes, r->q.next_commit.state);
+    }
+}
+
+static void status_verdict(const char *check, TAS_STATUS_CLASS c, UINT32 index, avb_u16 did, const char *expected, const char *observed)
+{
+    char reason[900];
+
+    sprintf_s(reason, sizeof(reason), "%s; expected %s; observed %s", tas_status_class_name(c), expected, observed);
+    verdict(c == TAS_STATUS_PASS ? "PASS" : (tas_status_is_fail(c) ? "FAIL" : "INCONCLUSIVE"), check, index, did, reason);
+}
+
+/** Every line is its own measurement. race / commit / pending: the queries immediately before the race, right after it and after the
+ *  refused requests. stats0 / row0: the adapter's statistics and link before the activation */
+static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BOOL committed, const AVB_TAS_SCHEDULE *sent,
+                         const QUERY_READ *race, const QUERY_READ *commit, const QUERY_READ *pending,
+                         const AVB_DRIVER_STATISTICS *stats0, const MIB_IF_ROW2 *row0)
+{
+    static const char *const checks[] = { "STATUS_RECORD", "STATUS_PENDING", "STATUS_ACTIVE", "STATUS_NEXT", "STATUS_READONLY" };
+    AVB_DRIVER_STATISTICS sa, sb, sc;
+    QUERY_READ past, again;
+    TAS_STATUS_CONTROL cp, ca;
+    TAS_STATUS_CLASS first, second;
+    MIB_IF_ROW2 row1;
+    BOOL read_a, read_b, read_c, row_ok, link_same, excluded, own_only, outer;
+    avb_u64 lo = 0, hi = 0;
+    DWORD start;
+    unsigned k;
+    char seen[500];
+
+    if (!committed) {
+        for (k = 0; k < sizeof(checks) / sizeof(checks[0]); k++) {
+            verdict("BLOCKED", checks[k], index, id->device_id, "no committed schedule (see COMMIT)");
+        }
+        return;
+    }
+    printf("\n  --- Schedule status past BaseT ---\n");
+    start = GetTickCount();
+    for (;;) {   /* the time bound only ends the wait: whether BaseT has passed is measured in the query's own PHC bracket */
+        query(h, &past);
+        if ((tas_status_observable(query_valid(&past), &past.q) && past.q.phc_before_ns >= sent->base_time_ns) ||
+            GetTickCount() - start >= SEND_BOUND_MS) {
+            break;
+        }
+        Sleep(STATUS_POLL_MS);
+    }
+    read_a = read_stats(h, &sa);
+    read_b = read_stats(h, &sb);
+    query(h, &past);
+    query(h, &again);
+    read_c = read_stats(h, &sc);
+    row_ok = read_if(id->net_luid, &row1);
+    print_status("past BaseT", &past);
+    print_status("past BaseT, again", &again);
+
+    link_same = row_ok && row0->MediaConnectState == MediaConnectStateConnected && row1.MediaConnectState == MediaConnectStateConnected &&
+                row0->TransmitLinkSpeed == row1.TransmitLinkSpeed && query_valid(race) && query_valid(&past) &&
+                race->q.link_speed_mbps != 0 && race->q.link_speed_mbps == past.q.link_speed_mbps;
+    excluded = tas_status_events_excluded(TRUE, stats0, read_c, &sc, link_same);
+    own_only = read_a && read_b && read_c && sb.IoctlCount == sa.IoctlCount + 1 && sc.IoctlCount == sb.IoctlCount + 3 &&
+               sb.FilterPauseCount == sc.FilterPauseCount && sb.FilterRestartCount == sc.FilterRestartCount;
+    printf("    [EVIDENCE] events since before the activation: statistics %s, status+%lld pnp+%lld pause+%lld restart+%lld attach+%lld "
+           "detach+%lld; OS link %s state %d -> %d, %llu -> %llu bit/s; driver link speed %u -> %u Mbit/s: a link or power event is %s\n",
+           read_c ? "read" : "NOT read", read_c ? (long long)(sc.FilterStatusCount - stats0->FilterStatusCount) : 0LL,
+           read_c ? (long long)(sc.FilterNetPnPCount - stats0->FilterNetPnPCount) : 0LL,
+           read_c ? (long long)(sc.FilterPauseCount - stats0->FilterPauseCount) : 0LL,
+           read_c ? (long long)(sc.FilterRestartCount - stats0->FilterRestartCount) : 0LL,
+           read_c ? (long long)(sc.FilterAttachCount - stats0->FilterAttachCount) : 0LL,
+           read_c ? (long long)(sc.FilterDetachCount - stats0->FilterDetachCount) : 0LL, row_ok ? "read" : "NOT read",
+           (int)row0->MediaConnectState, row_ok ? (int)row1.MediaConnectState : -1, row0->TransmitLinkSpeed, row_ok ? row1.TransmitLinkSpeed : 0ULL,
+           query_valid(race) ? race->q.link_speed_mbps : 0u, query_valid(&past) ? past.q.link_speed_mbps : 0u,
+           excluded ? "excluded" : "NOT excluded");
+    tas_status_control(query_valid(commit), &commit->q, query_valid(pending), &pending->q, sent->base_time_ns, excluded, &cp);
+    tas_status_control(query_valid(commit), &commit->q, query_valid(&past), &past.q, sent->base_time_ns, excluded, &ca);
+    printf("    [EVIDENCE] control since the query after the commit: before BaseT %s contradiction=0x%X, past BaseT %s contradiction=0x%X "
+           "(0x1 mode off, 0x2 windows or cycle changed, 0x4 PHC below, 0x8 context, 0x10 generation)\n", cp.measured ? "measured" :
+           "NOT measured", cp.contradiction, ca.measured ? "measured" : "NOT measured", ca.contradiction);
+
+    outer = tas_status_observable(query_valid(race), &race->q) && tas_status_observable(query_valid(commit), &commit->q);
+    if (outer) {
+        lo = race->q.phc_after_ns;
+        hi = commit->q.phc_before_ns;
+    }
+    first = tas_status_record(query_valid(pending), &pending->q, sent, outer, lo, hi, &cp);
+    second = tas_status_record(query_valid(&past), &past.q, sent, outer, lo, hi, &ca);
+    sprintf_s(seen, sizeof(seen), "before BaseT state %u bracket [%llu, %llu] base %llu (%s), past BaseT state %u bracket [%llu, %llu] base %llu "
+              "(%s); test readings %s [%llu, %llu]", pending->q.current_commit.state, pending->q.current_commit.phc_before_commit_ns,
+              pending->q.current_commit.phc_after_commit_ns, pending->q.current.base_time_ns, tas_status_is_fail(first) ? "FAIL" :
+              (first == TAS_STATUS_PASS ? "PASS" : "not judged"), past.q.current_commit.state, past.q.current_commit.phc_before_commit_ns,
+              past.q.current_commit.phc_after_commit_ns, past.q.current.base_time_ns, tas_status_is_fail(second) ? "FAIL" :
+              (second == TAS_STATUS_PASS ? "PASS" : "not judged"), outer ? "measured" : "NOT measured", lo, hi);
+    status_verdict("STATUS_RECORD", tas_status_worst(first, second), index, id->device_id,
+                   "RETAINED (2) with the requested schedule and a bracket before BaseT inside the test's readings, in both queries", seen);
+
+    first = tas_status_slot(AVB_TAS_ST_PENDING, query_valid(pending), &pending->q, &cp);
+    sprintf_s(seen, sizeof(seen), "current %u/0x%X snapshot 0x%X, PHC [%llu, %llu], BaseT %llu", pending->q.current_status,
+              pending->q.current_reasons, pending->q.snapshot_reasons, pending->q.phc_before_ns, pending->q.phc_after_ns, sent->base_time_ns);
+    status_verdict("STATUS_PENDING", first, index, id->device_id, "PENDING (3) without reasons before BaseT", seen);
+
+    second = tas_status_slot(AVB_TAS_ST_INFERRED_ACTIVE, query_valid(&past), &past.q, &ca);
+    sprintf_s(seen, sizeof(seen), "current %u/0x%X snapshot 0x%X, PHC [%llu, %llu], BaseT %llu", past.q.current_status,
+              past.q.current_reasons, past.q.snapshot_reasons, past.q.phc_before_ns, past.q.phc_after_ns, sent->base_time_ns);
+    status_verdict("STATUS_ACTIVE", second, index, id->device_id,
+                   "INFERRED_ACTIVE (4) without reasons past BaseT (an inference, never HARDWARE_VERIFIED)", seen);
+
+    first = tas_status_next(query_valid(pending), &pending->q, &cp);
+    second = tas_status_next(query_valid(&past), &past.q, &ca);
+    sprintf_s(seen, sizeof(seen), "before BaseT next %u/0x%X commit %u, past BaseT next %u/0x%X commit %u", pending->q.next_status,
+              pending->q.next_reasons, pending->q.next_commit.state, past.q.next_status, past.q.next_reasons, past.q.next_commit.state);
+    status_verdict("STATUS_NEXT", tas_status_worst(first, second), index, id->device_id,
+                   "next NONE (1) without reasons, no CYCLE_MISMATCH, next_commit NONE (1), in both queries", seen);
+
+    first = tas_status_readonly(query_valid(&past) && query_valid(&again), &past.q, &again.q, own_only);
+    second = tas_status_readonly(query_valid(pending) && query_valid(&past), &pending->q, &past.q, FALSE);
+    sprintf_s(seen, sizeof(seen), "generation %llu before BaseT, %llu and %llu in two successive queries past it, epoch %llu, %llu, %llu; between "
+              "the two successive queries %s", pending->q.generation, past.q.generation, again.q.generation, pending->q.context_epoch,
+              past.q.context_epoch, again.q.context_epoch, own_only ? "only this test's own IOCTLs were counted" :
+              "other IOCTLs are not excluded");
+    status_verdict("STATUS_READONLY", tas_status_worst(first, second), index, id->device_id, "generation and epoch unchanged by queries", seen);
+}
+
 static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame, BOOL back);
 static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch);
@@ -1488,6 +1636,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     avb_u32 mbps, frame;
     DEVINST inst;
     LONG captured = 0, from_target = 0;
+    QUERY_READ st_race, st_commit, st_pending;   /* --hold STATUS_*: immediately before the race, right after it, before BaseT */
 
     BOOL wire = FALSE, has_link, has_ip = FALSE;
     char why[300];
@@ -2380,6 +2529,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         first_after = g_next_seq;
         query(h, &qa);   /* before any further request: GENERATION, COMMIT's isolation and REFUSE's metadata */
         print_query("after the race", &qa);
+        st_race = qr;
+        st_commit = qa;
+        ZeroMemory(&st_pending, sizeof(st_pending));
 
         ZeroMemory(&ev, sizeof(ev));
         for (k = 0; k < 2; k++) {
@@ -2556,6 +2708,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                    "information=%lu lookup_result=%u (the producer stage expects NOT_IMPLEMENTED 4; success-record retrieval is #460, "
                    "not asserted here)\n", winner == 0 ? "instance 1" : "instance 2", req_op.client_op_id, (unsigned long)ql.status, ql.got,
                    query_valid(&ql) ? ql.q.lookup_result : 0u);
+            query(h, &st_pending);   /* STATUS_PENDING: after the refused requests, which must not cost the retained commit */
+            print_status("before BaseT", &st_pending);
         } else {
             const char *no = success != 0 ? "no single complete commit was established (see COMMIT); the adapter may hold a schedule, "
                                             "the owned cleanup follows" : "no committed schedule (see COMMIT)";
@@ -2642,8 +2796,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         if (sock != INVALID_SOCKET) { closesocket(sock); sock = INVALID_SOCKET; }
         verdict("BLOCKED", "WIRE", index, id->device_id, !committed ? "no committed schedule (see COMMIT)" : "no established wire observer (see OBSERVER)");
     }
-    verdict("SKIP_NOT_IMPLEMENTED", "STATUS", index, id->device_id,
-            "#369 expects PENDING then INFERRED_ACTIVE; the schedule status model of #350 is not implemented, GET_TAS_STATE has no status");
+    check_status(h, index, id, committed, &req_op.schedule, &st_race, &st_commit, &st_pending, &stats, &row);
     restore = cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
     g_cleanup_link_was_up = TRUE;
     if (g_mode == MODE_HOLD && committed && wire) {

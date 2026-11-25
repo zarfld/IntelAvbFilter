@@ -2499,6 +2499,225 @@ static void test_70_restart_end(void)
     EXPECT_EQ("a failed INIT_DEVICE is no control", tas_init_control(TRUE, FALSE, TAS_PHC_RESET_NOT_SHOWN), FALSE);
 }
 
+/* TC-MOCK-071: the schedule status lines of TEST-TAS-API-004 (#369 STATUS, for #350; test logic only, no hardware claim). Register readback
+ * or BaseT alone is never a PASS, a missing measurement is neither PASS nor failure, an observed wrong or missing answer is a failure */
+static void st_query(AVB_TAS_QUERY_HW_REQUEST *q, avb_u64 before, avb_u64 after, avb_u32 status, avb_u32 reasons)
+{
+    unsigned i;
+
+    ZeroMemory(q, sizeof(*q));
+    q->hw_read = AVB_TAS_HWREAD_READ;
+    q->hw_mode = AVB_TAS_HWMODE_TSN;
+    q->current_status = status;
+    q->current_reasons = reasons;
+    q->next_status = AVB_TAS_ST_NONE;
+    q->current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    q->current_commit.phc_before_commit_ns = 1010;
+    q->current_commit.phc_after_commit_ns = 1020;
+    q->next_commit.state = AVB_TAS_COMMIT_NONE;
+    q->context_epoch = 7;
+    q->generation = 2;
+    q->phc_before_ns = before;
+    q->phc_after_ns = after;
+    q->current.base_time_ns = 5000;
+    q->current.cycle_ns = 1000;
+    q->regs.qbvcyclet = 1000;
+    for (i = 0; i < AVB_TAS_QUEUES; i++) {
+        q->current.queue[i].start_ns = 200;
+        q->current.queue[i].end_ns = 400;
+        q->regs.stqt[i] = 200;
+        q->regs.endqt[i] = 400;
+    }
+}
+
+static TAS_STATUS_CLASS st_slot(avb_u32 expected, const AVB_TAS_QUERY_HW_REQUEST *commit, const AVB_TAS_QUERY_HW_REQUEST *q, BOOL events)
+{
+    TAS_STATUS_CONTROL c;
+
+    tas_status_control(TRUE, commit, TRUE, q, 5000, events, &c);
+    return tas_status_slot(expected, TRUE, q, &c);
+}
+
+static void test_71_hold_status(void)
+{
+    const avb_u32 P = AVB_TAS_ST_PENDING, A = AVB_TAS_ST_INFERRED_ACTIVE, U = AVB_TAS_ST_UNKNOWN;
+    AVB_TAS_QUERY_HW_REQUEST commit, q;
+    AVB_DRIVER_STATISTICS s0, s1;
+    AVB_TAS_SCHEDULE sent;
+    TAS_STATUS_CONTROL c;
+
+    printf("\n[TC-MOCK-071] #369 schedule status lines of --hold (test logic only)\n");
+    st_query(&commit, 1100, 1200, U, 0);
+
+    /* PENDING: a measured query before BaseT */
+    st_query(&q, 2000, 2100, P, 0);
+    EXPECT_EQ("PENDING before BaseT", st_slot(P, &commit, &q, FALSE), TAS_STATUS_PASS);
+    st_query(&q, 2000, 2100, U, AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST);
+    EXPECT_EQ("COMMIT_INFO_LOST after a COMMITTED reply: wrong, no missing measurement", st_slot(P, &commit, &q, FALSE), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, AVB_TAS_ST_PROGRAMMED, 0);
+    EXPECT_EQ("PROGRAMMED after the commit: wrong", st_slot(P, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, A, 0);
+    EXPECT_EQ("INFERRED_ACTIVE before BaseT: wrong", st_slot(P, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, 0, 0);
+    EXPECT_EQ("no status reported: wrong", st_slot(P, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, P, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH);
+    EXPECT_EQ("PENDING with a mismatch reason: excluded by S2", st_slot(P, &commit, &q, TRUE), TAS_STATUS_REASONS);
+    st_query(&q, 4990, 5000, P, 0);
+    EXPECT_EQ("BaseT reached inside the bracket: not the PENDING phase", st_slot(P, &commit, &q, TRUE), TAS_STATUS_NOT_PHASE);
+
+    /* INFERRED_ACTIVE: past BaseT, every prerequisite measured */
+    st_query(&q, 6000, 6100, A, 0);
+    EXPECT_EQ("INFERRED_ACTIVE, every prerequisite measured", st_slot(A, &commit, &q, TRUE), TAS_STATUS_PASS);
+    EXPECT_EQ("... but an event is not excluded: not judged", st_slot(A, &commit, &q, FALSE), TAS_STATUS_EVENT_POSSIBLE);
+    st_query(&q, 4990, 5010, A, 0);
+    EXPECT_EQ("BaseT inside the bracket: not the past phase", st_slot(A, &commit, &q, TRUE), TAS_STATUS_NOT_PHASE);
+    st_query(&q, 6000, 6100, P, 0);
+    EXPECT_EQ("PENDING past BaseT: wrong", st_slot(A, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&q, 6000, 6100, U, AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED);
+    EXPECT_EQ("UNKNOWN for unobserved link events, none occurred: named K8 failure", st_slot(A, &commit, &q, TRUE), TAS_STATUS_LINK_OPEN);
+    EXPECT_EQ("... with an event possible it is the published answer: not judged", st_slot(A, &commit, &q, FALSE), TAS_STATUS_EVENT_POSSIBLE);
+    st_query(&q, 6000, 6100, U, AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED | AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST);
+    EXPECT_EQ("a lost commit is wrong whatever the link", st_slot(A, &commit, &q, FALSE), TAS_STATUS_WRONG);
+    st_query(&q, 6000, 6100, U, AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT);
+    EXPECT_EQ("a transition reason with the target outside the bracket: wrong", st_slot(A, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&q, 6000, 6100, U, 0);
+    q.snapshot_reasons = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED;
+    EXPECT_EQ("an unreconciled event that the test excluded", st_slot(A, &commit, &q, TRUE), TAS_STATUS_LINK_OPEN);
+    EXPECT_EQ("... not excluded", st_slot(A, &commit, &q, FALSE), TAS_STATUS_EVENT_POSSIBLE);
+    q.current_status = A;
+    EXPECT_EQ("INFERRED_ACTIVE with an unreconciled event violates S1", st_slot(A, &commit, &q, TRUE), TAS_STATUS_S1);
+
+    /* contradictions measured by the test */
+    st_query(&q, 6000, 6100, A, 0);
+    q.hw_mode = AVB_TAS_HWMODE_OFF;
+    EXPECT_EQ("TSN mode off and INFERRED_ACTIVE", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+    q.current_status = AVB_TAS_ST_INCONSISTENT;
+    q.current_reasons = AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+    EXPECT_EQ("... INCONSISTENT: the control is lost, not judged", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    st_query(&q, 6000, 6100, A, 0);
+    q.regs.endqt[3] = 401;
+    EXPECT_EQ("a changed window and INFERRED_ACTIVE", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+    st_query(&q, 6000, 6100, A, 0);
+    q.regs.qbvcyclet_s = 9;
+    q.regs.baset_l = 9;
+    q.regs.txqctl[0] = 9;
+    EXPECT_EQ("shadow, BaseT and TXQCTL are no compared fields", st_slot(A, &commit, &q, TRUE), TAS_STATUS_PASS);
+    st_query(&q, 6000, 6100, A, 0);
+    q.generation = 3;
+    EXPECT_EQ("an invalidating event since the commit and INFERRED_ACTIVE", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+    st_query(&q, 2000, 2100, P, 0);
+    q.context_epoch = 8;
+    EXPECT_EQ("another context and PENDING", st_slot(P, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+    st_query(&q, 1000, 1050, P, 0);
+    EXPECT_EQ("the PHC below its value after the commit and PENDING", st_slot(P, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+
+    /* missing measurements */
+    st_query(&q, 6000, 6100, A, 0);
+    tas_status_control(TRUE, &commit, TRUE, &q, 5000, TRUE, &c);
+    EXPECT_EQ("no valid reply", tas_status_slot(A, FALSE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    tas_status_control(FALSE, &commit, TRUE, &q, 5000, TRUE, &c);
+    EXPECT_EQ("no reply after the commit: the control is not measured", tas_status_slot(A, TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    commit.generation = 0;
+    EXPECT_EQ("generation not reported: the control is not measured", st_slot(A, &commit, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    commit.generation = 2;
+    st_query(&q, 0, 0, U, 0);
+    q.hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+    EXPECT_EQ("not running: UNKNOWN is the published answer, nothing measured", st_slot(A, &commit, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_query(&q, 6000, 6100, U, 0);
+    q.flags = AVB_TAS_FLAG_OP_IN_PROGRESS;
+    EXPECT_EQ("an operation in progress: not measured", st_slot(A, &commit, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    q.current_status = A;
+    EXPECT_EQ("... and a progressed status violates S1", st_slot(A, &commit, &q, TRUE), TAS_STATUS_S1);
+    st_query(&q, 6000, 6100, A, 0);
+    q.snapshot_reasons = AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID;
+    EXPECT_EQ("an invalid PHC bracket and INFERRED_ACTIVE violates S1", st_slot(A, &commit, &q, TRUE), TAS_STATUS_S1);
+    st_query(&q, 6000, 6100, A, 0);
+    q.hw_read = AVB_TAS_HWREAD_PARTIAL;
+    q.regs.read_failed = 1u << 17;
+    EXPECT_EQ("only DTXMXPKTSZ unread is no status input", st_slot(A, &commit, &q, TRUE), TAS_STATUS_PASS);
+    q.regs.read_failed = 1u << 9;
+    EXPECT_EQ("an unread window and INFERRED_ACTIVE violates S1", st_slot(A, &commit, &q, TRUE), TAS_STATUS_S1);
+    st_query(&q, 6000, 6100, AVB_TAS_ST_HARDWARE_VERIFIED, 0);
+    EXPECT_EQ("HARDWARE_VERIFIED fails", st_slot(A, &commit, &q, TRUE), TAS_STATUS_HW_VERIFIED);
+    st_query(&q, 2000, 2100, P, 0);
+    q.next_status = AVB_TAS_ST_HARDWARE_VERIFIED;
+    EXPECT_EQ("... in the next slot as well", st_slot(P, &commit, &q, TRUE), TAS_STATUS_HW_VERIFIED);
+
+    /* the retained commit */
+    st_query(&q, 2000, 2100, P, 0);
+    sent = q.current;
+    tas_status_control(TRUE, &commit, TRUE, &q, 5000, TRUE, &c);
+    EXPECT_EQ("retained, as requested, bracket inside the test's readings", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_PASS);
+    EXPECT_EQ("no outer readings: not measured", tas_status_record(TRUE, &q, &sent, FALSE, 0, 0, &c), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("a bracket before the test's reading", tas_status_record(TRUE, &q, &sent, TRUE, 1015, 1100, &c), TAS_STATUS_WRONG);
+    EXPECT_EQ("a bracket after the test's reading", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1015, &c), TAS_STATUS_WRONG);
+    q.current_commit.phc_before_commit_ns = 1030;
+    EXPECT_EQ("a reversed bracket", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, P, 0);
+    q.current_commit.phc_after_commit_ns = 5000;
+    EXPECT_EQ("a bracket that reaches BaseT after a COMMITTED reply", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 6000, &c), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, P, 0);
+    q.current.queue[2].max_frame_bytes = 1;
+    EXPECT_EQ("another schedule than requested", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, U, 0);
+    q.current_commit.state = AVB_TAS_COMMIT_LOST;
+    EXPECT_EQ("LOST without a measured contradiction", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_WRONG);
+    c.contradiction = TAS_STATUS_C_GENERATION;
+    EXPECT_EQ("... with one: not judged", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_CONTROL_LOST);
+    q.flags = AVB_TAS_FLAG_OP_IN_PROGRESS;
+    EXPECT_EQ("sampled while an operation runs: not measured", tas_status_record(TRUE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("no valid reply: not measured", tas_status_record(FALSE, &q, &sent, TRUE, 1000, 1100, &c), TAS_STATUS_NOT_MEASURED);
+
+    /* the next slot (12.7) */
+    st_query(&q, 2000, 2100, P, 0);
+    tas_status_control(TRUE, &commit, TRUE, &q, 5000, TRUE, &c);
+    EXPECT_EQ("next NONE without reasons", tas_status_next(TRUE, &q, &c), TAS_STATUS_PASS);
+    q.next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    EXPECT_EQ("NONE with a reason", tas_status_next(TRUE, &q, &c), TAS_STATUS_WRONG);
+    q.next_status = U;
+    EXPECT_EQ("UNKNOWN, unattributed", tas_status_next(TRUE, &q, &c), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, P, AVB_TAS_SLOT_RSN_CYCLE_MISMATCH);
+    EXPECT_EQ("a cycle mismatch from the shadow", tas_status_next(TRUE, &q, &c), TAS_STATUS_WRONG);
+    st_query(&q, 2000, 2100, P, 0);
+    q.next_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("a next commit in v1", tas_status_next(TRUE, &q, &c), TAS_STATUS_WRONG);
+    EXPECT_EQ("no valid reply", tas_status_next(FALSE, &q, &c), TAS_STATUS_NOT_MEASURED);
+
+    /* events and the read-only property */
+    ZeroMemory(&s0, sizeof(s0));
+    s0.IoctlCount = 10;
+    s0.FilterStatusCount = 4;
+    s0.FilterPauseCount = 1;
+    s0.FilterRestartCount = 1;
+    s1 = s0;
+    s1.IoctlCount = 20;
+    EXPECT_EQ("no event counted, link unchanged", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, TRUE), TRUE);
+    EXPECT_EQ("link changed or unmeasured", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, FALSE), FALSE);
+    EXPECT_EQ("statistics unread", tas_status_events_excluded(TRUE, &s0, FALSE, &s1, TRUE), FALSE);
+    s1.FilterStatusCount = 5;
+    EXPECT_EQ("a status indication", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, TRUE), FALSE);
+    s1 = s0;
+    s1.IoctlCount = 20;
+    s1.FilterNetPnPCount = 1;
+    EXPECT_EQ("a PnP event", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, TRUE), FALSE);
+    s1 = s0;
+    s1.IoctlCount = 20;
+    s1.FilterRestartCount = 2;
+    EXPECT_EQ("a restart", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, TRUE), FALSE);
+    s1 = s0;
+    s1.IoctlCount = 3;
+    EXPECT_EQ("a counter that fell", tas_status_events_excluded(TRUE, &s0, TRUE, &s1, TRUE), FALSE);
+    st_query(&q, 2000, 2100, P, 0);
+    EXPECT_EQ("generation kept across queries", tas_status_readonly(TRUE, &commit, &q, TRUE), TAS_STATUS_PASS);
+    q.generation = 3;
+    EXPECT_EQ("generation moved, no other writer", tas_status_readonly(TRUE, &commit, &q, TRUE), TAS_STATUS_WRONG);
+    EXPECT_EQ("... another writer possible: not attributed", tas_status_readonly(TRUE, &commit, &q, FALSE), TAS_STATUS_CONTROL_LOST);
+    EXPECT_EQ("no valid reply: not measured", tas_status_readonly(FALSE, &commit, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+
+    EXPECT_EQ("a failure outranks a missing measurement", tas_status_worst(TAS_STATUS_NOT_MEASURED, TAS_STATUS_WRONG), TAS_STATUS_WRONG);
+    EXPECT_EQ("a missing measurement outranks a pass", tas_status_worst(TAS_STATUS_PASS, TAS_STATUS_NOT_PHASE), TAS_STATUS_NOT_PHASE);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2555,6 +2774,7 @@ int main(void) {
     test_68_restart();
     test_69_init_event();
     test_70_restart_end();
+    test_71_hold_status();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
