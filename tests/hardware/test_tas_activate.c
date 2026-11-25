@@ -178,6 +178,15 @@
  *              CONTROL     after the restoration: 3/0x0, next 1/0x0, commit 2.
  *              ORACLE_RESTORED_SLOT, _NEXT   the oracle with the deviated query as the one after the commit: PASS.
  *            PENDING or NONE accepted against a deviation needs a driver that answers wrongly: not reachable here, offline only.
+ *            TC-TASACT-META-006, a sixth complete run (#369, PR #524 review, Debug only; the extension is stated at m5_restore): the abort path
+ *            of META-005 on hardware after the write ended. Its own COMMIT, GUARD and DEVIATION as META-005; with the deviation confirmed a
+ *            second thread calls what the console handler calls.
+ *              ABORT_ORDER  the write ended before the abort was called, the abort before the restoration.
+ *              ABORT_ONE    one restoration, on the abort's thread; the case takes its result.
+ *              REG_RESTORE  as META-005. CONTROL, GENERATION_RESTORED: the driver's answer after it.
+ *              NO_REWRITE   one deviation write; a further change of the same record is refused (its accesses are counters); ENDQT3 raw twice.
+ *              ABORT_SETTLED  the abort's thread ended, nothing is open; otherwise INCONCLUSIVE_RESTORATION, and CLEANUP and RESTORE cannot PASS.
+ *            Not shown: an abort before or during the write (TC-MOCK-077 only), the delivery of a console signal, the end of a process.
  *            The trigger is sent when no send is outstanding, waited for within bounds, never withheld because of it. It only schedules the
  *            restart: until the END of the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before
  *            (TC-MOCK-068, TC-MOCK-070).
@@ -315,8 +324,8 @@
  * Mutations: TAS_ACTIVATE, bounded broadcast UDP and ICMP on the adapter under test, and the NIC cycle of that adapter
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
  * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
- * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER) and META-005 (the approved
- * exception there: nine READ_REGISTER, ENDQT3 written and restored); that mode also
+ * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER) and META-005, -006 (the
+ * approved exception there, per run: nine READ_REGISTER, ENDQT3 written and restored); that mode also
  * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, SET_HW_TIMESTAMPING, INIT_DEVICE and one filter restart. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
@@ -342,6 +351,7 @@
 #include "../../include/intel_pci_ids.h"
 #include "../ioctl/tas_activate_eval.h"
 #include "../ioctl/owned_worker.h"         /* worker and storage ownership beyond a bounded wait (#505, PR #518) */
+#include "../ioctl/owned_mutation.h"       /* META-005: the deviation and its restoration against an abort (#369, PR #524; TC-MOCK-077) */
 #include "../ioctl/tas_activate_cases.h"   /* contained cases, selection, exit status (#487) */
 #include "../ioctl/tas_lifecycle_eval.h"   /* instance lookup and lifecycle outcome of #364 (META-004) */
 typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of filteruser.h that this test does not use (as in #364) */
@@ -386,7 +396,7 @@ typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of fil
 static RUN_MODE g_mode;
 #define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
 #define META_STATUS_STEP_NS   (100LL * NS_PER_MS)     /* STATUS_OFFSET: a step that can be measured against wall time (META-003: back) */
-static int g_meta_case;                              /* --metadata-events: 1 to 5 = META-001 to -005 (the run_adapter call in progress) */
+static int g_meta_case;                              /* --metadata-events: 1 to 6 = META-001 to -006 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
 static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
@@ -456,21 +466,69 @@ static void report_abort(void)
 /* ---- --metadata-events, TC-TASACT-META-005 (#369): the STATUS oracle of --hold under a real deviation of a compared register ----
  * EXCEPTION, approved by Q on 2026-11-25 for this case alone: the Debug-only generic READ_REGISTER / WRITE_REGISTER, one deviation of
  * ENDQT3.END_TIME at the generated SSOT offset and the restoration of its exact raw value. It is no permission for generic register writes in
- * regression tests. Nothing else is written: no mode, no cycle, no BaseT, no other bit of the register. Every access uses the one bound
+ * regression tests. Extended by Q the same day by exactly one further run, TC-TASACT-META-006: the same deviation and restoration at the same
+ * offset under its own guard, restored by the abort path from another thread. Nothing else is written: no mode, no cycle, no BaseT, no other bit of the register. Every access uses the one bound
  * handle of the case. Nothing is written unless every precondition below was measured. Once the write was sent the restoration runs on every
  * way out (also on Ctrl-C and on an unhandled exception); a process that is terminated from outside cannot restore, the NIC cycle is then owed.
+ * An abort runs on another thread: it prevents a write that was not issued, or waits M5_ABORT_MS for the end of an issued one and restores only
+ * then (owned_mutation.h). An end that was not seen stays INCONCLUSIVE_RESTORATION; the case itself still restores as long as it runs.
+ * M5_ABORT_MS bounds the wait for the end of the write, not the restoration: that request is synchronous and has no bound of its own.
  */
 #define M5_LEAD_NS        (3 * NS_PER_SEC)        /* BaseT at least this far ahead of the commit */
 #define M5_MARGIN_NS      (1500LL * NS_PER_MS)    /* PHC before BaseT immediately before the write: measured, never assumed from a duration */
 #define M5_END_NS         450000000u              /* the deviated END_TIME of queue 3 (committed: WINDOW_END_NS, 400 ms) */
 #define M5_REGS           9u
+#define M5_ABORT_MS       3000u                   /* an abort waits this long for the end of an issued write (a console close ends the process after 5 s) */
 
-typedef enum { M5_RESTORE_NONE = 0, M5_RESTORE_VERIFIED, M5_RESTORE_DIFFERS, M5_RESTORE_UNREAD } M5_RESTORE;
+/* One run of META-005 or -006: its change, what it writes, what the restoration measured, and in which order. Never freed: an abort may hold it */
+typedef struct M5_RUN {
+    OWNED_MUTATION m;
+    const char *case_id;
+    HANDLE h;
+    avb_u64 luid;
+    avb_u32 offset, raw, deviated, back, value;
+    LONG wst, bst, write_st, read_st;
+    volatile LONG seq, writes, restores;                             /* order of the events below; the two register writes sent */
+    LONG write_end, abort_begin, restore_begin, restore_end;         /* their places in that order, 0: did not happen */
+    DWORD write_tid, abort_tid, restore_tid;
+    BOOL programmatic;                                               /* META-006: the abort is called by the case */
+    volatile LONG abort;                                             /* OWNED_ABORT + 1 of that call */
+    struct M5_RUN *next;
+} M5_RUN;
 
-static volatile LONG g_m5_state;   /* 0 nothing written; 1 the write was sent and is not restored; 2 the restoration is running */
-static HANDLE g_m5_handle = INVALID_HANDLE_VALUE;
-static avb_u32 g_m5_offset, g_m5_raw, g_m5_value;
-static LONG g_m5_write_st, g_m5_read_st;
+static M5_RUN *volatile g_m5_runs;   /* every run of this process, the newest first */
+static volatile LONG g_m5_stop;      /* a real abort came: nothing is issued any more, in no run */
+
+static M5_RUN *m5_new(avb_u64 luid)
+{
+    M5_RUN *r = (M5_RUN *)calloc(1, sizeof(*r));
+
+    if (r == NULL || !owned_mutation_prepare(&r->m)) {
+        free(r);
+        return NULL;
+    }
+    r->case_id = g_case;
+    r->luid = luid;
+    r->wst = r->bst = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    r->m.stop = &g_m5_stop;
+    r->m.ctx = r;
+    r->next = g_m5_runs;
+    InterlockedExchangePointer((PVOID volatile *)&g_m5_runs, r);
+    return r;
+}
+
+/** TRUE when a deviation of this adapter or its restoration has not been seen to end: no final state can be judged */
+static BOOL m5_pending(avb_u64 luid)
+{
+    M5_RUN *r;
+
+    for (r = g_m5_runs; r != NULL; r = r->next) {
+        if (r->luid == luid && owned_mutation_open(&r->m)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
 
 #ifndef NDEBUG
 static LONG m5_access(HANDLE h, DWORD code, avb_u32 offset, avb_u32 *value)
@@ -492,47 +550,75 @@ static LONG m5_access(HANDLE h, DWORD code, avb_u32 offset, avb_u32 *value)
     return st;
 }
 
-/** Back to the raw value read before the write, then read. Once; runs on whichever way out comes first */
-static M5_RESTORE m5_restore(void)
+static void m5_write(void *ctx)
 {
-    avb_u32 value = g_m5_raw;
-    M5_RESTORE r;
+    M5_RUN *r = (M5_RUN *)ctx;
+    avb_u32 v = r->deviated;
 
-    if (InterlockedCompareExchange(&g_m5_state, 2, 1) != 1) {
-        return M5_RESTORE_NONE;
-    }
-    g_m5_write_st = m5_access(g_m5_handle, IOCTL_AVB_WRITE_REGISTER, g_m5_offset, &value);
-    value = 0;
-    g_m5_read_st = m5_access(g_m5_handle, IOCTL_AVB_READ_REGISTER, g_m5_offset, &value);
-    g_m5_value = value;
-    r = g_m5_read_st != 0 ? M5_RESTORE_UNREAD : (value == g_m5_raw ? M5_RESTORE_VERIFIED : M5_RESTORE_DIFFERS);
-    InterlockedExchange(&g_m5_state, 0);
-    return r;
+    InterlockedIncrement(&r->writes);
+    r->write_tid = GetCurrentThreadId();
+    r->wst = m5_access(r->h, IOCTL_AVB_WRITE_REGISTER, r->offset, &v);
+    r->write_end = InterlockedIncrement(&r->seq);
 }
-#else
-static M5_RESTORE m5_restore(void) { return M5_RESTORE_NONE; }
+
+/** Back to the raw value read before the write, then read. Once, on one thread, after the write ended (owned_mutation.h) */
+static LONG m5_restore(void *ctx)
+{
+    M5_RUN *r = (M5_RUN *)ctx;
+    avb_u32 value = r->raw;
+
+    InterlockedIncrement(&r->restores);
+    r->restore_tid = GetCurrentThreadId();
+    r->restore_begin = InterlockedIncrement(&r->seq);
+    r->write_st = m5_access(r->h, IOCTL_AVB_WRITE_REGISTER, r->offset, &value);
+    value = 0;
+    r->read_st = m5_access(r->h, IOCTL_AVB_READ_REGISTER, r->offset, &value);
+    r->value = value;
+    r->restore_end = InterlockedIncrement(&r->seq);
+    return r->read_st != 0 ? M5_RESTORE_UNREAD : (value == r->raw ? M5_RESTORE_VERIFIED : M5_RESTORE_DIFFERS);
+}
 #endif
 
-static const char *m5_restore_tag(M5_RESTORE r)
-{
-    return r == M5_RESTORE_VERIFIED ? "PASS" : (r == M5_RESTORE_DIFFERS ? "CLEANUP_FAILED" : "INCONCLUSIVE_RESTORATION");
-}
-
-/** The case did not reach its own restoration (Ctrl-C, unhandled exception): restored from here, and named */
+/** The common abort path (console handler, exception filter, META-006): every run that did not reach its own restoration is named, and
+ *  restored from here once its write has ended. META-006 calls it itself: its line is evidence there, not a verdict */
 static void m5_abort(void)
 {
-    if (InterlockedCompareExchange(&g_m5_state, 0, 0) != 0) {
-        M5_RESTORE r = m5_restore();
+    M5_RUN *r;
 
-        printf("[%s] %s-REG_RESTORE: aborted with the ENDQT3 deviation sent; write 0x%08lX, read 0x%08lX value 0x%08X (raw before 0x%08X); "
-               "operator: NIC cycle of this adapter\n", r == M5_RESTORE_VERIFIED ? "INCONCLUSIVE" : m5_restore_tag(r), g_case,
-               (unsigned long)g_m5_write_st, (unsigned long)g_m5_read_st, g_m5_value, g_m5_raw);
-        fflush(stdout);
+    for (r = g_m5_runs; r != NULL; r = r->next) {
+        OWNED_ABORT a = owned_mutation_abort(&r->m, M5_ABORT_MS);
+        LONG result = InterlockedCompareExchange(&r->m.restored, 0, 0);
+        const char *tag = m5_abort_tag(a, result);
+
+        if (r->programmatic) {
+            InterlockedExchange(&r->abort, (LONG)a + 1);
+        }
+        if (a == OWNED_ABORT_NOTHING) {
+            continue;
+        }
+        printf(r->programmatic ? "    [EVIDENCE] programmatic abort, not a verdict: %s %s-REG_RESTORE: " : "[%s] %s-REG_RESTORE: ", tag, r->case_id);
+        if (a == OWNED_ABORT_PREVENTED) {
+            printf("aborted before the ENDQT3 deviation was sent: it is not sent any more\n");
+        } else if (a == OWNED_ABORT_RESTORED) {
+            printf("aborted with the ENDQT3 deviation sent and ended; write 0x%08lX, read 0x%08lX value 0x%08X (raw before 0x%08X); operator: NIC cycle of "
+                   "this adapter\n", (unsigned long)r->write_st, (unsigned long)r->read_st, r->value, r->raw);
+        } else {
+            printf("aborted with the ENDQT3 deviation sent; the end of the write or of its restoration was not seen within %u ms: not restored by the "
+                   "abort (raw before 0x%08X); operator: NIC cycle of this adapter\n", M5_ABORT_MS, r->raw);
+        }
     }
+    fflush(stdout);
 }
 
-static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; m5_abort(); report_abort(); return FALSE; }
-static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; m5_abort(); report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
+/** A real abort: the process is ending */
+static void m5_end(void)
+{
+    InterlockedExchange(&g_m5_stop, 1);
+    m5_abort();
+}
+
+static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; m5_end(); report_abort(); return FALSE; }
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; m5_end(); report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
 
 /* One verdict line. Nonpassing tags count as failures, BLOCKED separately */
 static void verdict(const char *tag, const char *check, UINT32 adapter, avb_u16 did, const char *reason)
@@ -1150,7 +1236,7 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     printf("\n  --- Primary cleanup: NIC cycle of this adapter ---\n");
     /* The cleanup judges a final state only when no operation of this test can still change it. The cycle runs either way: it is the
      * recovery, bounded, and an open operation may hold the disable back */
-    e.operations_pending = !owned_ops_settled(&g_ops, id->net_luid, OPS_SETTLE_MS);
+    e.operations_pending = !owned_ops_settled(&g_ops, id->net_luid, OPS_SETTLE_MS) || m5_pending(id->net_luid);
     if (e.operations_pending) {
         printf("    [EVIDENCE] an operation of this test on this adapter has not been observed to end: whatever is measured below is not final\n");
     }
@@ -1811,7 +1897,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     g_next_seq = 0;   /* per adapter run: no capture is active here, so every tag slot is free */
     g_capture_luid = 0;   /* no observer carried over from the previous adapter run; find_observer sets it only when one is found (PR #481) */
     ZeroMemory(&ipv4, sizeof(ipv4));
-    if (!owned_ops_settled(&g_ops, id->net_luid, 0)) {
+    if (!owned_ops_settled(&g_ops, id->net_luid, 0) || m5_pending(id->net_luid)) {
         verdict("BLOCKED", "COMMIT", index, id->device_id,
                 "an operation of an earlier case of this process on this adapter has not been observed to end: no pre-state can be established");
         return;
@@ -1923,8 +2009,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         return;
     }
 
-    if (g_mode == MODE_META && g_meta_case == 5) {
-        /* TC-TASACT-META-005: one handle for every access of the case */
+    if (g_mode == MODE_META && (g_meta_case == 5 || g_meta_case == 6)) {
+        /* TC-TASACT-META-005 and -006: one handle for every access of the case */
         if (wire) { wire_stop(); }
         if (sock != INVALID_SOCKET) { closesocket(sock); }
         CloseHandle(h2);
@@ -4320,15 +4406,65 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 }
 
 /* ---- --metadata-events, TC-TASACT-META-005 (#369): see the exception at m5_restore ---- */
+#ifndef NDEBUG
+#define M6_WORKER_MS      10000u                  /* META-006: the end of the thread that calls the abort path */
+
+static QUERY_READ g_m5_qr, g_m5_qj;   /* under the deviation: the oracle's reference, the judged query */
+
+static void m5_observe(void *ctx)
+{
+    M5_RUN *r = (M5_RUN *)ctx;
+
+    r->bst = m5_access(r->h, IOCTL_AVB_READ_REGISTER, r->offset, &r->back);
+    query(r->h, &g_m5_qr);   /* the deviation is there before it */
+    query(r->h, &g_m5_qj);
+}
+
+static DWORD WINAPI m6_abort_worker(LPVOID p)
+{
+    M5_RUN *r = *(M5_RUN **)p;
+
+    r->abort_tid = GetCurrentThreadId();
+    r->abort_begin = InterlockedIncrement(&r->seq);
+    m5_abort();   /* what the console handler calls */
+    return 0;
+}
+
+/** META-006: only with the deviation confirmed, a second thread runs the abort path. It stays registered until its end was seen */
+static void m6_observe(void *ctx)
+{
+    M5_RUN *r = (M5_RUN *)ctx;
+    OWNED_OP *op;
+
+    m5_observe(ctx);
+    if (r->wst != 0 || r->bst != 0 || r->back != r->deviated || !query_valid(&g_m5_qr) || g_m5_qr.q.regs.endqt[3] != r->deviated ||
+        !query_valid(&g_m5_qj) || g_m5_qj.q.regs.endqt[3] != r->deviated) {
+        return;   /* not confirmed: the case restores as usual */
+    }
+    op = owned_op_new(&g_ops, r->luid);
+    r->programmatic = TRUE;
+    if (op != NULL && owned_worker_start(&op->worker, m6_abort_worker, &r, sizeof(r))) {
+        (void)owned_worker_wait(&op->worker, M6_WORKER_MS);
+    }
+}
+
+/* Counted instead of sent: a further change of the same record after the abort must not get here */
+static volatile LONG g_m6_counted;
+static void m6_count_write(void *ctx) { (void)ctx; InterlockedIncrement(&g_m6_counted); }
+static LONG m6_count_restore(void *ctx) { (void)ctx; InterlockedIncrement(&g_m6_counted); return OWNED_MUT_NONE; }
+#endif
+
 static const char *const m5_lines[] = { "REG_RESTORE", "DEVIATION", "GENERATION", "R2", "ORACLE_SLOT", "ORACLE_NEXT", "CONTROL", "GENERATION_RESTORED",
                                         "ORACLE_RESTORED_SLOT", "ORACLE_RESTORED_NEXT" };
+static const char *const m6_lines[] = { "REG_RESTORE", "DEVIATION", "ABORT_ORDER", "ABORT_ONE", "NO_REWRITE", "ABORT_SETTLED", "GENERATION_RESTORED", "CONTROL" };
 
 static void m5_not_run(const char *tag, UINT32 index, avb_u16 did, const char *reason)
 {
-    unsigned k;
+    const char *const *lines = g_meta_case == 6 ? m6_lines : m5_lines;
+    unsigned k, n = g_meta_case == 6 ? (unsigned)(sizeof(m6_lines) / sizeof(m6_lines[0])) : (unsigned)(sizeof(m5_lines) / sizeof(m5_lines[0]));
 
-    for (k = 0; k < sizeof(m5_lines) / sizeof(m5_lines[0]); k++) {
-        verdict(tag, m5_lines[k], index, did, reason);
+    for (k = 0; k < n; k++) {
+        verdict(tag, lines[k], index, did, reason);
     }
 }
 
@@ -4370,6 +4506,61 @@ static BOOL m5_r2(const QUERY_READ *r)
 }
 #endif
 
+#ifndef NDEBUG
+/** TC-TASACT-META-006 (#369, PR #524 review): the abort path after the write ended. Each line is its own measurement. It shows neither an abort
+ *  before or during the write (TC-MOCK-077) nor the delivery of a Windows console signal or the end of a process */
+static void m6_judge(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, M5_RUN *run, BOOL deviation, LONG restored,
+                     const AVB_TAS_OP_REQUEST *op, const QUERY_READ *qg, const QUERY_READ *qj, const QUERY_READ *qc)
+{
+    BOOL called = run->abort_begin != 0, ended = called && InterlockedCompareExchange(&run->abort, 0, 0) != 0 &&
+                  owned_ops_settled(&g_ops, id->net_luid, 0), open = m5_pending(id->net_luid), again = FALSE, control, r1;
+    LONG outcome = run->abort - 1;
+    volatile BOOL issued = FALSE;
+    QUERY_READ qd;
+    char why[800];
+
+    printf("    [EVIDENCE] META-006 order: write ended %ld, abort called %ld, restoration began %ld and ended %ld; threads: write %lu, abort %lu, "
+           "restoration %lu; writes %ld, restorations %ld; abort outcome %ld (2: restored after the end of the write), its thread %s\n",
+           run->write_end, run->abort_begin, run->restore_begin, run->restore_end, run->write_tid, run->abort_tid, run->restore_tid, run->writes,
+           run->restores, outcome, ended ? "ended" : (called ? "NOT seen to end" : "not started"));
+    sprintf_s(why, sizeof(why), "required: write ended < abort called < restoration began < restoration ended, outcome restored; observed %ld, %ld, %ld, %ld, "
+              "outcome %ld%s", run->write_end, run->abort_begin, run->restore_begin, run->restore_end, outcome,
+              deviation ? (ended ? "" : "; the abort path was not seen to end") : "; the deviation is not established (see DEVIATION)");
+    verdict(!deviation || !ended ? "INCONCLUSIVE" : (run->write_end != 0 && run->write_end < run->abort_begin && run->abort_begin < run->restore_begin &&
+            run->restore_begin < run->restore_end && outcome == OWNED_ABORT_RESTORED ? "PASS" : "FAIL"), "ABORT_ORDER", index, id->device_id, why);
+    sprintf_s(why, sizeof(why), "required: one restoration, by the abort's thread, not by the writer's; observed %ld by thread %lu (abort %lu, writer %lu), the "
+              "case took result %ld over", run->restores, run->restore_tid, run->abort_tid, run->write_tid, restored);
+    verdict(!deviation || !ended ? "INCONCLUSIVE" : (run->restores == 1 && run->restore_tid == run->abort_tid && run->restore_tid != run->write_tid &&
+            restored == run->m.restored ? "PASS" : "FAIL"), "ABORT_ONE", index, id->device_id, why);
+
+    /* A further change of the same record, its register accesses replaced by counters: refused, and nothing is sent even if it were not */
+    if (ended && !open) {
+        run->m.write = m6_count_write;
+        run->m.observe = m6_count_write;
+        run->m.restore = m6_count_restore;
+        InterlockedExchange(&g_m6_counted, 0);
+        (void)owned_mutation_run(&run->m, M5_ABORT_MS, &issued);
+        again = TRUE;
+    }
+    query(h, &qd);
+    sprintf_s(why, sizeof(why), "deviation writes sent %ld (required 1); a further change after the abort: %s, %ld calls (required: refused, 0; counted, no register "
+              "access); ENDQT3 in the two queries after the restoration 0x%08X and 0x%08X (raw 0x%08X)", run->writes, !again ? "not tried" :
+              (issued ? "ISSUED" : "refused"), g_m6_counted, qc->q.regs.endqt[3], qd.q.regs.endqt[3], run->raw);
+    verdict(!deviation || !again || !query_valid(qc) || !query_valid(&qd) ? "INCONCLUSIVE" : (run->writes == 1 && !issued && g_m6_counted == 0 &&
+            qc->q.regs.endqt[3] == run->raw && qd.q.regs.endqt[3] == run->raw ? "PASS" : "FAIL"), "NO_REWRITE", index, id->device_id, why);
+    verdict(ended && !open ? "PASS" : (called || open ? "INCONCLUSIVE_RESTORATION" : "INCONCLUSIVE"), "ABORT_SETTLED", index, id->device_id,
+            ended && !open ? "the abort's thread ended and no deviation or restoration is open before the cleanup" :
+            (called || open ? "not seen to end: CLEANUP and RESTORE cannot pass" : "the abort path was not called"));
+    meta_line("GENERATION_RESTORED", index, id->device_id, qg, &qd, 0, "the deviation and its restoration by the abort path");
+    control = restored == M5_RESTORE_VERIFIED && m5_mine(&qd, op, id) && qd.q.regs.endqt[3] == qg->q.regs.endqt[3] && m5_others_equal(&qd.q.regs, &qg->q.regs);
+    r1 = control && m5_r1(&qd) && m5_record(&qd, qg, op);
+    sprintf_s(why, sizeof(why), "required 3/0x0, next 1/0x0, commit 2 with the committed schedule and bracket; observed %u/0x%X next %u/0x%X commit %u, ENDQT3 0x%08X "
+              "(under the deviation 0x%08X)%s", qd.q.current_status, qd.q.current_reasons, qd.q.next_status, qd.q.next_reasons, qd.q.current_commit.state,
+              qd.q.regs.endqt[3], qj->q.regs.endqt[3], control ? "" : "; the restored state before BaseT is not established");
+    verdict(!control ? "INCONCLUSIVE" : (r1 ? "PASS" : "FAIL"), "CONTROL", index, id->device_id, why);
+}
+#endif
+
 /** h: the bound handle of every access of this case. The caller owns the NIC-cycle cleanup. No print between the commit and the last query:
  *  the PHC phase of every step is measured, and the fewer delays the better */
 static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame)
@@ -4386,9 +4577,10 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
     AVB_TAS_OP_REQUEST op, sent;
     AVB_TAS_STATE s0, s;
     QUERY_READ q0, qg, qr, qj, qc;
-    avb_u32 reg[M5_REGS], want[M5_REGS], deviated = 0, back = 0, v;
-    LONG reg_st[M5_REGS], wst = (LONG)AVB_NTSTATUS_UNAVAILABLE, bst = (LONG)AVB_NTSTATUS_UNAVAILABLE, st;
-    M5_RESTORE restored = M5_RESTORE_NONE;
+    avb_u32 reg[M5_REGS], want[M5_REGS], deviated = 0, back = 0;
+    LONG reg_st[M5_REGS], wst, bst, st, restored = OWNED_MUT_NONE;
+    volatile BOOL issued = FALSE;
+    M5_RUN *run;
     TAS_STATUS_CONTROL c;
     TAS_STATUS_CLASS cls;
     DWORD br = 0, information = 0;
@@ -4405,10 +4597,17 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
         m5_not_run("INCONCLUSIVE", index, id->device_id, "no Debug driver shown: not exercised (never PASS)");
         return;
     }
-    ZeroMemory(&qr, sizeof(qr));
-    ZeroMemory(&qj, sizeof(qj));
     ZeroMemory(&qc, sizeof(qc));
     ZeroMemory(&s, sizeof(s));
+    ZeroMemory(&g_m5_qr, sizeof(g_m5_qr));
+    ZeroMemory(&g_m5_qj, sizeof(g_m5_qj));
+    run = m5_new(id->net_luid);
+    if (run == NULL) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id, "no record or events that order the write against an abort: nothing is committed");
+        verdict("BLOCKED", "GUARD", index, id->device_id, "nothing was committed (see COMMIT): nothing is written");
+        m5_not_run("BLOCKED", index, id->device_id, "nothing was committed (see COMMIT): nothing was written");
+        return;
+    }
     query(h, &q0);
     if (!read_state(h, &s0) || s0.armed != AVB_TAS_STATE_CLEAN || !query_clean(&q0) || q0.q.net_luid != id->net_luid || q0.q.generation == 0 ||
         q0.q.context_epoch == 0 || !read_phc(h, &phc)) {
@@ -4453,25 +4652,27 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
               (!phase ? "the PHC read at least 1.5 s before BaseT immediately before the write" : NULL))))));
     guard = missing == NULL;
     if (guard) {
-        g_m5_handle = h;
-        g_m5_offset = offset[7];
-        g_m5_raw = reg[7];
-        InterlockedExchange(&g_m5_state, 1);   /* owed from before the write is sent */
-        __try {
-            v = deviated;
-            wst = m5_access(h, IOCTL_AVB_WRITE_REGISTER, offset[7], &v);
-            bst = m5_access(h, IOCTL_AVB_READ_REGISTER, offset[7], &back);
-            query(h, &qr);   /* the oracle's reference: the deviation is there before it */
-            query(h, &qj);   /* the judged query */
-        } __finally {
-            restored = m5_restore();
+        run->h = h;
+        run->offset = offset[7];
+        run->raw = reg[7];
+        run->deviated = deviated;
+        run->m.write = m5_write;
+        run->m.observe = g_meta_case == 6 ? m6_observe : m5_observe;
+        run->m.restore = m5_restore;
+        restored = owned_mutation_run(&run->m, M5_ABORT_MS, &issued);   /* owed from before the write is sent; restored on every way out */
+        if (issued) {
+            query(h, &qc);   /* after the restoration */
         }
-        query(h, &qc);       /* after the restoration */
     }
+    wst = run->wst;
+    bst = run->bst;
+    back = run->back;
+    qr = g_m5_qr;
+    qj = g_m5_qj;
 
     /* Everything below only prints and judges */
-    printf("    [EVIDENCE] EXCEPTION (Q 2026-11-25, this case only): READ_REGISTER x9, WRITE_REGISTER x2 at the generated ENDQT3 offset; Debug driver flags=0x%04X\n",
-           ver.Flags);
+    printf("    [EVIDENCE] EXCEPTION (Q 2026-11-25, %s): READ_REGISTER x9, WRITE_REGISTER x2 at the generated ENDQT3 offset; Debug driver flags=0x%04X\n",
+           g_meta_case == 6 ? "the one further run META-006 only" : "this case only", ver.Flags);
     print_status("before the commit", &q0);
     sprintf_s(why, sizeof(why), "ACTIVATE op=0x%016llX base=%lld (PHC %lld) ntstatus=0x%08lX information=%lu, pair epoch %llu generation %llu -> %llu, record %d",
               op.client_op_id, base, phc, (unsigned long)st, information, op.context_epoch, op.expected_generation, qg.q.generation, (int)s.armed);
@@ -4488,12 +4689,17 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
         m5_not_run("INCONCLUSIVE", index, id->device_id, "the guard did not hold (see GUARD): nothing was written");
         return;
     }
+    if (!issued) {
+        m5_not_run("INCONCLUSIVE", index, id->device_id, "aborted before the deviation was sent: nothing was written");
+        return;
+    }
     print_status("reference under the deviation", &qr);
     print_status("judged under the deviation", &qj);
     print_status("after the restoration", &qc);
     sprintf_s(why, sizeof(why), "ENDQT3 offset 0x%05X raw before 0x%08X, deviation 0x%08X: write 0x%08lX; restoration write 0x%08lX, read 0x%08lX value 0x%08X%s",
-              g_m5_offset, g_m5_raw, deviated, (unsigned long)wst, (unsigned long)g_m5_write_st, (unsigned long)g_m5_read_st, g_m5_value,
-              restored == M5_RESTORE_VERIFIED ? ": the exact raw value" : (restored == M5_RESTORE_DIFFERS ? ": another value" : ": not read"));
+              run->offset, run->raw, deviated, (unsigned long)wst, (unsigned long)run->write_st, (unsigned long)run->read_st, run->value,
+              restored == M5_RESTORE_VERIFIED ? ": the exact raw value" : (restored == M5_RESTORE_DIFFERS ? ": another value" :
+              (restored == M5_RESTORE_UNREAD ? ": not read" : ": its end was not seen")));
     verdict(m5_restore_tag(restored), "REG_RESTORE", index, id->device_id, why);
 
     deviation = bst == 0 && back == deviated && m5_mine(&qr, &op, id) && m5_mine(&qj, &op, id) && qr.q.regs.endqt[3] == deviated &&
@@ -4503,6 +4709,10 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
               qj.q.regs.endqt[3], deviated, m5_others_equal(&qr.q.regs, &qg.q.regs) && m5_others_equal(&qj.q.regs, &qg.q.regs) ? "unchanged" : "CHANGED",
               m5_mine(&qr, &op, id), m5_mine(&qj, &op, id));
     verdict(deviation ? "PASS" : "INCONCLUSIVE", "DEVIATION", index, id->device_id, why);
+    if (g_meta_case == 6) {
+        m6_judge(h, index, id, run, deviation, restored, &op, &qg, &qj, &qc);
+        return;
+    }
     meta_line("GENERATION", index, id->device_id, &qg, &qj, 0, "two queries and a raw register write under the committed schedule");
 
     /* R2: the driver's own answer to the real deviation, in both queries */
@@ -4658,6 +4868,9 @@ static int run_case(void)
             run_adapter(ids[i].index, &ids[i]);
             g_meta_case = 5;
             g_case = "TC-TASACT-META-005";
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 6;
+            g_case = "TC-TASACT-META-006";
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-META-001";
         } else {

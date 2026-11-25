@@ -43,6 +43,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../../devices/i226_tas_query.h"   /* #350: the query under a record, TC-MOCK-075 */
 #include "../ioctl/tas_activate_eval.h"
 #include "../ioctl/owned_worker.h"         /* #505: worker ownership, PR #518 review */
+#include "../ioctl/owned_mutation.h"       /* #369: TC-MOCK-077, order of a temporary change and an abort, PR #524 review */
 #include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
 #include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
@@ -2328,6 +2329,335 @@ static void test_15_lifecycle_outcome(void) {
     EXPECT_EQ("fallen counters are a new context", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
 }
 
+/* TC-MOCK-077: a temporary change and its restoration against an abort on another thread (#369, PR #524 review; test logic only, real
+ * threads, a fake register, no driver). The writer is held at a point, the abort is called from its own thread as the console handler
+ * is, then the writer goes on. No order of the two leaves the change behind, issues it after an abort, restores before its end was seen
+ * or restores twice; an end that is not seen is reported as such and stays owed */
+typedef struct {
+    OWNED_MUTATION m;
+    volatile LONG reg, writes, restores, restores_in_write, in_write;
+    LONG restore_result;                 /* what the restoration reports */
+    int hold_at;                         /* the writer waits at this point (OWNED_MUT_POINT), -1: nowhere */
+    BOOL hold_write, hold_restore;       /* inside the write (the change already took effect) / inside the restoration */
+    BOOL abort_in_write;                 /* the writer's own thread aborts, as the exception filter does */
+    OWNED_ABORT own_abort;
+    HANDLE reached, go;                  /* the held place was reached / may be left */
+    volatile BOOL issued;
+    LONG result;
+    DWORD abort_ms;
+    volatile LONG aborted;               /* OWNED_ABORT + 1 when the abort thread returned */
+} MUT77;
+
+#define MUT77_RAW   0x17D78400L
+#define MUT77_DEV   0x1AD27480L
+#define MUT77_WAIT  10000u
+
+static void mut77_hold(MUT77 *f)
+{
+    SetEvent(f->reached);
+    (void)WaitForSingleObject(f->go, MUT77_WAIT);
+}
+
+static void mut77_write(void *ctx)
+{
+    MUT77 *f = (MUT77 *)ctx;
+
+    InterlockedExchange(&f->in_write, 1);
+    InterlockedIncrement(&f->writes);
+    if (f->hold_write) { mut77_hold(f); }   /* sent, its effect still to come */
+    InterlockedExchange(&f->reg, MUT77_DEV);
+    if (f->abort_in_write) { f->own_abort = owned_mutation_abort(&f->m, f->abort_ms); }
+    InterlockedExchange(&f->in_write, 0);
+}
+
+static LONG mut77_restore(void *ctx)
+{
+    MUT77 *f = (MUT77 *)ctx;
+
+    InterlockedIncrement(&f->restores);
+    if (InterlockedCompareExchange(&f->in_write, 0, 0) != 0) { InterlockedIncrement(&f->restores_in_write); }
+    if (f->hold_restore) { mut77_hold(f); }
+    InterlockedExchange(&f->reg, MUT77_RAW);
+    return f->restore_result;
+}
+
+static void mut77_observe(void *ctx) { (void)ctx; }
+
+static void mut77_at(void *ctx, OWNED_MUT_POINT point)
+{
+    MUT77 *f = (MUT77 *)ctx;
+
+    if (f->hold_at == (int)point) { mut77_hold(f); }
+}
+
+static DWORD WINAPI mut77_writer(LPVOID p)
+{
+    MUT77 *f = (MUT77 *)p;
+
+    f->result = owned_mutation_run(&f->m, MUT77_WAIT, &f->issued);
+    return 0;
+}
+
+static DWORD WINAPI mut77_abort(LPVOID p)
+{
+    MUT77 *f = (MUT77 *)p;
+
+    InterlockedExchange(&f->aborted, (LONG)owned_mutation_abort(&f->m, f->abort_ms) + 1);
+    return 0;
+}
+
+static void mut77_init(MUT77 *f, int hold_at)
+{
+    ZeroMemory(f, sizeof(*f));
+    f->reg = MUT77_RAW;
+    f->restore_result = 1;
+    f->hold_at = hold_at;
+    f->abort_ms = MUT77_WAIT;
+    f->reached = CreateEventA(NULL, TRUE, FALSE, NULL);
+    f->go = CreateEventA(NULL, TRUE, FALSE, NULL);
+    f->m.write = mut77_write;
+    f->m.observe = mut77_observe;
+    f->m.restore = mut77_restore;
+    f->m.at = mut77_at;
+    f->m.ctx = f;
+    (void)owned_mutation_prepare(&f->m);
+}
+
+static void mut77_free(MUT77 *f)
+{
+    CloseHandle(f->reached);
+    CloseHandle(f->go);
+    CloseHandle(f->m.write_ended);
+    CloseHandle(f->m.restore_ended);
+}
+
+/** The writer is held, the abort starts on its own thread. Returns the abort's thread; *w the writer's */
+static HANDLE mut77_held(MUT77 *f, HANDLE *w)
+{
+    *w = CreateThread(NULL, 0, mut77_writer, f, 0, NULL);
+    (void)WaitForSingleObject(f->reached, MUT77_WAIT);
+    return CreateThread(NULL, 0, mut77_abort, f, 0, NULL);
+}
+
+static BOOL mut77_join(HANDLE t)
+{
+    BOOL ok = t != NULL && WaitForSingleObject(t, MUT77_WAIT) == WAIT_OBJECT_0;
+    CloseHandle(t);
+    return ok;
+}
+
+static void test_77_owned_mutation(void)
+{
+    static const char *const at[] = { "after the publication", "after the issue, before the write" };
+    MUT77 f;
+    HANDLE w, a, limited, full;
+    LONG v;
+    BOOL t;
+    unsigned k;
+
+    printf("\n[TC-MOCK-077] #369 a temporary change against an abort on another thread (test logic only)\n");
+
+    /* No abort */
+    mut77_init(&f, -1);
+    (void)mut77_writer(&f);
+    t = f.issued && f.result == 1 && f.writes == 1 && f.restores == 1 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("no abort: written, restored once with its result", t);
+    (void)mut77_writer(&f);
+    t = f.issued && f.result == 1 && f.writes == 2 && f.restores == 2 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("... a second change is possible", t);
+    v = (LONG)owned_mutation_abort(&f.m, 0);
+    EXPECT_EQ("... an abort afterwards owns nothing", v, (LONG)OWNED_ABORT_NOTHING);
+    (void)mut77_writer(&f);
+    t = !f.issued && f.result == OWNED_MUT_NONE && f.writes == 2 && f.restores == 2 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("... and nothing is written after it", t);
+    mut77_free(&f);
+
+    /* Abort before anything was published */
+    mut77_init(&f, -1);
+    v = (LONG)owned_mutation_abort(&f.m, 0);
+    EXPECT_EQ("an abort before the publication owns nothing", v, (LONG)OWNED_ABORT_NOTHING);
+    (void)mut77_writer(&f);
+    t = !f.issued && f.writes == 0 && f.restores == 0 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("... and the change is not issued after it", t);
+    mut77_free(&f);
+
+    /* The reviewed schedule: the writer is held after the publication, the abort runs to its end, the writer goes on */
+    mut77_init(&f, OWNED_MUT_AT_PUBLISHED);
+    a = mut77_held(&f, &w);
+    t = mut77_join(a);
+    EXPECT_TRUE("held after the publication: the abort returns without waiting for the writer", t);
+    EXPECT_EQ("... it prevented the write", f.aborted - 1, OWNED_ABORT_PREVENTED);
+    EXPECT_FALSE("... nothing is open", owned_mutation_open(&f.m));
+    SetEvent(f.go);
+    t = mut77_join(w);
+    EXPECT_TRUE("... the writer goes on and ends", t);
+    EXPECT_EQ("... the change was not issued", f.writes, 0);
+    EXPECT_EQ("... and nothing was restored", f.restores, 0);
+    EXPECT_EQ("... the register holds its raw value", f.reg, MUT77_RAW);
+    EXPECT_EQ("... the writer reports no restoration", f.result, OWNED_MUT_NONE);
+    mut77_free(&f);
+
+    /* Issued, held before the write; and held inside the write (already sent, its effect still to come) */
+    for (k = 0; k < 2; k++) {
+        mut77_init(&f, k == 0 ? OWNED_MUT_AT_ISSUED : -1);
+        f.hold_write = k == 1;
+        printf("    held %s\n", k == 0 ? at[1] : "inside the write already sent");
+        a = mut77_held(&f, &w);
+        v = (LONG)WaitForSingleObject(a, 200);
+        EXPECT_EQ("the abort does not return before the write ended", v, (LONG)WAIT_TIMEOUT);
+        EXPECT_EQ("... and restores nothing before", f.restores, 0);
+        SetEvent(f.go);
+        t = mut77_join(a) && mut77_join(w);
+        EXPECT_TRUE("... the write ends: abort and writer end", t);
+        EXPECT_EQ("... restored exactly once", f.restores, 1);
+        EXPECT_EQ("... never while the write was running", f.restores_in_write, 0);
+        EXPECT_EQ("... the register holds its raw value", f.reg, MUT77_RAW);
+        EXPECT_EQ("... the abort has the result", f.aborted - 1, OWNED_ABORT_RESTORED);
+        EXPECT_TRUE("... and so has the writer", f.result == 1 && f.m.restored == 1);
+        f.hold_write = FALSE;
+        f.hold_at = -1;
+        (void)mut77_writer(&f);
+        t = !f.issued && f.writes == 1;
+        EXPECT_TRUE("... nothing is written after the abort", t);
+        mut77_free(&f);
+    }
+
+    /* Ended, the restoration is the abort's; then the writer's, the abort waits for it */
+    mut77_init(&f, OWNED_MUT_AT_ENDED);
+    f.restore_result = 2;
+    a = mut77_held(&f, &w);
+    t = mut77_join(a) && f.aborted - 1 == OWNED_ABORT_RESTORED && f.restores == 1 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("held after the write ended: the abort restores", t);
+    SetEvent(f.go);
+    t = mut77_join(w) && f.restores == 1 && f.result == 2;
+    EXPECT_TRUE("... the writer does not restore again and has the abort's result", t);
+    mut77_free(&f);
+
+    mut77_init(&f, -1);
+    f.hold_restore = TRUE;
+    a = mut77_held(&f, &w);
+    v = (LONG)WaitForSingleObject(a, 200);
+    EXPECT_EQ("the writer is restoring: the abort waits for it", v, (LONG)WAIT_TIMEOUT);
+    SetEvent(f.go);
+    t = mut77_join(a) && mut77_join(w) && f.restores == 1 && f.aborted - 1 == OWNED_ABORT_RESTORED && f.result == 1;
+    EXPECT_TRUE("... restored once, both have the result", t);
+    mut77_free(&f);
+
+    /* An end that is not seen within the bound: unconfirmed, nothing restored, still owed by the writer */
+    mut77_init(&f, -1);
+    f.hold_write = TRUE;
+    f.abort_ms = 100;
+    a = mut77_held(&f, &w);
+    t = mut77_join(a);
+    EXPECT_TRUE("the write does not end within the bound: the abort returns", t);
+    EXPECT_EQ("... unconfirmed", f.aborted - 1, OWNED_ABORT_UNCONFIRMED);
+    EXPECT_EQ("... nothing was restored while it may be running", f.restores, 0);
+    EXPECT_EQ("... the write stays owned", f.m.state, OWNED_MUT_IN_FLIGHT);
+    EXPECT_TRUE("... and open: no final state can be judged", owned_mutation_open(&f.m));
+    v = (LONG)owned_mutation_abort(&f.m, 50);
+    EXPECT_EQ("... a second abort does not settle it either", v, (LONG)OWNED_ABORT_UNCONFIRMED);
+    SetEvent(f.go);
+    t = mut77_join(w) && f.restores == 1 && f.restores_in_write == 0 && f.reg == MUT77_RAW && f.result == 1;
+    EXPECT_TRUE("... the writer restores after the late end", t);
+    EXPECT_FALSE("... then nothing is open", owned_mutation_open(&f.m));
+    mut77_free(&f);
+
+    /* A wait that fails is no observed end (no SYNCHRONIZE right) */
+    mut77_init(&f, -1);
+    f.hold_write = TRUE;
+    full = f.m.write_ended;
+    if (DuplicateHandle(GetCurrentProcess(), full, GetCurrentProcess(), &limited, EVENT_MODIFY_STATE, FALSE, 0)) {
+        f.m.write_ended = limited;
+        a = mut77_held(&f, &w);
+        t = mut77_join(a) && f.aborted - 1 == OWNED_ABORT_UNCONFIRMED && f.restores == 0;
+        EXPECT_TRUE("a failed wait: the abort returns unconfirmed", t);
+        SetEvent(f.go);
+        t = mut77_join(w) && f.restores == 1 && f.reg == MUT77_RAW;
+        EXPECT_TRUE("... the writer restores", t);
+        CloseHandle(limited);
+        f.m.write_ended = full;
+    } else {
+        EXPECT_EQ("limited handle available", 0, 1);
+    }
+    mut77_free(&f);
+
+    /* A restoration that is not seen to end: unconfirmed for the writer, never a result */
+    mut77_init(&f, OWNED_MUT_AT_ENDED);
+    f.hold_restore = TRUE;
+    w = CreateThread(NULL, 0, mut77_writer, &f, 0, NULL);
+    (void)WaitForSingleObject(f.reached, MUT77_WAIT);
+    ResetEvent(f.reached);
+    a = CreateThread(NULL, 0, mut77_abort, &f, 0, NULL);
+    (void)WaitForSingleObject(f.reached, 1000);   /* the abort's restoration is held */
+    t = !owned_mutation_restore_here(&f.m) && f.restores == 1;
+    EXPECT_TRUE("a restoration running elsewhere is not taken a second time", t);
+    EXPECT_TRUE("... it is open", owned_mutation_open(&f.m));
+    v = (LONG)owned_mutation_finish(&f.m, 50);
+    EXPECT_EQ("a restoration running elsewhere and not ending: unconfirmed", v, (LONG)OWNED_MUT_UNCONFIRMED);
+    SetEvent(f.go);
+    t = mut77_join(a) && mut77_join(w) && f.restores == 1 && f.reg == MUT77_RAW;
+    EXPECT_TRUE("... restored once in the end", t);
+    mut77_free(&f);
+
+    /* The writer's own thread (unhandled exception filter): no wait for itself */
+    mut77_init(&f, -1);
+    f.abort_in_write = TRUE;
+    (void)mut77_writer(&f);
+    t = f.own_abort == OWNED_ABORT_RESTORED && f.restores == 1 && f.reg == MUT77_RAW && f.result == 1;
+    EXPECT_TRUE("abort on the writer's thread: restored there, without a wait", t);
+    mut77_free(&f);
+
+    /* A process that is ending: an abort that found an earlier change stops a new one, too */
+    for (k = 0; k < 2; k++) {
+        volatile LONG stop = k == 0;
+
+        mut77_init(&f, k == 0 ? -1 : OWNED_MUT_AT_PUBLISHED);
+        f.m.stop = &stop;
+        w = CreateThread(NULL, 0, mut77_writer, &f, 0, NULL);
+        if (k == 1) {
+            (void)WaitForSingleObject(f.reached, MUT77_WAIT);
+            InterlockedExchange(&stop, 1);   /* after the publication, before the issue */
+            SetEvent(f.go);
+        }
+        t = mut77_join(w) && !f.issued && f.writes == 0 && f.restores == 0 && f.reg == MUT77_RAW && f.result == OWNED_MUT_NONE;
+        EXPECT_TRUE(k == 0 ? "stopped before: nothing is issued" : "stopped after the publication: nothing is issued", t);
+        EXPECT_FALSE("... and nothing is open", owned_mutation_open(&f.m));
+        mut77_free(&f);
+    }
+    {
+        volatile LONG stop = 0;
+
+        mut77_init(&f, -1);
+        f.m.stop = &stop;
+        (void)mut77_writer(&f);
+        t = f.issued && f.writes == 1 && f.restores == 1 && f.result == 1;
+        EXPECT_TRUE("not stopped: the change runs", t);
+        mut77_free(&f);
+    }
+
+    /* Without the events nothing is written */
+    mut77_init(&f, -1);
+    CloseHandle(f.m.restore_ended);
+    f.m.restore_ended = NULL;
+    (void)mut77_writer(&f);
+    t = !f.issued && f.writes == 0;
+    EXPECT_TRUE("no events: nothing is issued", t);
+    (void)owned_mutation_prepare(&f.m);
+    mut77_free(&f);
+
+    /* What the hardware test prints */
+    EXPECT_TRUE("abort lines: prevented and restored are no PASS", strcmp(m5_abort_tag(OWNED_ABORT_PREVENTED, OWNED_MUT_NONE), "INCONCLUSIVE") == 0 &&
+                strcmp(m5_abort_tag(OWNED_ABORT_RESTORED, M5_RESTORE_VERIFIED), "INCONCLUSIVE") == 0);
+    EXPECT_TRUE("abort lines: another value is CLEANUP_FAILED", strcmp(m5_abort_tag(OWNED_ABORT_RESTORED, M5_RESTORE_DIFFERS), "CLEANUP_FAILED") == 0);
+    EXPECT_TRUE("abort lines: unread and unconfirmed are INCONCLUSIVE_RESTORATION",
+                strcmp(m5_abort_tag(OWNED_ABORT_RESTORED, M5_RESTORE_UNREAD), "INCONCLUSIVE_RESTORATION") == 0 &&
+                strcmp(m5_abort_tag(OWNED_ABORT_UNCONFIRMED, OWNED_MUT_NONE), "INCONCLUSIVE_RESTORATION") == 0 &&
+                strcmp(m5_abort_tag(OWNED_ABORT_UNCONFIRMED, M5_RESTORE_VERIFIED), "INCONCLUSIVE_RESTORATION") == 0);
+    EXPECT_TRUE("restoration lines", strcmp(m5_restore_tag(M5_RESTORE_VERIFIED), "PASS") == 0 && strcmp(m5_restore_tag(M5_RESTORE_DIFFERS), "CLEANUP_FAILED") == 0 &&
+                strcmp(m5_restore_tag(M5_RESTORE_UNREAD), "INCONCLUSIVE_RESTORATION") == 0 && strcmp(m5_restore_tag(OWNED_MUT_UNCONFIRMED), "INCONCLUSIVE_RESTORATION") == 0 &&
+                strcmp(m5_restore_tag(OWNED_MUT_NONE), "INCONCLUSIVE_RESTORATION") == 0);
+}
+
 /* TC-MOCK-068: a FilterRestart in the same context (#357, TC-TASACT-META-004; test logic only). OBSERVED: the PHC of the drained Case B run 1
  * (2026-11-07, I226 0x125B REV_04, Debug driver 1B4F299C; logs/i364-evidence/caseb-drained-run1) went from 1417.92 s to 9.32 s across a
  * FilterRestart, the second read of each pair is UNVERIFIED. Every other value is UNVERIFIED */
@@ -4009,6 +4339,7 @@ int main(void) {
     test_65_owned_worker();
     test_66_race_order();
     test_67_pending_operations();
+    test_77_owned_mutation();
     test_14_instance_find();
     test_15_lifecycle_outcome();
     test_68_restart();
