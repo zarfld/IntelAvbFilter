@@ -716,3 +716,59 @@ static __inline TAS_RACE_PHC tas_race_phc_used(TAS_RACE_ORDER order, long long b
     }
     return order == TAS_RACE_COMMIT_FIRST ? TAS_RACE_PHC_PASSED_BASE : TAS_RACE_PHC_NOT_SHOWN;
 }
+
+/* ---- --metadata-events, TC-TASACT-META-004 (#357, #352 R1 L10): a FilterRestart in the same adapter context while a schedule is
+ * retained. Pure rules, offline case TC-MOCK-068 ---- */
+
+/* A PHC reset without a tolerance: the clock ran before (two successive reads rising) and after, and the first value after is below the
+ * last one before. Anything else shows no reset: a successful bring-up, a frozen clock or a clock that merely advanced */
+typedef struct {
+    BOOL read;            /* both reads succeeded */
+    long long phc[2];     /* successive reads, oldest first */
+} TAS_PHC_READS;
+
+typedef enum { TAS_PHC_RESET_UNMEASURED = 0, TAS_PHC_RESET_SHOWN, TAS_PHC_RESET_NOT_SHOWN } TAS_PHC_RESET;
+
+static __inline TAS_PHC_RESET tas_phc_reset(const TAS_PHC_READS *before, const TAS_PHC_READS *after)
+{
+    if (!before->read || !after->read || before->phc[1] <= before->phc[0] || after->phc[1] <= after->phc[0]) {
+        return TAS_PHC_RESET_UNMEASURED;
+    }
+    return after->phc[0] < before->phc[1] ? TAS_PHC_RESET_SHOWN : TAS_PHC_RESET_NOT_SHOWN;
+}
+
+/* What the recorded result of an ACTIVATE that carried the pair from before the invalidating event says about that pair. Only
+ * STATE_CONFLICT refuses it in step 4; NOT_CLEAN, INVALID, COMMITTED and every later result passed step 4, so the pair was still
+ * current. BUSY, NOT_READY, NOT_SUPPORTED, NOT_IMPLEMENTED and "no result" may come before step 4 and say nothing */
+typedef enum { TAS_STALE_NOT_JUDGED = 0, TAS_STALE_REFUSED, TAS_STALE_STILL_CURRENT } TAS_STALE_VIEW;
+
+static __inline TAS_STALE_VIEW tas_stale_view(unsigned long result)
+{
+    switch (result) {
+    case AVB_TAS_ACT_STATE_CONFLICT:
+        return TAS_STALE_REFUSED;
+    case AVB_TAS_ACT_BUSY:
+    case AVB_TAS_ACT_NOT_READY:
+    case AVB_TAS_ACT_NOT_SUPPORTED:
+    case AVB_TAS_ACT_NOT_IMPLEMENTED:
+    case AVB_TAS_ACT_NOT_BOUND:
+    case AVB_TAS_ACT_ADAPTER_MISMATCH:
+    case 0xFFFFFFFFul:   /* none recorded */
+        return TAS_STALE_NOT_JUDGED;
+    default:
+        return TAS_STALE_STILL_CURRENT;
+    }
+}
+
+/* The context after a detach and attach (#352 R1 L1-L4, L11): a non-zero epoch that differs from the old one, generation 1, record
+ * CLEAN. An equal epoch is not a violation by itself (a random redraw is no proof of inequality, L4), it shows no new context */
+typedef enum { TAS_NEW_CONTEXT_OK = 0, TAS_NEW_CONTEXT_VIOLATION, TAS_NEW_CONTEXT_NOT_SHOWN } TAS_NEW_CONTEXT;
+
+static __inline TAS_NEW_CONTEXT tas_new_context(unsigned long long old_epoch, BOOL valid, unsigned long long epoch, unsigned long long generation,
+                                                BOOL record_read, BOOL record_clean)
+{
+    if (old_epoch == 0 || !valid || epoch == 0 || generation == 0 || !record_read || epoch == old_epoch) {
+        return TAS_NEW_CONTEXT_NOT_SHOWN;
+    }
+    return generation == 1 && record_clean ? TAS_NEW_CONTEXT_OK : TAS_NEW_CONTEXT_VIOLATION;
+}
