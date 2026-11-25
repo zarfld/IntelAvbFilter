@@ -21,6 +21,7 @@ Abstract:
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
 #include "i226_tas_activate.h"                  // First TAS schedule, shared with its offline cases (#357)
+#include "i226_phc_seed.h"   /* PHC seed and its report (#352 R1 L10) */
 #include "i226_tas_query.h"                     // Read-only TAS hardware query, contract #365 (#350)
 
 // Application-specific constants
@@ -63,6 +64,7 @@ extern const struct platform_ops ndis_platform_ops;
 
 // Forward declarations
 static int init_ptp(device_t *dev);
+static int init_ptp_reported(device_t *dev, int *invalidated);
 
 /**
  * @brief DPC routine for periodic TSICR polling (Task 7)
@@ -234,20 +236,9 @@ static VOID AvbTimerDpcRoutine(
     }
 }
 
-/**
- * @brief Initialize I226 device
- * @param dev Device handle
- * @return 0 on success, <0 on error
- */
-static int init(device_t *dev)
+/* The generic platform initialization (TSAUXC, TIMINCA); no PHC reset and no TAS register. 0 on success */
+static int init_platform(device_t *dev)
 {
-    DEBUGP(DL_TRACE, "==>i226_init\n");
-    
-    if (dev == NULL) {
-        return -1;
-    }
-    
-    // I226-specific initialization
     if (ndis_platform_ops.init) {
         NTSTATUS result = ndis_platform_ops.init(dev);
         if (!NT_SUCCESS(result)) {
@@ -255,20 +246,35 @@ static int init(device_t *dev)
             return -1;
         }
     }
-    
-    // Initialize PTP clock (required for GET_TIMESTAMP to work)
-    DEBUGP(DL_TRACE, "I226: Initializing PTP clock\n");
-    int ptp_result = init_ptp(dev);
-    if (ptp_result != 0) {
-        /* Report the failure: init() == 0 is what lets the generic layer establish AVB_HW_PTP_READY
-         * (AvbMarkPtpReady), so a failed PTP init must not look like success.  init_ptp() fails only
-         * when MMIO access fails (unmapped / out of range), which the generic MMIO sanity check also rejects. */
-        DEBUGP(DL_ERROR, "I226: PTP initialization failed: %d\n", ptp_result);
+    return 0;
+}
+
+/**
+ * @brief Initialize I226 device
+ * @param dev Device handle
+ * @return 0 on success, <0 on error
+ *
+ * Reports an init_ptp() failure: init() == 0 is what lets the generic layer establish AVB_HW_PTP_READY (AvbMarkPtpReady), so a failed
+ * PTP init must not look like success. init_ptp() fails only when MMIO access fails (unmapped / out of range), which the generic MMIO
+ * sanity check also rejects.
+ */
+static int init(device_t *dev)
+{
+    DEBUGP(DL_TRACE, "==>i226_init\n");
+    if (dev == NULL || init_platform(dev) != 0) {
         return -1;
     }
-    
-    DEBUGP(DL_TRACE, "<==i226_init: Success\n");
-    return 0;
+    return init_ptp(dev);   /* PTP clock: required for GET_TIMESTAMP to work */
+}
+
+/* The same initialization with the report of intel_device_ops_t.init_reported (#352 R1 L10): the PHC seed resets the clock */
+static int init_reported(device_t *dev, int *invalidated)
+{
+    DEBUGP(DL_TRACE, "==>i226_init (reported)\n");
+    if (dev == NULL || init_platform(dev) != 0) {
+        return -1;
+    }
+    return init_ptp_reported(dev, invalidated);
 }
 
 /**
@@ -443,12 +449,18 @@ static int get_systime(device_t *dev, uint64_t *systime)
     return 0;
 }
 
+static int phc_seed_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
 /**
  * @brief Initialize I226 PTP functionality
  * @param dev Device handle
+ * @param invalidated Out (may be NULL): 1 once the PHC reset was performed (i226_phc_seed), also when a later step fails
  * @return 0 on success, <0 on error
  */
-static int init_ptp(device_t *dev)
+static int init_ptp_reported(device_t *dev, int *invalidated)
 {
     uint32_t tsauxc_val = 0;
     uint32_t systimh = 0, systiml = 0;
@@ -480,8 +492,7 @@ static int init_ptp(device_t *dev)
     }
     
     // Step 2: Initialize SYSTIM registers to 1 (writing 0 might not trigger clock start)
-    if (ndis_platform_ops.mmio_write(dev, I226_SYSTIML, 1) != 0 ||
-        ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, 0) != 0) {
+    if (i226_phc_seed(phc_seed_write, dev, invalidated) != 0) {
         DEBUGP(DL_TRACE, "I226: Failed to initialize SYSTIM\n");
         return -1;
     }
@@ -554,6 +565,11 @@ static int init_ptp(device_t *dev)
     
     DEBUGP(DL_TRACE, "<==i226_init_ptp: PTP clock initialized successfully (Build 78: +ETQF filter +FIFO clear)\n");
     return 0;
+}
+
+static int init_ptp(device_t *dev)
+{
+    return init_ptp_reported(dev, NULL);
 }
 
 /**
@@ -1693,6 +1709,7 @@ const intel_device_ops_t i226_ops = {
     
     // Basic operations - clean generic names
     .init = init,
+    .init_reported = init_reported,
     .cleanup = cleanup,
     .get_info = get_info,
     

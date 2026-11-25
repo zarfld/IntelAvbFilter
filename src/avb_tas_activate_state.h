@@ -29,6 +29,35 @@ typedef struct AVB_TAS_OP_OUTCOME {
 } AVB_TAS_OP_OUTCOME;
 
 /*
+ * A device initialization in an existing adapter context (bring-up; #352 R1 L10/L12, restart-path clarification 2026-11-25). Several
+ * device initializations of one bring-up are one logical event. retained: the record is not CLEAN; invalidates: the device's
+ * initialization resets the PHC (or writes TAS registers); invalidated: it has done so, also when it failed afterwards. All of it is
+ * sampled, decided and published in one hold of the metadata order lock.
+ */
+typedef struct AVB_TAS_INIT_EVENT {
+    int counted;                /* this event has advanced the generation ... */
+    avb_u64 counted_generation; /* ... to this value */
+} AVB_TAS_INIT_EVENT;
+
+/* The event is already counted and nothing has moved the generation since: a further initialization belongs to the same transition */
+static __inline int avb_tas_init_same_event(const AVB_TAS_INIT_EVENT *event, avb_u64 generation)
+{
+    return event->counted && generation == event->counted_generation;
+}
+
+/* L12: refuse before the first device write */
+static __inline int avb_tas_init_refused(const AVB_TAS_INIT_EVENT *event, int retained, int invalidates, int can_advance, avb_u64 generation)
+{
+    return retained && invalidates && !can_advance && !avb_tas_init_same_event(event, generation);
+}
+
+/* L10: the generation advances once for this event now */
+static __inline int avb_tas_init_advances(const AVB_TAS_INIT_EVENT *event, int retained, int invalidated, avb_u64 generation)
+{
+    return retained && invalidated && !avb_tas_init_same_event(event, generation);
+}
+
+/*
  * How IOCTL_AVB_TAS_ACTIVATE completes once the device code returned. When it ran: STATUS_SUCCESS with the whole request as
  * output, because METHOD_BUFFERED drops the output on an error status and the caller needs request->result. When it refused
  * a valid request as not implemented (PASS under the #363 interim Option C): STATUS_NOT_IMPLEMENTED and no output.

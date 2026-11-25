@@ -52,6 +52,10 @@ typedef struct _intel_device_ops {
     
     // Basic device operations
     int (*init)(device_t *dev);
+    /* init with a report (#352 R1 L10): NULL when init resets no PHC of a device that can retain a TAS schedule and writes no TAS
+     * register. Otherwise the same initialization; *invalidated (may be NULL, never cleared) becomes 1 as soon as the PHC reset (or a TAS
+     * register write) was performed, also when a later step fails. Called under the adapter's TAS metadata order lock (APC_LEVEL) */
+    int (*init_reported)(device_t *dev, int *invalidated);
     int (*cleanup)(device_t *dev);
     int (*get_info)(device_t *dev, char *buffer, ULONG size);  // Use ULONG for kernel compatibility
     

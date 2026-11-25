@@ -39,6 +39,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
+#include "../../devices/i226_phc_seed.h"
 #include "../ioctl/tas_activate_eval.h"
 #include "../ioctl/owned_worker.h"         /* #505: worker ownership, PR #518 review */
 #include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
@@ -2382,6 +2383,72 @@ static void test_68_restart(void)
     EXPECT_EQ("... and nothing is owned afterwards", ops == NULL, 1);
 }
 
+/* TC-MOCK-069: a device initialization under a retained schedule (#357, #352 R1 L10/L12 and the restart-path clarification of 2026-11-25; test
+ * logic only, a fake write). UNVERIFIED on hardware except the normal path (TC-TASACT-META-004) */
+static int g_seed_fail_at, g_seed_writes;
+static avb_u32 g_seed_offset[2];
+
+static int seed_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    (void)ctx; (void)value;
+    if (g_seed_writes < 2) {
+        g_seed_offset[g_seed_writes] = offset;
+    }
+    g_seed_writes++;
+    return g_seed_writes == g_seed_fail_at ? -1 : 0;
+}
+
+static int seed(int fail_at, int *invalidated)
+{
+    g_seed_fail_at = fail_at;
+    g_seed_writes = 0;
+    return i226_phc_seed(seed_write, NULL, invalidated);
+}
+
+static void test_69_init_event(void)
+{
+    const avb_u64 max = ~(avb_u64)0;
+    AVB_TAS_INIT_EVENT none, done;
+    int inv;
+
+    printf("\n[TC-MOCK-069] #357 device initialization under a retained schedule (test logic only)\n");
+    ZeroMemory(&none, sizeof(none));
+    done.counted = 1;
+    done.counted_generation = 3;
+
+    /* the device's own report */
+    inv = 0;
+    EXPECT_EQ("the seed succeeds", seed(0, &inv), 0);
+    EXPECT_EQ("... with SYSTIML then SYSTIMH", g_seed_writes == 2 && g_seed_offset[0] == I226_SYSTIML && g_seed_offset[1] == I226_SYSTIMH, 1);
+    EXPECT_EQ("... and reports the reset", inv, 1);
+    inv = 0;
+    EXPECT_EQ("the first write fails", seed(1, &inv), -1);
+    EXPECT_EQ("... nothing more is written", g_seed_writes, 1);
+    EXPECT_EQ("... and no reset is reported", inv, 0);
+    inv = 0;
+    EXPECT_EQ("the second write fails", seed(2, &inv), -1);
+    EXPECT_EQ("... the reset already performed is reported", inv, 1);
+    EXPECT_EQ("a caller without a report is served", seed(0, NULL), 0);
+
+    /* L10: once, only for a performed invalidation of a retained schedule */
+    EXPECT_EQ("retained, reset: one transition", avb_tas_init_advances(&none, 1, 1, 2), 1);
+    EXPECT_EQ("retained, no reset and no other invalidating write: none", avb_tas_init_advances(&none, 1, 0, 2), 0);
+    EXPECT_EQ("CLEAN, reset: none", avb_tas_init_advances(&none, 0, 1, 2), 0);
+    EXPECT_EQ("a second initialization of the same event: none", avb_tas_init_advances(&done, 1, 1, 3), 0);
+    EXPECT_EQ("... unless another writer moved the generation in between", avb_tas_init_advances(&done, 1, 1, 4), 1);
+    /* a schedule retained only between two initializations of one bring-up is invalidated by the second */
+    EXPECT_EQ("first on CLEAN, second on a schedule retained since: one transition", avb_tas_init_advances(&none, 1, 1, 2), 1);
+
+    /* L12: before the first device write */
+    EXPECT_EQ("at the maximum, retained, it would invalidate: refused", avb_tas_init_refused(&none, 1, 1, 0, max), 1);
+    EXPECT_EQ("at the maximum, CLEAN: not refused", avb_tas_init_refused(&none, 0, 1, 0, max), 0);
+    EXPECT_EQ("at the maximum, the device's initialization does not invalidate: not refused", avb_tas_init_refused(&none, 1, 0, 0, max), 0);
+    EXPECT_EQ("below the maximum: not refused", avb_tas_init_refused(&none, 1, 1, 1, max - 1), 0);
+    done.counted_generation = max;
+    EXPECT_EQ("the event that reached the maximum itself is not refused halfway", avb_tas_init_refused(&done, 1, 1, 0, max), 0);
+    EXPECT_EQ("... and counts no second time", avb_tas_init_advances(&done, 1, 1, max), 0);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2436,6 +2503,7 @@ int main(void) {
     test_14_instance_find();
     test_15_lifecycle_outcome();
     test_68_restart();
+    test_69_init_event();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

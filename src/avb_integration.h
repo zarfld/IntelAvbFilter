@@ -379,9 +379,11 @@ typedef struct _AVB_DEVICE_CONTEXT {
     /* TAS metadata order (#357 F1/F2; #352 R1 L8, L10, L12): one total order of the TAS mutations and the PHC reseeds of this
      * adapter. TAS_ACTIVATE, SETUP_TAS and DISARM_TAS hold it from their metadata check or L12 decision to their published state;
      * SET_TIMESTAMP and PHC_OFFSET_ADJUST hold it from their PHC read and retained-schedule sample to the PHC write and its
-     * transition. So a reseed never writes on a sample that a commit has overtaken (F1), and an L12 decision and its increment are
-     * one step against every other writer (F2). Order: tas_op_claim, then this, then tas_reg_lock. Acquired by waiting, never
-     * BUSY; the PHC path takes no claim, so there is no cycle. Raises to APC_LEVEL: the code under it must not need PASSIVE_LEVEL. */
+     * transition; a device initialization holds it around the device call only (AvbDeviceInitOrdered), with the resource discovery
+     * and the #412 hooks outside, which need PASSIVE_LEVEL. So a reseed never writes on a sample that a commit has overtaken (F1),
+     * and an L12 decision and its increment are one step against every other writer (F2). Order: tas_op_claim or init_owner, then
+     * this, then tas_reg_lock. Acquired by waiting, never BUSY; the PHC path takes no claim, so there is no cycle. Raises to
+     * APC_LEVEL: the code under it must not need PASSIVE_LEVEL. */
     FAST_MUTEX tas_meta_order;
 
     /* A schedule committed under explicit unverified acceptance (#365 R4, #362 amendment) is retained: the query reports
