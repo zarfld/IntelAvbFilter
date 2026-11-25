@@ -370,10 +370,19 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * the kernel cryptographic random source, distinct from the epochs of all live contexts of this driver load, set once at
      * creation (AvbCreateMinimalContext) and constant afterwards; 0 means metadata unavailable (bounded random-generation
      * failure), and then generation stays 0 too. The generation starts at 1 and advances exactly once per logical TAS mutation
-     * that attempted a register write (L7, L9), never wraps (L12), under tas_op_claim, published before the claim is released
-     * (L8). The query reads both without waiting (avb_tas_meta_read). Interlocked access only. */
+     * that attempted a register write (L7, L9) and once per PHC reseed that invalidated a retained schedule (L10), never wraps
+     * (L12). It advances only under tas_meta_order, for a TAS mutation also under tas_op_claim and published before the claim is
+     * released (L8). The query reads both without waiting (avb_tas_meta_read). Interlocked access only. */
     avb_u64 tas_context_epoch;
     volatile LONG64 tas_generation;
+
+    /* TAS metadata order (#357 F1/F2; #352 R1 L8, L10, L12): one total order of the TAS mutations and the PHC reseeds of this
+     * adapter. TAS_ACTIVATE, SETUP_TAS and DISARM_TAS hold it from their metadata check or L12 decision to their published state;
+     * SET_TIMESTAMP and PHC_OFFSET_ADJUST hold it from their PHC read and retained-schedule sample to the PHC write and its
+     * transition. So a reseed never writes on a sample that a commit has overtaken (F1), and an L12 decision and its increment are
+     * one step against every other writer (F2). Order: tas_op_claim, then this, then tas_reg_lock. Acquired by waiting, never
+     * BUSY; the PHC path takes no claim, so there is no cycle. Raises to APC_LEVEL: the code under it must not need PASSIVE_LEVEL. */
+    FAST_MUTEX tas_meta_order;
 
     /* A schedule committed under explicit unverified acceptance (#365 R4, #362 amendment) is retained: the query reports
      * AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE. Set when such a commit leaves a schedule; cleared only when the retained state is

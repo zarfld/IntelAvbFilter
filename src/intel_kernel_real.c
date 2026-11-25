@@ -376,7 +376,7 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
 
     ops = intel_get_device_ops(device_type);
     if (ops && ops->setup_tas) {
-        return ops->setup_tas(dev, config);
+        return ops->setup_tas(dev, config, NULL);   /* the external API reports no write attempt; IOCTL_AVB_SETUP_TAS uses the op */
     }
     return -ENOTSUP;
 }

@@ -405,10 +405,10 @@ if ($dlBad.Count -eq 0) {
     $hold = { param([int]$n) $m = [Math]::Max(1, $n); 980 * $m + 5 * $m * ($m - 1) }
     foreach ($n in -1, 0, 1, 3, 9) {
         $b = & $bud 'test_tas_activate' '--hold' $n $(if ($n -eq 3) { '' } else { 'HardwareIntegration' }); if ($b.Seconds -ne (& $hold $n) + 360) { $dlBad += "--hold with $n adapter(s): $($b.Seconds) s, expected $((& $hold $n) + 360) s" }
-        $all = 3 * (& $hold $n) + 2 * (& $hold $n) + 600 + 5 * 60 + 300
+        $all = 3 * (& $hold $n) + 2 * (& $hold $n) + 2 * 600 + 6 * 60 + 300
         foreach ($s in $(if ($n -eq 3) { '', 'HardwareIntegration' } else { 'HardwareIntegration' })) {
             $b = & $bud 'test_tas_activate' '' $n $s
-            if ($b.Seconds -ne $all -or @($b.Entries).Count -ne 5) { $dlBad += "bare program (suite '$s') with $n adapter(s): $($b.Seconds) s for $(@($b.Entries).Count) entries, expected $all s for 5" }
+            if ($b.Seconds -ne $all -or @($b.Entries).Count -ne 6) { $dlBad += "bare program (suite '$s') with $n adapter(s): $($b.Seconds) s for $(@($b.Entries).Count) entries, expected $all s for 6" }
         }
     }
     $b = & $bud 'test_tas_activate.exe' '--phc-hold-control' 3; if ($b.Seconds -ne 960) { $dlBad += "--phc-hold-control: $($b.Seconds) s, expected 960 s" }

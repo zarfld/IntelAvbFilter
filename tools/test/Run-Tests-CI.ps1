@@ -588,8 +588,9 @@ $HardwareIntegrationTests = @(
     "test_control_device_lifecycle",          # TC-LCY-328: service stop/restart cycles, recovery verified by the test
     "test_tas_activate --fault-versioned",    # #482 TEST-TASACT-FAULT-001 F1/F2 on 0x80C (Debug fault injection; Release: not sent),
                                               # each case with its own pre-state, observer and owned NIC-cycle cleanup. Unsafe
-    "test_tas_activate --phc-hold-control"    # #505 TC-TASACT-HOLDCTL-001: Debug-only PHC reseed hold control on every PHC adapter
+    "test_tas_activate --phc-hold-control",   # #505 TC-TASACT-HOLDCTL-001: Debug-only PHC reseed hold control on every PHC adapter
                                               # (Release: every line INCONCLUSIVE). Unsafe (shared source; no NIC cycle in this mode)
+    "test_tas_activate --metadata-events"     # #357 TC-TASACT-META-001/-002 (#352 R1 L9/L10, F1): PHC events, SETUP/DISARM and a held-reseed race. Unsafe
 )
 
 # ===========================
@@ -774,6 +775,7 @@ $HilTestSafety = @{
     'test_tas_activate --fault'        = 'Unsafe'     # TAS_ACTIVATE fault path plus CM_Disable_DevNode / CM_Enable_DevNode (#357)
     'test_tas_activate --fault-versioned' = 'Unsafe'  # #482 F1/F2: versioned TAS_ACTIVATE fault path, owned CM_Disable_DevNode / CM_Enable_DevNode per case
     'test_tas_activate --phc-hold-control' = 'Unsafe'  # #505: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD (Debug), PHC_OFFSET_ADJUST steps compensated to net 0, TAS_ACTIVATE with a zero metadata pair (refused before any write); this mode performs no NIC cycle, the class follows the shared source's NIC administration (HILGATE-009)
+    'test_tas_activate --metadata-events' = 'Unsafe'   # #357 L9/L10/F1: TAS_ACTIVATE, SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, QUERY_HW_SNAPSHOT v2, SET_HW_TIMESTAMPING, Debug-only WRITE_REGISTER of SYSTIML/H (HAL offsets, #503) and DEBUG_PHC_RESEED_HOLD (#505), owned CM_Disable_DevNode / CM_Enable_DevNode per case
     'test_tas_query_clean'             = 'Unsafe'     # read-only TAS_QUERY_HW checks plus the owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#366)
     'test_tas_query_clean --hw-verified' = 'Unsafe'   # TAS_ACTIVATE HOLD, TAS_QUERY_HW past BaseT, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#381)
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
