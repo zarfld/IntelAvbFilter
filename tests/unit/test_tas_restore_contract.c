@@ -2882,6 +2882,213 @@ static void test_71_hold_status(void)
     EXPECT_EQ("a missing measurement outranks a pass", tas_status_worst(TAS_STATUS_PASS, TAS_STATUS_NOT_PHASE), TAS_STATUS_NOT_PHASE);
 }
 
+/* TC-MOCK-072: the status lines of --metadata-events after a PHC reseed under a retained schedule (#350; test logic only, no hardware
+ * claim). OBSERVED: the replies of the 2026-11-25 08:16 run (I226 0x125B REV_04, Debug driver 4931CA29, LOCAL_DIAGNOSTIC) around its
+ * SET_TIMESTAMP; that run printed no commit state, LOST is the same driver's of 10:03. The INCONSISTENT replies are the published target and
+ * UNVERIFIED on hardware */
+static TAS_STATUS_CLASS st_reseed(const AVB_TAS_QUERY_HW_REQUEST *before, const AVB_TAS_QUERY_HW_REQUEST *q, BOOL event)
+{
+    AVB_TAS_OP_REQUEST op;
+    AVB_TAS_QUERY_HW_REQUEST committed;
+
+    st_op(&op);
+    st_query(&committed, 1100, 1200, AVB_TAS_ST_UNKNOWN, 0);
+    op.schedule = committed.current;
+    return tas_status_reseed(TRUE, before, TRUE, q, &op, event);
+}
+
+/* The published answer after the event: one generation step on, the schedule and its bracket kept, next NONE */
+static void st_reset(AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    st_query(q, 3000, 3100, AVB_TAS_ST_INCONSISTENT, AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT);
+    q->generation = 3;
+    q->current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+}
+
+static void test_72_reseed_status(void)
+{
+    const avb_u32 RESET = AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT;
+    static const avb_u32 progression[] = { AVB_TAS_ST_NONE, AVB_TAS_ST_PROGRAMMED, AVB_TAS_ST_PENDING, AVB_TAS_ST_INFERRED_ACTIVE };
+    static const avb_u32 never[] = { AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD, AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH, AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS,
+                                     AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST, AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH,
+                                     AVB_TAS_SLOT_RSN_CYCLE_MISMATCH, AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF, AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED,
+                                     AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT };
+    static const avb_u32 may[] = { AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD, AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED };
+    AVB_TAS_QUERY_HW_REQUEST b, q;
+    AVB_TAS_OP_REQUEST op;
+    unsigned k;
+
+    printf("\n[TC-MOCK-072] #350 status after a PHC reseed under a retained schedule (test logic only)\n");
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+
+    /* The published answer and what may go with it */
+    st_reset(&q);
+    EXPECT_EQ("INCONSISTENT with PHC_RESET_SINCE_COMMIT, the schedule kept, next NONE", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    for (k = 0; k < sizeof(may) / sizeof(may[0]); k++) {
+        st_reset(&q);
+        q.current_reasons |= may[k];
+        EXPECT_EQ("... with a further reason the event does not exclude", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    }
+    st_reset(&q);
+    q.phc_before_ns = 10; q.phc_after_ns = 20;   /* a backward reset, the PHC below the commit */
+    EXPECT_EQ("... backward the same", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    st_reset(&q);
+    q.phc_before_ns = 6000; q.phc_after_ns = 6100;   /* a forward one, past BaseT */
+    EXPECT_EQ("... forward past BaseT the same", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+
+    /* The schedule as before the event */
+    for (k = 0; k < sizeof(progression) / sizeof(progression[0]); k++) {
+        st_reset(&q);
+        q.current_status = progression[k];
+        EXPECT_EQ("a progression status after the reset: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_STALE);
+    }
+    st_reset(&q);
+    q.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("RETAINED after the reset: FAIL, also under INCONSISTENT", st_reseed(&b, &q, TRUE), TAS_STATUS_STALE);
+    q = b;
+    q.generation = 3;
+    EXPECT_EQ("PENDING and RETAINED with nothing changed but the generation: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_STALE);
+
+    /* Precedence and reasons */
+    st_reset(&q);
+    q.current_status = AVB_TAS_ST_UNKNOWN;
+    EXPECT_EQ("UNKNOWN although S2 precedes S3: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current_reasons = 0;
+    EXPECT_EQ("INCONSISTENT without the reason: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    for (k = 0; k < sizeof(never) / sizeof(never[0]); k++) {
+        st_reset(&q);
+        q.current_reasons = RESET | never[k];
+        EXPECT_EQ("... with a reason that the measurement excludes: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    }
+    st_reset(&q);
+    q.link_speed_mbps = 100;
+    q.current_reasons |= AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED;
+    EXPECT_EQ("... LINK_SPEED_CHANGED with another speed is not excluded", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    st_reset(&q);
+    q.phc_before_ns = 4900; q.phc_after_ns = 5100;
+    q.current_reasons |= AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT;
+    EXPECT_EQ("... TRANSITION with the target inside the bracket is not excluded", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    st_reset(&q);
+    q.regs.stqt[1] = 250;
+    q.current_reasons |= AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+    q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    q.next_status = AVB_TAS_ST_UNKNOWN; q.next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    EXPECT_EQ("... a window that really changed goes with WINDOW_MISMATCH and HW_MISMATCH (R2)", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    st_reset(&q);
+    q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    EXPECT_EQ("... HW_MISMATCH without a changed register: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+
+    /* The retained schedule, its bracket and the next slot */
+    st_reset(&q);
+    q.current_commit.state = AVB_TAS_COMMIT_LOST;
+    EXPECT_EQ("LOST although the schedule was committed: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current.queue[2].end_ns = 401;
+    EXPECT_EQ("another schedule than the committed one: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current_commit.phc_after_commit_ns = 1021;
+    EXPECT_EQ("a bracket that moved with the event: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    b.current_commit.state = AVB_TAS_COMMIT_LOST;
+    st_reset(&q);
+    q.current_commit.phc_before_commit_ns = 1021;
+    EXPECT_EQ("a reversed bracket: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current_commit.phc_before_commit_ns = q.current_commit.phc_after_commit_ns = 0;
+    EXPECT_EQ("no bracket: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current_commit.phc_after_commit_ns = 5000;
+    EXPECT_EQ("a bracket that does not end before BaseT: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    q.next_status = AVB_TAS_ST_UNKNOWN; q.next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    EXPECT_EQ("next unattributed although no compared field contradicts (R1): FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+
+    /* S1, HARDWARE_VERIFIED */
+    st_reset(&q);
+    q.next_status = AVB_TAS_ST_HARDWARE_VERIFIED;
+    EXPECT_EQ("HARDWARE_VERIFIED: FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_HW_VERIFIED);
+    st_reset(&q);
+    q.flags = AVB_TAS_FLAG_OP_IN_PROGRESS;
+    EXPECT_EQ("unobservable and not UNKNOWN: S1 FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_S1);
+    q.current_status = q.next_status = AVB_TAS_ST_UNKNOWN;
+    EXPECT_EQ("unobservable and UNKNOWN: not measured", st_reseed(&b, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_reset(&q);
+    q.snapshot_reasons = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED;
+    EXPECT_EQ("EVENT_UNRECONCILED and not UNKNOWN in both slots: S1 FAIL", st_reseed(&b, &q, TRUE), TAS_STATUS_S1);
+    q.current_status = q.next_status = AVB_TAS_ST_UNKNOWN;
+    EXPECT_EQ("EVENT_UNRECONCILED and UNKNOWN: not judged", st_reseed(&b, &q, TRUE), TAS_STATUS_UNRECONCILED);
+
+    /* The context of the line: committed schedule, identified event, observed completion, valid queries */
+    st_reset(&q);
+    EXPECT_EQ("the event not observed: not judged, whatever the reply", st_reseed(&b, &q, FALSE), TAS_STATUS_NO_EVENT);
+    q = b;
+    EXPECT_EQ("... also for an unchanged reply", st_reseed(&b, &q, FALSE), TAS_STATUS_NO_EVENT);
+    st_reset(&q);
+    q.generation = 4;
+    EXPECT_EQ("two steps: a further event, not attributed", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    q.generation = 2;
+    EXPECT_EQ("no step: the generation line's failure, not attributed here", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    st_reset(&q);
+    q.context_epoch = 8;
+    EXPECT_EQ("another context", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    st_reset(&q);
+    b.generation = 3;
+    EXPECT_EQ("the query before the event is not this commit's", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    b.generation = 2;
+    b.current_reasons = RESET;
+    EXPECT_EQ("the reason was there before the event", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    b.current_reasons = 0;
+    b.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("the discontinuity was there before the event", st_reseed(&b, &q, TRUE), TAS_STATUS_CONTROL_LOST);
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    b.generation = 0;
+    EXPECT_EQ("an unreported pair before", st_reseed(&b, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    q.generation = 0;
+    EXPECT_EQ("an unreported pair after", st_reseed(&b, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_reset(&q);
+    st_op(&op);
+    op.schedule = b.current;
+    EXPECT_EQ("no valid reply before", tas_status_reseed(FALSE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("no valid reply after", tas_status_reseed(TRUE, &b, FALSE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    op.expected_generation = 0;
+    EXPECT_EQ("no pair in the request", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+
+    /* The measured step: 100 ms forward and backward over 2 to 5 ms of wall time, a rate 3 % off included */
+    st_query(&b, 2000000000ULL, 2000010000ULL, AVB_TAS_ST_PENDING, 0);
+    st_query(&q, 2103010000ULL, 2103020000ULL, AVB_TAS_ST_PENDING, 0);
+    EXPECT_TRUE("a forward step is shown", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... and is no backward one", tas_phc_step(-100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... nor one of ten times the size", tas_phc_step(1000000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... nor one of a tenth", tas_phc_step(10000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... an unreadable query shows nothing", tas_phc_step(100000000LL, FALSE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... nor does an unmeasured window", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 5000000LL, 2000000LL));
+    q.phc_before_ns = 2003010000ULL; q.phc_after_ns = 2003020000ULL;
+    EXPECT_FALSE("a clock that ran on is no step", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... in neither direction", tas_phc_step(-100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    q.phc_before_ns = 2515010000ULL; q.phc_after_ns = 2515020000ULL;
+    EXPECT_FALSE("500 ms at a rate 3 % off is no step of 100 ms", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 500000000LL, 500000000LL));
+    q.phc_before_ns = 2610010000ULL; q.phc_after_ns = 2610020000ULL;
+    EXPECT_FALSE("a window of more than five steps shows nothing", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 510000000LL, 510000000LL));
+    q.phc_before_ns = 1903010000ULL; q.phc_after_ns = 1903020000ULL;
+    EXPECT_TRUE("a backward step is shown", tas_phc_step(-100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+    EXPECT_FALSE("... and is no forward one", tas_phc_step(100000000LL, TRUE, &b, TRUE, &q, 2000000LL, 5000000LL));
+
+    /* The 08:16 replies around SET_TIMESTAMP +1 s: the observed answer is a failure, not a missing measurement */
+    st_run_1003(&b, 34764776670ULL, 34764793515ULL, 0x25);
+    st_run_1003(&q, 35765672554ULL, 35765689194ULL, 0x25);
+    b.context_epoch = q.context_epoch = 8781557283116121604ULL;
+    q.generation = 3;
+    ZeroMemory(&op, sizeof(op));
+    op.context_epoch = b.context_epoch;
+    op.expected_generation = 1;
+    op.schedule.base_time_ns = 37000000000ULL;
+    EXPECT_EQ("08:16 replay: UNKNOWN/COMMIT_INFO_LOST after the reseed is the RED", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_WRONG);
+    EXPECT_TRUE("08:16 replay: its +1 s is measured (that run took no wall time here; 0 to 1 ms assumed)",
+                tas_phc_step(1000000000LL, TRUE, &b, TRUE, &q, 0LL, 1000000LL));
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2939,6 +3146,7 @@ int main(void) {
     test_69_init_event();
     test_70_restart_end();
     test_71_hold_status();
+    test_72_reseed_status();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

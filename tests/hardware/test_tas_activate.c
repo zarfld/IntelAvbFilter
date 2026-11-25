@@ -97,6 +97,14 @@
  *              COMMIT         the versioned HOLD (explicit acceptance, the pair just queried) commits: the retained schedule
  *                             the L10 lines need; without it they are BLOCKED (prerequisite), never judged.
  *              RESEED_SET     SET_TIMESTAMP (current PHC + 1 s, a PHC reseed) with the schedule retained: +1 (L10).
+ *              STATUS_SET     the schedule status after that reseed, the first event since the commit (#350; tas_status_reseed, TC-MOCK-072,
+ *                             as STATUS_OFFSET and STATUS_RESTART below). Required: INCONSISTENT with PHC_RESET_SINCE_COMMIT (#365 12.4
+ *                             S2), commit PHC_DISCONTINUOUS with the committed schedule and its bracket (12.2), next NONE while no
+ *                             compared register changed. RETAINED or a progression status as before the event is FAIL; a reply whose
+ *                             inputs are not observable must be UNKNOWN (S1) and is then INCONCLUSIVE. Judged only with the line's own
+ *                             context: this case's commit (epoch, expected_generation + 1) in the query before, the event completed and
+ *                             its effect on the PHC measured (here: the step against wall time, tas_phc_step), exactly one generation
+ *                             step in the query after, and no reset reported before. Anything missing: INCONCLUSIVE, never PASS.
  *              ONCE           a second query after the same event: +0 (L10: once per event, never per query).
  *              RESEED_OFFSET  PHC_OFFSET_ADJUST +1 us with the schedule retained: +1 (L10, another reseed event).
  *              DISARM_NOWRITE DISARM_TAS completing STATUS_NOT_SUPPORTED (its device path writes nothing): +0 (L9).
@@ -118,11 +126,15 @@
  *                          INCONCLUSIVE, and GENERATION with it, never PASS (tas_race_order, TC-MOCK-066).
  *              GENERATION  commit before the write entry: the reseed hit a retained schedule, +2 in total (commit +1, L10 +1).
  *                          Write done before the commit: the reseed hit a CLEAN record, +1 in total.
+ *              STATUS_OFFSET  after these lines: PHC_OFFSET_ADJUST +100 ms on this case's own, not yet hit commit, then the status as for
+ *                          STATUS_SET (the +1 us step of META-001 is not measurable and follows another reseed, so it proves no status). A
+ *                          race that did not commit, or that committed before the held write, leaves no such commit: INCONCLUSIVE.
  *              SETTLED     both operations ended within their bounds; otherwise INCONCLUSIVE. While one has not ended when the
  *                          cleanup starts (after a further bounded wait), CLEANUP and RESTORE are INCONCLUSIVE_RESTORATION at best,
  *                          a measured failure stays CLEANUP_FAILED, and a later case on this adapter is BLOCKED (TC-MOCK-067).
  *            TC-TASACT-META-003, a third complete run: the same interleaving, but the held reseed steps the PHC back (5 s) and BaseT had
- *            already passed on the old PHC, which refuses it (STATUS_INVALID_PARAMETER, TAS-DR-08). Additional line:
+ *            already passed on the old PHC, which refuses it (STATUS_INVALID_PARAMETER, TAS-DR-08); its STATUS_OFFSET steps back (-100 ms).
+ *            Additional line:
  *              NEW_PHC     write before commit and the request COMMITTED: it was judged by the new PHC (tas_race_phc_used). A commit
  *                          before the write would have committed a passed BaseT: FAIL. No commit (the old PHC refused it):
  *                          INCONCLUSIVE, as WINDOW and GENERATION; never PASS.
@@ -141,6 +153,8 @@
  *                          bring-up. Otherwise INCONCLUSIVE. Who reset it is not separated (#348).
  *              GENERATION  only with RESTART (its end included) and RESEED: exactly +1 (one event). Without a shown end a later write may
  *                          still follow, so the value is printed and not judged; a failed bring-up is therefore not covered here.
+ *              STATUS_RESTART  the status after that event (STATUS_SET's rules), with RESTART and RESEED as its measured event. INCONCLUSIVE
+ *                          without them.
  *              ONCE        only with a shown end: two further queries, +0.
  *              STALE_VIEW  only with RESTART and RESEED: an ACTIVATE with the pair from before the event must be refused STATE_CONFLICT.
  *                          Both refusals complete STATUS_INVALID_DEVICE_STATE, so the #505 record of this arm and this op id decides
@@ -349,6 +363,7 @@ typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of fil
 
 static RUN_MODE g_mode;
 #define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
+#define META_STATUS_STEP_NS   (100LL * NS_PER_MS)     /* STATUS_OFFSET: a step that can be measured against wall time (META-003: back) */
 static int g_meta_case;                              /* --metadata-events: 1 to 4 = META-001 to -004 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
@@ -1500,6 +1515,39 @@ static void status_verdict(const char *check, TAS_STATUS_CLASS c, UINT32 index, 
     verdict(tas_status_tag(c), check, index, did, reason);
 }
 
+static long long wall_now_ns(void)
+{
+    LARGE_INTEGER now, freq;
+
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    return (long long)((double)now.QuadPart * 1e9 / (double)freq.QuadPart);
+}
+
+/** --metadata-events STATUS_*: the schedule status after one PHC reseed under the schedule that op committed. event: the caller observed the
+ *  reseed's completion and its effect on the PHC */
+static void meta_reseed_status(const char *check, UINT32 index, avb_u16 did, const QUERY_READ *before, const QUERY_READ *after,
+                               const AVB_TAS_OP_REQUEST *op, BOOL event, const char *what)
+{
+    const AVB_TAS_QUERY_HW_REQUEST *b = &before->q, *a = &after->q;
+    char seen[400];
+
+    printf("    [EVIDENCE] %s: %s: event %s; this commit is epoch %llu generation %llu (request + 1) BaseT %llu\n", check, what,
+           event ? "observed" : "NOT observed", op->context_epoch, op->expected_generation + 1, op->schedule.base_time_ns);
+    printf("    [EVIDENCE] %s: before: valid %d epoch %llu generation %llu commit state=%u bracket=[%llu, %llu] base=%llu cycle=%u\n", check,
+           query_valid(before), b->context_epoch, b->generation, b->current_commit.state, b->current_commit.phc_before_commit_ns,
+           b->current_commit.phc_after_commit_ns, b->current.base_time_ns, b->current.cycle_ns);
+    printf("    [EVIDENCE] %s: after: valid %d epoch %llu generation %llu commit state=%u bracket=[%llu, %llu] base=%llu cycle=%u next_commit=%u\n",
+           check, query_valid(after), a->context_epoch, a->generation, a->current_commit.state, a->current_commit.phc_before_commit_ns,
+           a->current_commit.phc_after_commit_ns, a->current.base_time_ns, a->current.cycle_ns, a->next_commit.state);
+    sprintf_s(seen, sizeof(seen), "current %u/0x%X next %u/0x%X commit %u snapshot 0x%X generation %llu PHC [%llu, %llu]; before the event current "
+              "%u/0x%X next %u/0x%X commit %u generation %llu", a->current_status, a->current_reasons, a->next_status, a->next_reasons,
+              a->current_commit.state, a->snapshot_reasons, a->generation, a->phc_before_ns, a->phc_after_ns, b->current_status,
+              b->current_reasons, b->next_status, b->next_reasons, b->current_commit.state, b->generation);
+    status_verdict(check, tas_status_reseed(query_valid(before), b, query_valid(after), a, op, event), index, did,
+                   "INCONSISTENT (6) with PHC_RESET_SINCE_COMMIT (0x80), commit PHC_DISCONTINUOUS (3) with the committed schedule, next NONE (1)", seen);
+}
+
 /** Every line is its own measurement. op: the committed request, whose pair identifies the commit. race / commit / pending: the queries
  *  immediately before the race, right after it and after the refused requests. stats0 / row0: the adapter's statistics and link before the activation */
 static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BOOL committed, const AVB_TAS_OP_REQUEST *op,
@@ -1792,8 +1840,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         QUERY_READ qm0, qm1, qa, qb, qc, qd, qe, qf;
         DWORD information = 0;
         LONG st;
-        long long phc2 = 0, base2;
-        BOOL retained;
+        long long phc2 = 0, base2, w0, w1, w2, w3;
+        BOOL retained, stepped;
 
         if (wire) { wire_stop(); }
         if (sock != INVALID_SOCKET) { closesocket(sock); }
@@ -1838,13 +1886,16 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 verdict("FAIL", "COMMIT", index, id->device_id, why);
             }
         }
+        w0 = wall_now_ns();
         query(h, &qa);
+        w1 = wall_now_ns();
         print_query("after the commit", &qa);
 
         /* RESEED_SET and ONCE: SET_TIMESTAMP (a PHC reseed) while the schedule is retained invalidates the old view exactly
          * once in that event (L10); repeated queries do not advance it */
         if (!retained) {
             verdict("BLOCKED", "RESEED_SET", index, id->device_id, "no retained schedule (see COMMIT): the L10 event cannot be judged");
+            verdict("BLOCKED", "STATUS_SET", index, id->device_id, "no retained schedule (see COMMIT)");
             verdict("BLOCKED", "ONCE", index, id->device_id, "no retained schedule (see COMMIT)");
             verdict("BLOCKED", "RESEED_OFFSET", index, id->device_id, "no retained schedule (see COMMIT)");
         } else {
@@ -1853,6 +1904,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
             if (st != 0) {
                 sprintf_s(why, sizeof(why), "GET_TIMESTAMP failed (ntstatus=0x%08lX): no SET_TIMESTAMP target", (unsigned long)st);
                 verdict("INCONCLUSIVE", "RESEED_SET", index, id->device_id, why);
+                verdict("INCONCLUSIVE", "STATUS_SET", index, id->device_id, "the reseed was not performed (see RESEED_SET)");
                 verdict("INCONCLUSIVE", "ONCE", index, id->device_id, "the reseed was not performed (see RESEED_SET)");
             } else {
                 avb_u64 target = ts.timestamp + (avb_u64)META_SET_AHEAD_NS;
@@ -1861,7 +1913,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 st = avb_ioctl_ntstatus(h, IOCTL_AVB_SET_TIMESTAMP, &ts, sizeof(ts), &ts, sizeof(ts), &information);
                 printf("    [EVIDENCE] SET_TIMESTAMP %llu with the schedule retained: ntstatus=0x%08lX status=0x%X\n", target,
                        (unsigned long)st, ts.status);
+                w2 = wall_now_ns();
                 query(h, &qb);
+                w3 = wall_now_ns();
                 print_query("after SET_TIMESTAMP", &qb);
                 query(h, &qc);
                 print_query("queried again", &qc);
@@ -1871,6 +1925,10 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                 } else {
                     meta_line("RESEED_SET", index, id->device_id, &qa, &qb, 1, "SET_TIMESTAMP (PHC reseed) with a retained schedule");
                 }
+                stepped = tas_phc_step(META_SET_AHEAD_NS, query_valid(&qa), &qa.q, query_valid(&qb), &qb.q, w2 - w1, w3 - w0);
+                printf("    [EVIDENCE] STATUS_SET: PHC %llu -> %llu over %lld to %lld ns of wall time: the +1 s step is %s\n", qa.q.phc_after_ns,
+                       qb.q.phc_before_ns, w2 - w1, w3 - w0, stepped ? "measured" : "NOT measured");
+                meta_reseed_status("STATUS_SET", index, id->device_id, &qa, &qb, &op, st == 0 && stepped, "SET_TIMESTAMP +1 s");
                 meta_line("ONCE", index, id->device_id, &qb, &qc, 0, "a second query after the same event");
             }
             /* RESEED_OFFSET: a PHC offset step with the schedule still retained is another reseed event: +1 once */
@@ -3174,6 +3232,7 @@ static void meta_race_not_run(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *
 {
     verdict("INCONCLUSIVE", "WINDOW", index, id->device_id, reason);
     verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, reason);
+    verdict("INCONCLUSIVE", "STATUS_OFFSET", index, id->device_id, reason);
     if (back) {
         verdict("INCONCLUSIVE", "NEW_PHC", index, id->device_id, reason);
     }
@@ -3193,10 +3252,14 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     HOLDCTL_PHC_JOB job, reseed;
     META_RACE_ACT act, done;
     OWNED_OP *wp, *wa;   /* registered: cleanup_and_verify waits for them itself and never judges a final state while one is open */
-    QUERY_READ q0, q1;
+    QUERY_READ q0, q1, qb, qs;
+    AVB_OFFSET_REQUEST off;
     DWORD br = 0, info = 0, t0;
     LONG st, stq;
     const INT64 step_ns = back ? -(INT64)META_BACK_NS : (INT64)META_OFFSET_NS;
+    const long long status_step = back ? -META_STATUS_STEP_NS : META_STATUS_STEP_NS;
+    long long w0, w1, w2, w3;
+    BOOL stepped;
     long long phc = 0, phc_after = 0, base;
     BOOL holding = FALSE, sent = FALSE, held, settled, real, phc_read;
     TAS_RACE_MARKERS m;
@@ -3324,6 +3387,30 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     } else {
         verdict("INCONCLUSIVE", "SETTLED", index, id->device_id, "the PHC reseed or the ACTIVATE did not end within its bound: the race is not judged, "
                 "and the cleanup decides whether a final state can be established");
+    }
+
+    /* STATUS_OFFSET: a measurable PHC_OFFSET_ADJUST (the one-shot hold is spent) on the commit of this case, which no event has hit yet */
+    if (order != TAS_RACE_WRITE_FIRST) {
+        verdict("INCONCLUSIVE", "STATUS_OFFSET", index, id->device_id, "no commit of this case that the held reseed did not hit (see WINDOW): the step is not sent");
+    } else {
+        w0 = wall_now_ns();
+        query(h, &qb);
+        w1 = wall_now_ns();
+        ZeroMemory(&off, sizeof(off));
+        off.offset_ns = status_step;
+        info = 0;
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_PHC_OFFSET_ADJUST, &off, sizeof(off), &off, sizeof(off), &info);
+        w2 = wall_now_ns();
+        query(h, &qs);
+        w3 = wall_now_ns();
+        print_query("before the status step", &qb);
+        print_query("after the status step", &qs);
+        stepped = tas_phc_step(status_step, query_valid(&qb), &qb.q, query_valid(&qs), &qs.q, w2 - w1, w3 - w0);
+        printf("    [EVIDENCE] STATUS_OFFSET: PHC_OFFSET_ADJUST %+lld ns: ntstatus=0x%08lX information=%lu status=0x%X; PHC %llu -> %llu over %lld to "
+               "%lld ns of wall time: the step is %s\n", status_step, (unsigned long)st, info, off.status, qb.q.phc_after_ns,
+               qs.q.phc_before_ns, w2 - w1, w3 - w0, stepped ? "measured" : "NOT measured");
+        meta_reseed_status("STATUS_OFFSET", index, id->device_id, &qb, &qs, &act.op, st == 0 && stepped,
+                           back ? "PHC_OFFSET_ADJUST -100 ms" : "PHC_OFFSET_ADJUST +100 ms");
     }
 #endif
 }
@@ -3465,7 +3552,7 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
               qa.q.context_epoch, q0.q.generation, qa.q.generation);
     verdict(retained ? "PASS" : "FAIL", "COMMIT", index, id->device_id, why);
     if (!retained) {
-        static const char *const lines[] = { "INIT_READY", "RESTART", "RESEED", "GENERATION", "ONCE", "STALE_VIEW" };
+        static const char *const lines[] = { "INIT_READY", "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "ONCE", "STALE_VIEW" };
         unsigned k;
 
         for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
@@ -3513,7 +3600,7 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     print_query("before the restart", &qt);
     meta_phc_reads(h, "before the restart", &p0);
     if (trigger == NULL || meta_find_instance(h, id->net_luid, &job) != TAS_INSTANCE_FOUND || !read_stats(h, &before)) {
-        static const char *const lines[] = { "RESTART", "RESEED", "GENERATION", "ONCE", "STALE_VIEW" };
+        static const char *const lines[] = { "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "ONCE", "STALE_VIEW" };
         unsigned k;
 
         for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
@@ -3595,6 +3682,7 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
                   qt.q.generation, qe.q.generation);
         verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, why);
     }
+    meta_reseed_status("STATUS_RESTART", index, id->device_id, &qt, &qe, &op, event, "FilterRestart (RESTART and RESEED)");
     record = read_state(h, &s);
     printf("    [EVIDENCE] record after the restart: %s%d; registers (TQAVCTRL 0x%08X BASET 0x%08X/0x%08X) against before (0x%08X 0x%08X/0x%08X), reported only (#364)\n",
            record ? "" : "unread ", record ? (int)s.armed : -1, qe.q.regs.tqavctrl, qe.q.regs.baset_h, qe.q.regs.baset_l, qt.q.regs.tqavctrl, qt.q.regs.baset_h,
