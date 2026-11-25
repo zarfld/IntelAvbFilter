@@ -737,6 +737,28 @@ static __inline TAS_PHC_RESET tas_phc_reset(const TAS_PHC_READS *before, const T
     return after->phc[0] < before->phc[1] ? TAS_PHC_RESET_SHOWN : TAS_PHC_RESET_NOT_SHOWN;
 }
 
+/* How far one restart of the same context is shown. entered_before / entered_after: exactly one Pause and one Restart of this context
+ * were counted (tas_lifecycle_outcome) by a statistics read before and by one after the query; registers_read: that query read registers -
+ * the query gate reopens only after a successful bring-up, so it shows the end only when the Restart had been entered before it and no
+ * further Pause began by the read after it. The counters move on entry, before the bring-up: they never show the end, and without it
+ * writes of the restart may still follow (PR review 2026-11-25, TC-MOCK-070) */
+typedef enum { TAS_RESTART_NOT_SHOWN = 0, TAS_RESTART_ENTERED, TAS_RESTART_COMPLETED } TAS_RESTART_STAGE;
+
+static __inline TAS_RESTART_STAGE tas_restart_stage(BOOL entered_before, BOOL entered_after, BOOL same_context, BOOL registers_read)
+{
+    if (!entered_after || !same_context) {
+        return TAS_RESTART_NOT_SHOWN;
+    }
+    return entered_before && registers_read ? TAS_RESTART_COMPLETED : TAS_RESTART_ENTERED;
+}
+
+/* Whether an INIT_DEVICE is the control "no invalidating event": a READY adapter, STATUS_SUCCESS and a PHC that was measured running before
+ * and after without a reset. A reset is no control, and neither is a PHC that was not read or did not run (TC-MOCK-070) */
+static __inline BOOL tas_init_control(BOOL ready, BOOL success, TAS_PHC_RESET reset)
+{
+    return ready && success && reset == TAS_PHC_RESET_NOT_SHOWN;
+}
+
 /* What the recorded result of an ACTIVATE that carried the pair from before the invalidating event says about that pair. Only
  * STATE_CONFLICT refuses it in step 4; NOT_CLEAN, INVALID, COMMITTED and every later result passed step 4, so the pair was still
  * current. BUSY, NOT_READY, NOT_SUPPORTED, NOT_IMPLEMENTED and "no result" may come before step 4 and say nothing */

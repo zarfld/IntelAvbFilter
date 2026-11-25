@@ -131,21 +131,25 @@
  *            (IOCTL_FILTER_RESTART_ONE_INSTANCE on the one instance that carries its interface GUID) while a schedule is retained.
  *              COMMIT      the versioned HOLD committed, GET_TAS_STATE ARMED, a valid non-zero pair. Without it the later lines have no
  *                          prerequisite: BLOCKED, nothing is triggered.
- *              INIT_READY  control: INIT_DEVICE on the second bound instance of the READY adapter, STATUS_SUCCESS, PHC not reset: +0.
+ *              INIT_READY  control: INIT_DEVICE on the second bound instance of the READY adapter, STATUS_SUCCESS, the PHC measured running
+ *                          before and after without a reset: +0. A PHC that was not read or did not run is no control: INCONCLUSIVE.
  *              RESTART     Pause +1, Restart +1, Pause/Restart generation +1, no attach and no detach, the same non-zero epoch
- *                          (tas_lifecycle_outcome, TC-MOCK-015). The trigger's own result is no evidence. Otherwise INCONCLUSIVE.
+ *                          (tas_lifecycle_outcome, TC-MOCK-015), and its end: hw_read READ again after the Restart entry (the query gate
+ *                          reopens only after a successful bring-up). The counters move on entry and show no end; the trigger's own result
+ *                          is no evidence. Otherwise INCONCLUSIVE (tas_restart_stage, TC-MOCK-070).
  *              RESEED      the PHC ran before and after and went below its last value (tas_phc_reset): measured, not concluded from the
  *                          bring-up. Otherwise INCONCLUSIVE. Who reset it is not separated (#348).
- *              GENERATION  only with RESTART and RESEED: exactly +1 (one event). The event has ended when hw_read is READ again (the query
- *                          gate reopens after a successful bring-up) or its bound has passed (a failed bring-up stays an event).
- *              ONCE        two further queries: +0.
+ *              GENERATION  only with RESTART (its end included) and RESEED: exactly +1 (one event). Without a shown end a later write may
+ *                          still follow, so the value is printed and not judged; a failed bring-up is therefore not covered here.
+ *              ONCE        only with a shown end: two further queries, +0.
  *              STALE_VIEW  only with RESTART and RESEED: an ACTIVATE with the pair from before the event must be refused STATE_CONFLICT.
  *                          Both refusals complete STATUS_INVALID_DEVICE_STATE, so the #505 record of this arm and this op id decides
  *                          (tas_stale_view). Nothing is written in either case (the record is ARMED). Release: INCONCLUSIVE.
  *              NEW_CONTEXT after the owned NIC cycle: an epoch that differs from the old one (compared, never assumed), generation 1 and
  *                          record CLEAN, although attach and its restart reset the PHC again (no retained schedule: no step).
  *            The trigger is sent when no send is outstanding, waited for within bounds, never withheld because of it. It only schedules the
- *            restart: until the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before (TC-MOCK-068).
+ *            restart: until the END of the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before
+ *            (TC-MOCK-068, TC-MOCK-070).
  *   --phc-hold-control  case TC-TASACT-HOLDCTL-001 (#505): the Debug-only one-shot PHC reseed hold control
  *            (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, 0x0017A3C4) on every adapter advertising INTEL_CAP_BASIC_1588, through independent
  *            handles each bound to that adapter. Lines: UNBOUND (STATUS_INVALID_DEVICE_STATE), MALFORMED (exact refusals, state
@@ -3264,7 +3268,8 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     DWORD information = 0, br = 0, t0;
     LONG st;
     long long phc = 0, base;
-    BOOL record, retained, quiet = FALSE, restart, event, readable = FALSE;
+    BOOL record, retained, quiet = FALSE, entered, completed, event, readable = FALSE;
+    TAS_RESTART_STAGE stage;
     unsigned polls;
     char why[700];
 
@@ -3317,9 +3322,10 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     printf("    [EVIDENCE] INIT_DEVICE on the second bound instance: hw_state=%u (READY is %u) ntstatus=0x%08lX generation %llu -> %llu\n", hw.hw_state,
            (unsigned)AVB_HW_PTP_READY, (unsigned long)st, qa.q.generation, qi.q.generation);
     reset = tas_phc_reset(&p0, &p1);
-    if (hw.hw_state != (avb_u32)AVB_HW_PTP_READY || st != 0 || reset == TAS_PHC_RESET_SHOWN) {
+    if (!tas_init_control(hw.hw_state == (avb_u32)AVB_HW_PTP_READY, st == 0, reset)) {
         sprintf_s(why, sizeof(why), "not the control this line needs: hw_state %u, INIT_DEVICE 0x%08lX, PHC %s (generation %llu -> %llu printed)", hw.hw_state,
-                  (unsigned long)st, reset == TAS_PHC_RESET_SHOWN ? "was reset" : "not shown reset", qa.q.generation, qi.q.generation);
+                  (unsigned long)st, reset == TAS_PHC_RESET_SHOWN ? "was reset" : (reset == TAS_PHC_RESET_NOT_SHOWN ? "ran on without a reset" :
+                  "not measured running before and after"), qa.q.generation, qi.q.generation);
         verdict("INCONCLUSIVE", "INIT_READY", index, id->device_id, why);
     } else {
         meta_line("INIT_READY", index, id->device_id, &qa, &qi, 0, "INIT_DEVICE on a second instance of the READY adapter, schedule retained");
@@ -3380,34 +3386,41 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     printf("    [EVIDENCE] after %lu ms: outcome %d pause%+lld restart%+lld gen%+lld attach%+lld detach%+lld outstanding sends %llu\n",
            (unsigned long)(GetTickCount() - t0), outcome, le.pause_delta, le.restart_delta, le.generation_delta, le.attach_delta, le.detach_delta,
            now.OutstandingSendNBLs);
+    entered = outcome == TAS_LIFECYCLE_RESTART_ENTERED;   /* seen before any query that could show the end */
     t0 = GetTickCount();
     do {
         query(h, &qe);
         readable = query_readable(&qe);
         if (!readable) { Sleep(50); }
-    } while (outcome == TAS_LIFECYCLE_RESTART_ENTERED && !readable && GetTickCount() - t0 < META_RESTART_BOUND_MS);
+    } while (entered && !readable && GetTickCount() - t0 < META_RESTART_BOUND_MS);
     meta_phc_reads(h, "after the restart", &p1);
     query(h, &qe);
+    readable = query_readable(&qe);   /* the judged query; it shows the end only after the Restart entry was seen (tas_restart_stage) */
     print_query("after the restart", &qe);
     if (read_stats(h, &now)) {
-        tas_lifecycle_evidence(&before, &now, FALSE, &le);   /* what had happened by the time of the judged query */
+        tas_lifecycle_evidence(&before, &now, FALSE, &le);   /* after the judged query: a pause that began since then is not missed */
         outcome = tas_lifecycle_outcome(&le);
+    } else {
+        outcome = TAS_LIFECYCLE_NOT_TRIGGERED;   /* not measured after the query: nothing is established */
     }
-    restart = outcome == TAS_LIFECYCLE_RESTART_ENTERED && meta_same_context(&qt, &qe);
-    if (le.restart_delta >= 1 && le.pause_delta == le.restart_delta && outcome != TAS_LIFECYCLE_CONTEXT_REPLACED) {
-        trigger->effect_open = FALSE;   /* every pause of this context was followed by its restart: the scheduled one took effect */
+    stage = tas_restart_stage(entered, outcome == TAS_LIFECYCLE_RESTART_ENTERED, meta_same_context(&qt, &qe), readable);
+    completed = stage == TAS_RESTART_COMPLETED;
+    if (completed) {
+        trigger->effect_open = FALSE;   /* only a shown end closes it: the entry counters move before the bring-up */
     }
     sprintf_s(why, sizeof(why), "pause%+lld restart%+lld gen%+lld attach%+lld detach%+lld, epoch %llu -> %llu, bring-up %s: %s", le.pause_delta, le.restart_delta,
               le.generation_delta, le.attach_delta, le.detach_delta, qt.q.context_epoch, qe.q.context_epoch,
-              readable ? "completed (hw_read READ)" : "completion not shown within the bound",
-              restart ? "one restart in the same context" : "one restart in the same context is not established");
-    verdict(restart ? "PASS" : "INCONCLUSIVE", "RESTART", index, id->device_id, why);
+              completed ? "completed (hw_read READ)" : "completion not shown within the bound",
+              completed ? "one restart in the same context" :
+              (stage == TAS_RESTART_ENTERED ? "entered in the same context, its end is not shown: it may still write and stays an open operation" :
+               "one restart in the same context is not established"));
+    verdict(completed ? "PASS" : "INCONCLUSIVE", "RESTART", index, id->device_id, why);
     reset = tas_phc_reset(&p0, &p1);
     sprintf_s(why, sizeof(why), "PHC %lld, %lld before, %lld, %lld after: %s", p0.phc[0], p0.phc[1], p1.phc[0], p1.phc[1],
               reset == TAS_PHC_RESET_SHOWN ? "the clock went below its last value and runs: reset" :
               (reset == TAS_PHC_RESET_NOT_SHOWN ? "no reset shown (it advanced; continuity is not judged)" : "not measured"));
     verdict(reset == TAS_PHC_RESET_SHOWN ? "PASS" : "INCONCLUSIVE", "RESEED", index, id->device_id, why);
-    event = restart && reset == TAS_PHC_RESET_SHOWN;
+    event = completed && reset == TAS_PHC_RESET_SHOWN;
     if (event) {
         meta_line("GENERATION", index, id->device_id, &qt, &qe, 1, "one FilterRestart that reset the PHC under a retained schedule (L10)");
     } else {
@@ -3424,7 +3437,11 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     query(h, &qx);
     query(h, &qy);
     printf("    [EVIDENCE] two further queries: generation %llu, %llu\n", qx.q.generation, qy.q.generation);
-    meta_line("ONCE", index, id->device_id, &qe, &qy, 0, "two further queries after the same event");
+    if (trigger->effect_open) {
+        verdict("INCONCLUSIVE", "ONCE", index, id->device_id, "the end of the restart is not shown (see RESTART): a change could still come from it");
+    } else {
+        meta_line("ONCE", index, id->device_id, &qe, &qy, 0, "two further queries after the same event");
+    }
 
     /* STALE_VIEW: the pair from before the event, told apart by the driver's record of this arm and this operation */
     if (!event) {

@@ -2449,6 +2449,56 @@ static void test_69_init_event(void)
     EXPECT_EQ("... and counts no second time", avb_tas_init_advances(&done, 1, 1, max), 0);
 }
 
+/* TC-MOCK-070: META-004 review findings (PR review 2026-11-25; test logic only). The end of a restart is shown by the reopened query gate,
+ * never by its entry counters; until then the restart stays an open operation and no restoration is final. A control without a
+ * measured, running PHC is no control */
+static void test_70_restart_end(void)
+{
+    const TAS_PHC_READS running = { TRUE, { 1000, 2000 } }, later = { TRUE, { 3000, 4000 } };
+    TAS_PHC_READS unread = { FALSE, { 0, 0 } }, frozen = { TRUE, { 3000, 3000 } };
+    TAS_ACT_RESTORE_EVIDENCE e;
+    OWNED_OP *ops = NULL, *op;
+    TAS_RESTART_STAGE stage;
+
+    printf("\n[TC-MOCK-070] #357 end of a restart and the INIT_DEVICE control (test logic only)\n");
+    EXPECT_EQ("entered, gate reopened: completed", tas_restart_stage(TRUE, TRUE, TRUE, TRUE), TAS_RESTART_COMPLETED);
+    EXPECT_EQ("entered, gate not reopened: only entered", tas_restart_stage(TRUE, TRUE, TRUE, FALSE), TAS_RESTART_ENTERED);
+    EXPECT_EQ("not entered: not shown, whatever the query reads", tas_restart_stage(FALSE, FALSE, TRUE, TRUE), TAS_RESTART_NOT_SHOWN);
+    EXPECT_EQ("another context: not shown", tas_restart_stage(TRUE, TRUE, FALSE, TRUE), TAS_RESTART_NOT_SHOWN);
+    EXPECT_EQ("entered only after the query: a READ from before the pause is no end", tas_restart_stage(FALSE, TRUE, TRUE, TRUE), TAS_RESTART_ENTERED);
+    EXPECT_EQ("a further pause after the query: not shown", tas_restart_stage(TRUE, FALSE, TRUE, TRUE), TAS_RESTART_NOT_SHOWN);
+
+    op = owned_op_new(&ops, 1);
+    if (op == NULL) {
+        EXPECT_EQ("memory available", 0, 1);
+        return;
+    }
+    op->effect_open = TRUE;
+    stage = tas_restart_stage(TRUE, TRUE, TRUE, FALSE);      /* counters 1/1, completion not shown within the bound */
+    op->effect_open = stage != TAS_RESTART_COMPLETED;
+    ZeroMemory(&e, sizeof(e));
+    e.cycle_completed = TRUE; e.adapter_returned = TRUE; e.driver_clean = TRUE; e.regs_measured = TRUE;
+    e.tsn_mode_off = TRUE; e.tx_probed = TRUE; e.tx_on_wire = TRUE;
+    e.operations_pending = !owned_ops_settled(&ops, 1, 0);
+    EXPECT_EQ("a restart without a shown end stays an open operation", e.operations_pending, 1);
+    EXPECT_EQ("... so no restoration PASS", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    EXPECT_EQ("... and no CLEANUP PASS", tas_act_cycle(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    if (ops != NULL) {
+        ops->effect_open = tas_restart_stage(TRUE, TRUE, TRUE, TRUE) != TAS_RESTART_COMPLETED;
+    }
+    e.operations_pending = !owned_ops_settled(&ops, 1, 0);
+    EXPECT_EQ("with the end shown it is settled", e.operations_pending, 0);
+    EXPECT_EQ("... and a fully measured restoration is complete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+
+    EXPECT_EQ("READY, SUCCESS, PHC ran on: the control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &later)), TRUE);
+    EXPECT_EQ("a reset is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&later, &running)), FALSE);
+    EXPECT_EQ("an unread PHC before is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&unread, &later)), FALSE);
+    EXPECT_EQ("an unread PHC after is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &unread)), FALSE);
+    EXPECT_EQ("a PHC that does not run after is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &frozen)), FALSE);
+    EXPECT_EQ("not READY is no control", tas_init_control(FALSE, TRUE, TAS_PHC_RESET_NOT_SHOWN), FALSE);
+    EXPECT_EQ("a failed INIT_DEVICE is no control", tas_init_control(TRUE, FALSE, TAS_PHC_RESET_NOT_SHOWN), FALSE);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2504,6 +2554,7 @@ int main(void) {
     test_15_lifecycle_outcome();
     test_68_restart();
     test_69_init_event();
+    test_70_restart_end();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
