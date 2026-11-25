@@ -99,8 +99,10 @@
  *              RESEED_SET     SET_TIMESTAMP (current PHC + 1 s, a PHC reseed) with the schedule retained: +1 (L10).
  *              STATUS_SET     the schedule status after that reseed, the first event since the commit (#350; tas_status_reseed, TC-MOCK-072,
  *                             as STATUS_OFFSET and STATUS_RESTART below). Required: INCONSISTENT with PHC_RESET_SINCE_COMMIT (#365 12.4
- *                             S2), commit PHC_DISCONTINUOUS with the committed schedule and its bracket (12.2), next NONE while no
- *                             compared register changed. RETAINED or a progression status as before the event is FAIL; a reply whose
+ *                             S2), commit PHC_DISCONTINUOUS with the committed schedule and its bracket (12.2), next NONE when every
+ *                             compared field equals the committed schedule (R1); otherwise exactly the mismatch reasons besides and
+ *                             next UNKNOWN/SLOT_UNATTRIBUTED (R2, tas_status_match); a comparison that cannot be established is
+ *                             INCONCLUSIVE. RETAINED or a progression status as before the event is FAIL; a reply whose
  *                             inputs are not observable must be UNKNOWN (S1) and is then INCONCLUSIVE. Judged only with the line's own
  *                             context: this case's commit (epoch, expected_generation + 1) in the query before, the event completed and
  *                             its effect on the PHC measured (here: the step against wall time, tas_phc_step), exactly one generation

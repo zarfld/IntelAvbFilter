@@ -2523,6 +2523,7 @@ static void st_query(AVB_TAS_QUERY_HW_REQUEST *q, avb_u64 before, avb_u64 after,
     q->phc_after_ns = after;
     q->current.base_time_ns = 5000;
     q->current.cycle_ns = 1000;
+    q->regs.tqavctrl = (avb_u32)I226_TQAVCTRL_TRANSMIT_MODE_MASK;
     q->regs.qbvcyclet = 1000;
     for (i = 0; i < AVB_TAS_QUEUES; i++) {
         q->current.queue[i].start_ns = 200;
@@ -2912,7 +2913,7 @@ static void test_72_reseed_status(void)
     static const avb_u32 progression[] = { AVB_TAS_ST_NONE, AVB_TAS_ST_PROGRAMMED, AVB_TAS_ST_PENDING, AVB_TAS_ST_INFERRED_ACTIVE };
     static const avb_u32 never[] = { AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD, AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH, AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS,
                                      AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST, AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH,
-                                     AVB_TAS_SLOT_RSN_CYCLE_MISMATCH, AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF, AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED,
+                                     AVB_TAS_SLOT_RSN_CYCLE_MISMATCH, AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF,
                                      AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT };
     static const avb_u32 may[] = { AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD, AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED };
     AVB_TAS_QUERY_HW_REQUEST b, q;
@@ -3088,6 +3089,181 @@ static void test_72_reseed_status(void)
     EXPECT_EQ("08:16 replay: UNKNOWN/COMMIT_INFO_LOST after the reseed is the RED", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_WRONG);
     EXPECT_TRUE("08:16 replay: its +1 s is measured (that run took no wall time here; 0 to 1 ms assumed)",
                 tas_phc_step(1000000000LL, TRUE, &b, TRUE, &q, 0LL, 1000000LL));
+}
+
+/* PR #522 review: the compared registers of the reply against the committed schedule, never two readings against each other */
+static void st_stable(AVB_TAS_QUERY_HW_REQUEST *b, AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    st_query(b, 2000, 2100, AVB_TAS_ST_INCONSISTENT, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH);
+    b->regs.endqt[1] = 450;
+    b->current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    b->next_status = AVB_TAS_ST_UNKNOWN;
+    b->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    st_reset(q);
+    q->regs.endqt[1] = 450;
+}
+
+static void st_r2(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 mismatch)
+{
+    q->current_reasons |= mismatch;
+    q->current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    q->next_status = AVB_TAS_ST_UNKNOWN;
+    q->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+}
+
+static void test_72_reseed_match(void)
+{
+    const avb_u32 WINDOW = AVB_TAS_SLOT_RSN_WINDOW_MISMATCH, CYCLE = AVB_TAS_SLOT_RSN_CYCLE_MISMATCH, OFF = AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+    const avb_u32 LINK = AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED;
+    AVB_TAS_QUERY_HW_REQUEST b, q;
+    AVB_TAS_OP_REQUEST op;
+    unsigned k;
+
+    printf("\n[TC-MOCK-072] #350 R1/R2 against the committed schedule (PR #522 review; test logic only)\n");
+
+    /* A register that contradicted the schedule before the event and still does: R2 */
+    st_stable(&b, &q);
+    st_r2(&q, WINDOW);
+    EXPECT_EQ("stable ENDQT mismatch: both reasons, HW_MISMATCH, next unattributed (R2)", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("... PHC_DISCONTINUOUS as the one commit state: no published priority", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    st_stable(&b, &q);
+    EXPECT_EQ("... answered as a reset alone: the mismatch is missing", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    st_stable(&b, &q);
+    st_r2(&q, WINDOW);
+    q.next_status = AVB_TAS_ST_NONE; q.next_reasons = 0;
+    EXPECT_EQ("... next NONE under a mismatch: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    q.next_status = AVB_TAS_ST_UNKNOWN;
+    EXPECT_EQ("... next UNKNOWN without its reason: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_stable(&b, &q);
+    st_r2(&q, WINDOW);
+    q.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("... RETAINED: the schedule as before the event", st_reseed(&b, &q, TRUE), TAS_STATUS_STALE);
+    q.current_commit.state = AVB_TAS_COMMIT_LOST;
+    EXPECT_EQ("... LOST: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_stable(&b, &q);
+    st_r2(&q, WINDOW);
+    q.current_commit.phc_after_commit_ns = 1021;
+    EXPECT_EQ("... a bracket that moved against the mismatched record before: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_stable(&b, &q);
+    st_r2(&q, WINDOW | CYCLE);
+    EXPECT_EQ("... a further mismatch that is none: excluded", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+        st_reset(&q);
+        b.regs.stqt[k] = q.regs.stqt[k] = 250;
+        EXPECT_EQ("a stable STQT mismatch on any queue, answered as a reset alone", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+        st_r2(&q, WINDOW);
+        EXPECT_EQ("... answered as R2", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    }
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    b.regs.qbvcyclet = q.regs.qbvcyclet = 2000;
+    EXPECT_EQ("a stable cycle mismatch, answered as a reset alone", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    st_r2(&q, CYCLE);
+    EXPECT_EQ("... answered as R2", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    q.regs.endqt[0] = b.regs.endqt[0] = 399;
+    EXPECT_EQ("... with a window mismatch besides that is not reported", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    b.regs.tqavctrl = q.regs.tqavctrl = 0;
+    b.hw_mode = q.hw_mode = AVB_TAS_HWMODE_OFF;
+    EXPECT_EQ("the mode off before and after, answered as a reset alone", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    st_r2(&q, OFF);
+    EXPECT_EQ("... answered as R2", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+
+    /* A register that contradicted it before and matches after the event: R1 */
+    st_stable(&b, &q);
+    st_reset(&q);
+    EXPECT_EQ("a mismatch that is gone: a reset alone, next NONE (R1)", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    q.next_status = AVB_TAS_ST_UNKNOWN; q.next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    EXPECT_EQ("... next unattributed although nothing contradicts: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    EXPECT_EQ("... HW_MISMATCH although nothing contradicts: wrong", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    st_r2(&q, WINDOW);
+    EXPECT_EQ("... answered as R2 from before: excluded", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+
+    /* Compared fields only */
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    q.regs.stqt[0] |= 0x80000000u;
+    q.regs.qbvcyclet |= 0x80000000u;
+    q.regs.tqavctrl |= 0x80000000u;
+    q.regs.baset_h = 99;
+    q.regs.qbvcyclet_s = 7;
+    q.regs.txqctl[1] = 3;
+    EXPECT_EQ("bits outside the fields, BASET, shadow and TXQCTL are not compared", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+
+    /* A comparison that cannot be established decides nothing */
+    st_op(&op);
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    op.schedule = q.current;
+    op.schedule.cycle_ns = q.current.cycle_ns = 0x40000000u;
+    EXPECT_EQ("a cycle that does not fit its field: not measured", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_r2(&q, CYCLE);
+    EXPECT_EQ("... answered as R2 as well", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    q.next_status = AVB_TAS_ST_PENDING;
+    EXPECT_EQ("... a next status that neither case has is still wrong", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_WRONG);
+    st_reset(&q);
+    op.schedule = q.current;
+    op.schedule.queue[3].end_ns = q.current.queue[3].end_ns = 0x40000000u;
+    EXPECT_EQ("a window that does not fit its field: not measured", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_reset(&q);
+    op.schedule = q.current;
+    op.schedule.cycle_ns = q.current.cycle_ns = 0;
+    EXPECT_EQ("no schedule to compare with: not measured", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
+    st_reset(&q);
+    q.hw_mode = AVB_TAS_HWMODE_OFF;
+    EXPECT_EQ("hw_mode against the raw register: not measured", st_reseed(&b, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+    q.current_status = AVB_TAS_ST_PENDING;
+    EXPECT_EQ("... the schedule as before the event is still a failure", st_reseed(&b, &q, TRUE), TAS_STATUS_STALE);
+    st_reset(&q);
+    q.hw_mode = AVB_TAS_HWMODE_OFF;
+    q.current_reasons = 0;
+    EXPECT_EQ("... and so is the missing reset", st_reseed(&b, &q, TRUE), TAS_STATUS_WRONG);
+
+    /* The link speed: an unchanged reading says nothing about the window rule either */
+    st_query(&b, 2000, 2100, AVB_TAS_ST_PENDING, 0);
+    st_reset(&q);
+    b.link_speed_mbps = q.link_speed_mbps = 100;   /* 200 ns windows: too small at any speed the interface has */
+    EXPECT_EQ("windows too small at an unchanged speed, not reported", st_reseed(&b, &q, TRUE), TAS_STATUS_REASONS);
+    q.current_reasons |= LINK;
+    EXPECT_EQ("... reported", st_reseed(&b, &q, TRUE), TAS_STATUS_PASS);
+    q.link_speed_mbps = 0;
+    EXPECT_EQ("LINK_SPEED_CHANGED at an unknown speed: not established", st_reseed(&b, &q, TRUE), TAS_STATUS_NOT_MEASURED);
+
+    /* The 12:03 reply of META-001 STATUS_SET (I226 0x125B, driver 0D4498F7): its PASS stays. The frame size of the schedule is not printed */
+    st_run_1003(&b, 42366372000ULL, 42366389708ULL, 0x2C);
+    b.current_status = AVB_TAS_ST_PENDING; b.current_reasons = 0;
+    b.next_status = AVB_TAS_ST_NONE; b.next_reasons = 0;
+    b.context_epoch = 18287856423910191252ULL;
+    b.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    b.current_commit.phc_before_commit_ns = 42366055294ULL;
+    b.current_commit.phc_after_commit_ns = 42366057777ULL;
+    ZeroMemory(&b.current, sizeof(b.current));
+    b.current.base_time_ns = 44000000000ULL;
+    b.current.cycle_ns = 1000000000u;
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        b.current.queue[k].start_ns = 200000000u;
+        b.current.queue[k].end_ns = 400000000u;
+        b.current.queue[k].max_frame_bytes = 1522;
+    }
+    q = b;
+    q.current_status = AVB_TAS_ST_INCONSISTENT; q.current_reasons = AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT;
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    q.generation = 3;
+    q.phc_before_ns = 43367297568ULL; q.phc_after_ns = 43367316289ULL;
+    ZeroMemory(&op, sizeof(op));
+    op.context_epoch = b.context_epoch;
+    op.expected_generation = 1;
+    op.schedule = b.current;
+    EXPECT_EQ("12:03 replay: the normal reset is still a PASS", tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_PASS);
+    q.current_reasons |= LINK;
+    EXPECT_EQ("... LINK_SPEED_CHANGED where no window is shown too small: not established (the overhead term is unpublished)",
+              tas_status_reseed(TRUE, &b, TRUE, &q, &op, TRUE), TAS_STATUS_NOT_MEASURED);
 }
 
 /* TC-MOCK-073: what an adapter context retains from its last commit (#350 C6; driver logic, no hardware claim) */
@@ -3608,6 +3784,7 @@ int main(void) {
     test_70_restart_end();
     test_71_hold_status();
     test_72_reseed_status();
+    test_72_reseed_match();
     test_73_retained();
     test_74_phc_set();
     test_75_query_record();

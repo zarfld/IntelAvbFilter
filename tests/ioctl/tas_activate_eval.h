@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include "../../include/avb_ioctl.h"
+#include "../../intel-ethernet-regs/gen/i226_regs.h"   /* the generated helpers #365 12.3 names for the v1 register set (tas_status_match) */
 #include "../common/avb_verdict.h"   /* the SDK NTSTATUS values (#368 semantic cases) */
 
 #define TAS_ACT_EDGE_MARGIN_NS     20000000LL
@@ -1096,17 +1097,74 @@ static __inline BOOL tas_phc_step(long long step, BOOL a_valid, const AVB_TAS_QU
     return moved - wall_min <= -(size / 2) && moved - wall_max >= -(size + size / 2);
 }
 
+/* The compared fields of a reply against a schedule (#365 12.4: TRANSMIT_MODE, START_TIME, END_TIME, QBV_CYCLE_TIME, decoded with the generated
+ * SSOT helpers that 12.3 names for the v1 register set). Readings of two queries that equal each other say nothing about the schedule.
+ * established: the comparison could be made; a schedule value that does not fit its field, or a hw_mode that disagrees with the raw register,
+ * leaves it open. mismatch: the slot reasons that a contradiction of this reply has (R2); 0 = R1. Expects an observable reply */
+#define TAS_STATUS_MISMATCH_BITS (AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH)
+
+typedef struct {
+    BOOL established;
+    avb_u32 mismatch;
+} TAS_STATUS_MATCH;
+
+static __inline void tas_status_match(const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_SCHEDULE *s, TAS_STATUS_MATCH *m)
+{
+    const BOOL tsn = I226_TQAVCTRL_GET(q->regs.tqavctrl, I226_TQAVCTRL_TRANSMIT_MODE_MASK, I226_TQAVCTRL_TRANSMIT_MODE_SHIFT) != 0;
+    unsigned k;
+
+    ZeroMemory(m, sizeof(*m));
+    m->established = s->cycle_ns != 0 && s->cycle_ns <= (I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) &&
+                     q->hw_mode == (avb_u32)(tsn ? AVB_TAS_HWMODE_TSN : AVB_TAS_HWMODE_OFF);
+    if (!tsn) {
+        m->mismatch |= AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+    }
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        const AVB_TAS_QUEUE_WINDOW *w = &s->queue[k];
+
+        if (w->start_ns > (I226_STQT_START_TIME_MASK >> I226_STQT_START_TIME_SHIFT) ||
+            w->end_ns > (I226_ENDQT_END_TIME_MASK >> I226_ENDQT_END_TIME_SHIFT)) {
+            m->established = FALSE;
+        }
+        if (I226_STQT_GET(q->regs.stqt[k], I226_STQT_START_TIME_MASK, I226_STQT_START_TIME_SHIFT) != w->start_ns ||
+            I226_ENDQT_GET(q->regs.endqt[k], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT) != w->end_ns) {
+            m->mismatch |= AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+        }
+    }
+    if (I226_QBVCYCLET_GET(q->regs.qbvcyclet, I226_QBVCYCLET_QBV_CYCLE_TIME_MASK, I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) != s->cycle_ns) {
+        m->mismatch |= AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
+    }
+}
+
+/* A window of the schedule is shown too small at this speed (TAS-DR-05 without its unpublished overhead term, which only raises the bound).
+ * FALSE is no proof that every window fits, and an unknown speed (0) shows nothing */
+static __inline BOOL tas_status_window_too_small(const AVB_TAS_SCHEDULE *s, avb_u32 link_mbps)
+{
+    unsigned k;
+
+    for (k = 0; link_mbps != 0 && k < AVB_TAS_QUEUES; k++) {
+        const AVB_TAS_QUEUE_WINDOW *w = &s->queue[k];
+        const avb_u32 bytes = w->max_frame_bytes > TAS_DR05_MIN_BYTES ? w->max_frame_bytes : TAS_DR05_MIN_BYTES;
+
+        if (w->end_ns > w->start_ns && (avb_u64)(w->end_ns - w->start_ns) * link_mbps <= (avb_u64)bytes * TAS_DR05_NS_MBPS_PER_BYTE) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* before: the query after the commit and before the event; q: the query after it. op: the committed request, whose pair identifies the
  * commit (tas_status_control). event: its completion and its effect on the PHC were observed by the caller. Exactly one generation step
- * between the two queries attributes q to this event; another step is another event, and then the reason is not this event's */
+ * between the two queries attributes q to this event; another step is another event, and then the reason is not this event's.
+ * R1 or R2 is decided by q's compared registers against the committed schedule (tas_status_match), never by a change between the two */
 static __inline TAS_STATUS_CLASS tas_status_reseed(BOOL before_valid, const AVB_TAS_QUERY_HW_REQUEST *before, BOOL valid,
                                                    const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_OP_REQUEST *op, BOOL event)
 {
     const AVB_TAS_COMMIT_INFO *i = &q->current_commit;
     avb_u32 excluded = AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD | AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH | AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS |
                        AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST | AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
-    BOOL same, unknown;
-    unsigned k;
+    TAS_STATUS_MATCH m;
+    BOOL unknown, too_small, r1, r2;
 
     if (!valid) {
         return TAS_STATUS_NOT_MEASURED;
@@ -1134,10 +1192,6 @@ static __inline TAS_STATUS_CLASS tas_status_reseed(BOOL before_valid, const AVB_
         before->current_commit.state == AVB_TAS_COMMIT_PHC_DISCONTINUOUS) {
         return TAS_STATUS_CONTROL_LOST;
     }
-    same = before->hw_mode == AVB_TAS_HWMODE_TSN && q->hw_mode == AVB_TAS_HWMODE_TSN && before->regs.qbvcyclet == q->regs.qbvcyclet;
-    for (k = 0; k < AVB_TAS_QUEUES; k++) {
-        same = same && before->regs.stqt[k] == q->regs.stqt[k] && before->regs.endqt[k] == q->regs.endqt[k];
-    }
     if (q->current_status == AVB_TAS_ST_NONE || q->current_status == AVB_TAS_ST_PROGRAMMED || q->current_status == AVB_TAS_ST_PENDING ||
         q->current_status == AVB_TAS_ST_INFERRED_ACTIVE || i->state == AVB_TAS_COMMIT_RETAINED) {
         return TAS_STATUS_STALE;
@@ -1145,30 +1199,35 @@ static __inline TAS_STATUS_CLASS tas_status_reseed(BOOL before_valid, const AVB_
     if (q->current_status != AVB_TAS_ST_INCONSISTENT || (q->current_reasons & AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT) == 0) {
         return TAS_STATUS_WRONG;
     }
-    if (same) {
-        excluded |= AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
-    }
-    if (before->link_speed_mbps == q->link_speed_mbps) {
-        excluded |= AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED;
-    }
+    tas_status_match(q, &op->schedule, &m);
+    too_small = tas_status_window_too_small(&op->schedule, q->link_speed_mbps);
     if (q->phc_before_ns > op->schedule.base_time_ns || q->phc_after_ns < op->schedule.base_time_ns) {
         excluded |= AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT;
     }
-    if ((q->current_reasons & excluded) != 0) {
+    if ((q->current_reasons & excluded) != 0 ||
+        (m.established && (q->current_reasons & TAS_STATUS_MISMATCH_BITS) != m.mismatch) ||   /* every applicable bit, and no other */
+        (too_small && (q->current_reasons & AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED) == 0)) {
         return TAS_STATUS_REASONS;
     }
-    if ((i->state != AVB_TAS_COMMIT_PHC_DISCONTINUOUS && (same || i->state != AVB_TAS_COMMIT_HW_MISMATCH)) ||
+    /* Reset and mismatch together: no published priority of the one commit state, so either is accepted there and only there */
+    if ((i->state != AVB_TAS_COMMIT_PHC_DISCONTINUOUS && i->state != AVB_TAS_COMMIT_HW_MISMATCH) ||
+        (m.established && m.mismatch == 0 && i->state == AVB_TAS_COMMIT_HW_MISMATCH) ||
         memcmp(&q->current, &op->schedule, sizeof(op->schedule)) != 0 || i->phc_before_commit_ns > i->phc_after_commit_ns ||
         i->phc_after_commit_ns == 0 || i->phc_after_commit_ns >= op->schedule.base_time_ns) {
         return TAS_STATUS_WRONG;
     }
-    if (before->current_commit.state == AVB_TAS_COMMIT_RETAINED &&
+    if ((before->current_commit.state == AVB_TAS_COMMIT_RETAINED || before->current_commit.state == AVB_TAS_COMMIT_HW_MISMATCH) &&
         (before->current_commit.phc_before_commit_ns != i->phc_before_commit_ns ||
          before->current_commit.phc_after_commit_ns != i->phc_after_commit_ns)) {
         return TAS_STATUS_WRONG;   /* the bracket is a fact of the commit: the event does not move it */
     }
-    if (same && (q->next_status != AVB_TAS_ST_NONE || q->next_reasons != 0 || q->next_commit.state != AVB_TAS_COMMIT_NONE)) {
-        return TAS_STATUS_WRONG;   /* R1: no compared field contradicts */
+    r1 = q->next_status == AVB_TAS_ST_NONE && q->next_reasons == 0;
+    r2 = q->next_status == AVB_TAS_ST_UNKNOWN && q->next_reasons == AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    if (q->next_commit.state != AVB_TAS_COMMIT_NONE || (!r1 && !r2) || (m.established && (m.mismatch == 0) != r1)) {
+        return TAS_STATUS_WRONG;   /* 12.4: R1 next NONE, R2 next UNKNOWN/SLOT_UNATTRIBUTED */
+    }
+    if (!m.established || ((q->current_reasons & AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED) != 0 && !too_small)) {
+        return TAS_STATUS_NOT_MEASURED;   /* a comparison this test cannot establish decides nothing */
     }
     return TAS_STATUS_PASS;
 }
