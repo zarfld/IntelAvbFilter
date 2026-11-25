@@ -807,7 +807,8 @@ static __inline TAS_NEW_CONTEXT tas_new_context(unsigned long long old_epoch, BO
 /* What the test measured between the commit and the judged query, besides the query's own status */
 typedef struct {
     avb_u64 base;           /* the BaseT the test requested */
-    BOOL measured;          /* the facts below were measured: both queries observable, generation and epoch reported in both */
+    BOOL identified;        /* the judged reply and the committed request both carry a generation and an epoch */
+    BOOL measured;          /* the facts below were measured: both queries observable, and the one after the commit is of that commit */
     avb_u32 contradiction;  /* TAS_STATUS_C_*: a measured fact that contradicts the progression */
     BOOL no_event_counted;  /* observed: the driver counted no status, PnP, pause, restart, attach or detach event of this adapter since
                                before the commit, OS link unchanged and connected, the driver's link speed unchanged and non-zero */
@@ -817,8 +818,9 @@ typedef struct {
 #define TAS_STATUS_C_MODE_OFF   0x01u   /* hw_mode is not TSN */
 #define TAS_STATUS_C_REGS       0x02u   /* a compared schedule register (STQT, ENDQT, QBVCYCLET) differs from right after the commit */
 #define TAS_STATUS_C_PHC_BACK   0x04u   /* the PHC is below its value right after the commit */
-#define TAS_STATUS_C_CONTEXT    0x08u   /* another context epoch */
-#define TAS_STATUS_C_GENERATION 0x10u   /* another generation: an invalidating event or a further mutation (#352 R1 L7, L10) */
+#define TAS_STATUS_C_CONTEXT    0x08u   /* another context epoch than the committed request's */
+#define TAS_STATUS_C_GENERATION 0x10u   /* another generation than its commit published: an invalidating event or a further mutation (L7, L10) */
+#define TAS_STATUS_C_IDENTITY   (TAS_STATUS_C_CONTEXT | TAS_STATUS_C_GENERATION)
 
 typedef enum {
     TAS_STATUS_PASS = 0,
@@ -890,19 +892,25 @@ static __inline BOOL tas_status_observable(BOOL valid, const AVB_TAS_QUERY_HW_RE
 }
 
 /* The control between the query right after the commit and the judged one. Unobservable or unreported is "not measured", never "no
- * contradiction". The shadow cycle, BASET and TXQCTL are no compared fields of the activation's record (12.4) */
+ * contradiction". The shadow cycle, BASET and TXQCTL are no compared fields of the activation's record (12.4).
+ * Whose reply it is comes from the committed request itself (op): the driver compared its pair under the claim and advanced once, so its
+ * commit is (context_epoch, expected_generation + 1) (#352 R1 L7, L8). Any other pair is another context, an invalidating event or
+ * another mutation: what that reply says, matching or not, is not about this commit */
 static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_HW_REQUEST *commit, BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q,
-                                        avb_u64 base, BOOL no_event_counted, BOOL k8_verified, TAS_STATUS_CONTROL *c)
+                                        const AVB_TAS_OP_REQUEST *op, BOOL no_event_counted, BOOL k8_verified, TAS_STATUS_CONTROL *c)
 {
     BOOL same = TRUE;
     unsigned i;
 
     ZeroMemory(c, sizeof(*c));
-    c->base = base;
+    c->base = op->schedule.base_time_ns;
     c->no_event_counted = no_event_counted;
     c->k8_verified = k8_verified;
-    if (!tas_status_observable(commit_valid, commit) || !tas_status_observable(valid, q) || commit->generation == 0 || q->generation == 0 ||
-        commit->context_epoch == 0 || q->context_epoch == 0) {
+    c->identified = valid && q->generation != 0 && q->context_epoch != 0 && op->expected_generation != 0 && op->context_epoch != 0;
+    if (c->identified && q->context_epoch != op->context_epoch)            { c->contradiction |= TAS_STATUS_C_CONTEXT; }
+    if (c->identified && q->generation != op->expected_generation + 1)     { c->contradiction |= TAS_STATUS_C_GENERATION; }
+    if (!c->identified || !tas_status_observable(commit_valid, commit) || !tas_status_observable(valid, q) ||
+        commit->context_epoch != op->context_epoch || commit->generation != op->expected_generation + 1) {
         return;
     }
     c->measured = TRUE;
@@ -913,8 +921,6 @@ static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_H
     if (q->hw_mode != AVB_TAS_HWMODE_TSN)          { c->contradiction |= TAS_STATUS_C_MODE_OFF; }
     if (!same)                                     { c->contradiction |= TAS_STATUS_C_REGS; }
     if (q->phc_before_ns < commit->phc_after_ns)   { c->contradiction |= TAS_STATUS_C_PHC_BACK; }
-    if (q->context_epoch != commit->context_epoch) { c->contradiction |= TAS_STATUS_C_CONTEXT; }
-    if (q->generation != commit->generation)       { c->contradiction |= TAS_STATUS_C_GENERATION; }
 }
 
 /* The current slot against PENDING (query before BaseT) or INFERRED_ACTIVE (query past BaseT) */
@@ -945,7 +951,7 @@ static __inline TAS_STATUS_CLASS tas_status_slot(avb_u32 expected, BOOL valid, c
         return TAS_STATUS_NOT_MEASURED;
     }
     if (c->contradiction != 0) {
-        return progressed ? TAS_STATUS_CLAIMED : TAS_STATUS_CONTROL_LOST;
+        return progressed && (c->contradiction & TAS_STATUS_C_IDENTITY) == 0 ? TAS_STATUS_CLAIMED : TAS_STATUS_CONTROL_LOST;
     }
     if (q->current_status == expected) {
         if (q->current_reasons != 0) {
@@ -977,14 +983,22 @@ static __inline TAS_STATUS_CLASS tas_status_record(BOOL valid, const AVB_TAS_QUE
     if (!valid || (q->flags & AVB_TAS_FLAG_OP_IN_PROGRESS) != 0) {
         return TAS_STATUS_NOT_MEASURED;   /* sampled while an operation runs: the state before or after it (12.10) */
     }
+    if (i->state == AVB_TAS_COMMIT_RETAINED && (i->phc_before_commit_ns > i->phc_after_commit_ns || q->current.cycle_ns == 0)) {
+        return TAS_STATUS_WRONG;   /* malformed by itself, whoever's record it is */
+    }
+    if (!c->identified) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if ((c->contradiction & TAS_STATUS_C_IDENTITY) != 0) {
+        return TAS_STATUS_CONTROL_LOST;   /* not this commit's record, whatever it holds */
+    }
     if (i->state != AVB_TAS_COMMIT_RETAINED) {
         if (!c->measured) {
             return TAS_STATUS_NOT_MEASURED;
         }
         return c->contradiction != 0 ? TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
     }
-    if (memcmp(&q->current, sent, sizeof(*sent)) != 0 || i->phc_before_commit_ns > i->phc_after_commit_ns ||
-        i->phc_after_commit_ns >= sent->base_time_ns) {
+    if (memcmp(&q->current, sent, sizeof(*sent)) != 0 || i->phc_after_commit_ns >= sent->base_time_ns) {
         return TAS_STATUS_WRONG;
     }
     if (!outer) {
@@ -1005,15 +1019,21 @@ static __inline TAS_STATUS_CLASS tas_status_next(BOOL valid, const AVB_TAS_QUERY
     if (!tas_status_observable(valid, q)) {
         return q->next_status == AVB_TAS_ST_UNKNOWN ? TAS_STATUS_NOT_MEASURED : TAS_STATUS_S1;
     }
+    if ((q->snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0) {
+        return q->next_status == AVB_TAS_ST_UNKNOWN ? TAS_STATUS_UNRECONCILED : TAS_STATUS_S1;   /* S1 applies to both slots */
+    }
+    if (!c->identified) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if ((c->contradiction & TAS_STATUS_C_IDENTITY) != 0) {
+        return TAS_STATUS_CONTROL_LOST;
+    }
     if (q->next_status == AVB_TAS_ST_NONE && q->next_reasons == 0 && (q->current_reasons & AVB_TAS_SLOT_RSN_CYCLE_MISMATCH) == 0 &&
         q->next_commit.state == AVB_TAS_COMMIT_NONE) {
         return TAS_STATUS_PASS;
     }
     if (!c->measured) {
         return TAS_STATUS_NOT_MEASURED;
-    }
-    if ((q->snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0 && q->next_status == AVB_TAS_ST_UNKNOWN && q->next_reasons == 0) {
-        return TAS_STATUS_UNRECONCILED;   /* S1 applies to both slots */
     }
     return c->contradiction != 0 ? TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
 }

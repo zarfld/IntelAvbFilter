@@ -233,6 +233,8 @@
  *            activation, and no line is HARDWARE_VERIFIED.
  *     STATUS_RECORD   before and past BaseT: current_commit RETAINED, the requested schedule, a bracket that is ordered, ends before
  *                     BaseT and lies between the test's own PHC readings around the race (C6).
+ *                     Every line but STATUS_READONLY first asks whose reply it is: the committed request's epoch and its generation + 1.
+ *                     In another context or generation a matching or deviating answer says nothing about this commit: INCONCLUSIVE.
  *     STATUS_PENDING  the query after REFUSE and LOOKUP, its bracket before BaseT: current PENDING without reasons.
  *     STATUS_ACTIVE   the first observable query with its bracket past BaseT (bounded wait, with or without a wire observer): the full
  *                     #369 requirement is INFERRED_ACTIVE without reasons. While K8 is not verified (TAS_STATUS_K8_VERIFIED, #472 EVENT)
@@ -1498,12 +1500,13 @@ static void status_verdict(const char *check, TAS_STATUS_CLASS c, UINT32 index, 
     verdict(tas_status_tag(c), check, index, did, reason);
 }
 
-/** Every line is its own measurement. race / commit / pending: the queries immediately before the race, right after it and after the
- *  refused requests. stats0 / row0: the adapter's statistics and link before the activation */
-static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BOOL committed, const AVB_TAS_SCHEDULE *sent,
+/** Every line is its own measurement. op: the committed request, whose pair identifies the commit. race / commit / pending: the queries
+ *  immediately before the race, right after it and after the refused requests. stats0 / row0: the adapter's statistics and link before the activation */
+static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BOOL committed, const AVB_TAS_OP_REQUEST *op,
                          const QUERY_READ *race, const QUERY_READ *commit, const QUERY_READ *pending,
                          const AVB_DRIVER_STATISTICS *stats0, const MIB_IF_ROW2 *row0)
 {
+    const AVB_TAS_SCHEDULE *sent = &op->schedule;
     static const char *const checks[] = { "STATUS_RECORD", "STATUS_PENDING", "STATUS_ACTIVE", "STATUS_NEXT", "STATUS_READONLY" };
     AVB_DRIVER_STATISTICS sa, sb, sc;
     QUERY_READ past, again;
@@ -1559,13 +1562,15 @@ static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQU
            (int)row0->MediaConnectState, row_ok ? (int)row1.MediaConnectState : -1, row0->TransmitLinkSpeed, row_ok ? row1.TransmitLinkSpeed : 0ULL,
            query_valid(race) ? race->q.link_speed_mbps : 0u, query_valid(&past) ? past.q.link_speed_mbps : 0u,
            none_counted ? "no event was counted" : "an event was counted, or the counters or the link were not measured");
-    tas_status_control(query_valid(commit), &commit->q, query_valid(pending), &pending->q, sent->base_time_ns, none_counted,
+    tas_status_control(query_valid(commit), &commit->q, query_valid(pending), &pending->q, op, none_counted,
                        TAS_STATUS_K8_VERIFIED, &cp);
-    tas_status_control(query_valid(commit), &commit->q, query_valid(&past), &past.q, sent->base_time_ns, none_counted,
+    tas_status_control(query_valid(commit), &commit->q, query_valid(&past), &past.q, op, none_counted,
                        TAS_STATUS_K8_VERIFIED, &ca);
     printf("    [EVIDENCE] control since the query after the commit: before BaseT %s contradiction=0x%X, past BaseT %s contradiction=0x%X "
-           "(0x1 mode off, 0x2 windows or cycle changed, 0x4 PHC below, 0x8 context, 0x10 generation)\n", cp.measured ? "measured" :
-           "NOT measured", cp.contradiction, ca.measured ? "measured" : "NOT measured", ca.contradiction);
+           "(0x1 mode off, 0x2 windows or cycle changed, 0x4 PHC below, 0x8 context, 0x10 generation); this commit is epoch %llu "
+           "generation %llu (request + 1), identified before BaseT %d, past it %d\n", cp.measured ? "measured" : "NOT measured",
+           cp.contradiction, ca.measured ? "measured" : "NOT measured", ca.contradiction, op->context_epoch, op->expected_generation + 1,
+           cp.identified, ca.identified);
 
     outer = tas_status_observable(query_valid(race), &race->q) && tas_status_observable(query_valid(commit), &commit->q);
     if (outer) {
@@ -2805,7 +2810,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         if (sock != INVALID_SOCKET) { closesocket(sock); sock = INVALID_SOCKET; }
         verdict("BLOCKED", "WIRE", index, id->device_id, !committed ? "no committed schedule (see COMMIT)" : "no established wire observer (see OBSERVER)");
     }
-    check_status(h, index, id, committed, &req_op.schedule, &st_race, &st_commit, &st_pending, &stats, &row);
+    check_status(h, index, id, committed, &req_op, &st_race, &st_commit, &st_pending, &stats, &row);
     restore = cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
     g_cleanup_link_was_up = TRUE;
     if (g_mode == MODE_HOLD && committed && wire) {
