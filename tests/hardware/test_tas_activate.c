@@ -127,6 +127,29 @@
  *                          before the write would have committed a passed BaseT: FAIL. No commit (the old PHC refused it):
  *                          INCONCLUSIVE, as WINDOW and GENERATION; never PASS.
  *            A Release driver does not serve the control: every line INCONCLUSIVE, never PASS.
+ *            TC-TASACT-META-004, a fourth complete run (#357, #352 R1 L10; lifecycle facts of #364): a FilterRestart of this adapter
+ *            (IOCTL_FILTER_RESTART_ONE_INSTANCE on the one instance that carries its interface GUID) while a schedule is retained.
+ *              COMMIT      the versioned HOLD committed, GET_TAS_STATE ARMED, a valid non-zero pair. Without it the later lines have no
+ *                          prerequisite: BLOCKED, nothing is triggered.
+ *              INIT_READY  control: INIT_DEVICE on the second bound instance of the READY adapter, STATUS_SUCCESS, the PHC measured running
+ *                          before and after without a reset: +0. A PHC that was not read or did not run is no control: INCONCLUSIVE.
+ *              RESTART     Pause +1, Restart +1, Pause/Restart generation +1, no attach and no detach, the same non-zero epoch
+ *                          (tas_lifecycle_outcome, TC-MOCK-015), and its end: hw_read READ again after the Restart entry (the query gate
+ *                          reopens only after a successful bring-up). The counters move on entry and show no end; the trigger's own result
+ *                          is no evidence. Otherwise INCONCLUSIVE (tas_restart_stage, TC-MOCK-070).
+ *              RESEED      the PHC ran before and after and went below its last value (tas_phc_reset): measured, not concluded from the
+ *                          bring-up. Otherwise INCONCLUSIVE. Who reset it is not separated (#348).
+ *              GENERATION  only with RESTART (its end included) and RESEED: exactly +1 (one event). Without a shown end a later write may
+ *                          still follow, so the value is printed and not judged; a failed bring-up is therefore not covered here.
+ *              ONCE        only with a shown end: two further queries, +0.
+ *              STALE_VIEW  only with RESTART and RESEED: an ACTIVATE with the pair from before the event must be refused STATE_CONFLICT.
+ *                          Both refusals complete STATUS_INVALID_DEVICE_STATE, so the #505 record of this arm and this op id decides
+ *                          (tas_stale_view). Nothing is written in either case (the record is ARMED). Release: INCONCLUSIVE.
+ *              NEW_CONTEXT after the owned NIC cycle: an epoch that differs from the old one (compared, never assumed), generation 1 and
+ *                          record CLEAN, although attach and its restart reset the PHC again (no retained schedule: no step).
+ *            The trigger is sent when no send is outstanding, waited for within bounds, never withheld because of it. It only schedules the
+ *            restart: until the END of the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before
+ *            (TC-MOCK-068, TC-MOCK-070).
  *   --phc-hold-control  case TC-TASACT-HOLDCTL-001 (#505): the Debug-only one-shot PHC reseed hold control
  *            (IOCTL_AVB_DEBUG_PHC_RESEED_HOLD, 0x0017A3C4) on every adapter advertising INTEL_CAP_BASIC_1588, through independent
  *            handles each bound to that adapter. Lines: UNBOUND (STATUS_INVALID_DEVICE_STATE), MALFORMED (exact refusals, state
@@ -239,7 +262,7 @@
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
  * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
  * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER); that mode also
- * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS and SET_HW_TIMESTAMPING. Runs on Debug and Release drivers.
+ * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, SET_HW_TIMESTAMPING, INIT_DEVICE and one filter restart. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -265,6 +288,9 @@
 #include "../ioctl/tas_activate_eval.h"
 #include "../ioctl/owned_worker.h"         /* worker and storage ownership beyond a bounded wait (#505, PR #518) */
 #include "../ioctl/tas_activate_cases.h"   /* contained cases, selection, exit status (#487) */
+#include "../ioctl/tas_lifecycle_eval.h"   /* instance lookup and lifecycle outcome of #364 (META-004) */
+typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of filteruser.h that this test does not use (as in #364) */
+#include "../../src/filteruser.h"          /* IOCTL_FILTER_RESTART_ONE_INSTANCE, IOCTL_FILTER_ENUERATE_ALL_INSTANCES */
 #include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
 
@@ -304,7 +330,7 @@
 
 static RUN_MODE g_mode;
 #define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
-static int g_meta_case;                              /* --metadata-events: 1 to 3 = META-001 to -003 (the run_adapter call in progress) */
+static int g_meta_case;                              /* --metadata-events: 1 to 4 = META-001 to -004 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
 static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
@@ -1429,6 +1455,8 @@ static void meta_line(const char *check, UINT32 index, avb_u16 did, const QUERY_
 }
 
 static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame, BOOL back);
+static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
+static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch);
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
@@ -1568,6 +1596,18 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     /* First mutation. From here the cleanup always runs, whatever TAS_ACTIVATE returns */
     g_pending_did = id->device_id;
     InterlockedExchange(&g_pending_adapter, (LONG)index);
+
+    if (g_mode == MODE_META && g_meta_case == 4) {
+        /* TC-TASACT-META-004: FilterRestart with a retained schedule. h controls and measures, h2 is the second instance (closed there) */
+        avb_u64 old_epoch;
+
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        old_epoch = run_meta_restart(h, h2, index, id, frame);
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+        meta_new_context(index, id, old_epoch);
+        return;
+    }
 
     if (g_mode == MODE_META && g_meta_case != 1) {
         /* TC-TASACT-META-002 and -003: the F1 interleaving. h controls and measures, h2 sends the ACTIVATE (closed by run_meta_race) */
@@ -3121,6 +3161,365 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
 #endif
 }
 
+/* ---- --metadata-events, TC-TASACT-META-004: a FilterRestart with a retained schedule (#357, #352 R1 L10; trigger and lookup of #364) ---- */
+#define META_RESTART_LIST_BYTES  16384
+#define META_RESTART_NAME_CHARS  160
+#define META_RESTART_QUIET_MS    10000u   /* looking for a moment in the open window with no outstanding send; then it is sent anyway */
+#define META_RESTART_BOUND_MS    60000u   /* Pause and Restart entered; then hw_read READ again: a stop condition, no criterion */
+#define META_RESTART_IOCTL_MS    5000u    /* the trigger only schedules, so it returns at once (#364) */
+#define META_STALE_ARM_MS        5000u
+
+typedef struct {
+    avb_u64 luid;
+    WCHAR name[META_RESTART_NAME_CHARS];
+    USHORT bytes;
+    BOOL opened;
+    LONG st;
+    DWORD information;
+} META_RESTART_JOB;
+
+static DWORD WINAPI meta_restart_worker(LPVOID p)
+{
+    META_RESTART_JOB *job = (META_RESTART_JOB *)p;
+    HANDLE h = open_bound(GENERIC_READ | GENERIC_WRITE, job->luid);
+
+    job->st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    job->opened = h != INVALID_HANDLE_VALUE;
+    if (job->opened) {
+        job->st = avb_ioctl_ntstatus(h, IOCTL_FILTER_RESTART_ONE_INSTANCE, job->name, job->bytes, NULL, 0, &job->information);
+        CloseHandle(h);
+    }
+    return 0;
+}
+
+/** The one filter instance that carries this adapter's interface GUID (#364); every instance is printed */
+static TAS_INSTANCE_RESULT meta_find_instance(HANDLE h, avb_u64 luid, META_RESTART_JOB *job)
+{
+    static BYTE list[META_RESTART_LIST_BYTES];
+    const WCHAR *name = NULL;
+    WCHAR guid[40];
+    NET_LUID l;
+    GUID g;
+    USHORT bytes = 0, n;
+    DWORD br = 0, at;
+    TAS_INSTANCE_RESULT r;
+
+    l.Value = luid;
+    if (ConvertInterfaceLuidToGuid(&l, &g) != NO_ERROR) {
+        return TAS_INSTANCE_NONE;
+    }
+    swprintf_s(guid, 40, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2],
+               g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+    if (!DeviceIoControl(h, IOCTL_FILTER_ENUERATE_ALL_INSTANCES, NULL, 0, list, sizeof(list), &br, NULL)) {
+        printf("    [EVIDENCE] filter instance list unreadable (error %lu)\n", GetLastError());
+        return TAS_INSTANCE_MALFORMED;
+    }
+    for (at = 0; at + sizeof(USHORT) <= br; at += n) {
+        memcpy(&n, list + at, sizeof(n));
+        at += sizeof(USHORT);
+        if (n > br - at) {
+            break;
+        }
+        printf("    [EVIDENCE] filter instance %.*ls\n", (int)(n / sizeof(WCHAR)), (const WCHAR *)(list + at));
+    }
+    r = tas_instance_find(list, br, guid, &name, &bytes);
+    if (r == TAS_INSTANCE_FOUND && bytes > sizeof(job->name)) {
+        r = TAS_INSTANCE_MALFORMED;
+    }
+    if (r == TAS_INSTANCE_FOUND) {
+        memcpy(job->name, name, bytes);
+        job->bytes = bytes;
+    }
+    printf("    [EVIDENCE] adapter GUID %ls: lookup %d (0 = exactly one instance), %u bytes\n", guid, r, bytes);
+    return r;
+}
+
+/** Two successive PHC reads: a running clock rises between them */
+static void meta_phc_reads(HANDLE h, const char *label, TAS_PHC_READS *r)
+{
+    ZeroMemory(r, sizeof(*r));
+    r->read = read_phc(h, &r->phc[0]);
+    Sleep(2);
+    r->read = read_phc(h, &r->phc[1]) && r->read;
+    printf("    [EVIDENCE] PHC %s: read=%d %lld, %lld\n", label, r->read, r->phc[0], r->phc[1]);
+}
+
+static BOOL meta_same_context(const QUERY_READ *a, const QUERY_READ *b)
+{
+    return query_valid(a) && query_valid(b) && a->q.context_epoch != 0 && a->q.context_epoch == b->q.context_epoch;
+}
+
+/** h: control and measurement; h2: the second bound instance, closed here. Returns the epoch of the context the case ran in, 0 when none was
+ *  measured. Every state change is undone by the caller's owned NIC cycle */
+static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame)
+{
+    AVB_TAS_OP_REQUEST op;
+    AVB_TAS_STATE s;
+    AVB_HW_STATE_QUERY hw;
+    AVB_DEVICE_INFO_REQUEST init;
+    AVB_DRIVER_STATISTICS before, now;
+    TAS_LIFECYCLE_EVIDENCE le;
+    TAS_LIFECYCLE_OUTCOME outcome = TAS_LIFECYCLE_NOT_TRIGGERED;
+    META_RESTART_JOB job, *done;
+    TAS_PHC_READS p0, p1;
+    TAS_PHC_RESET reset;
+    QUERY_READ q0, qa, qi, qt, qe, qx, qy;
+    OWNED_OP *trigger;
+    DWORD information = 0, br = 0, t0;
+    LONG st;
+    long long phc = 0, base;
+    BOOL record, retained, quiet = FALSE, entered, completed, event, readable = FALSE;
+    TAS_RESTART_STAGE stage;
+    unsigned polls;
+    char why[700];
+
+    /* COMMIT: the retained schedule, its epoch and its generation, measured */
+    query(h, &q0);
+    print_query("before the commit", &q0);
+    retained = FALSE;
+    ZeroMemory(&s, sizeof(s));
+    ZeroMemory(&op, sizeof(op));
+    st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
+    if (query_valid(&q0) && read_phc(h, &phc)) {
+        base = (phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+        build_op(&op, id->net_luid, &q0.q, base, frame);
+        op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &information);
+    } else {
+        base = 0;
+    }
+    record = read_state(h, &s);
+    query(h, &qa);
+    print_query("after the commit", &qa);
+    retained = st == 0 && information == (DWORD)sizeof(op) && record && s.armed == AVB_TAS_STATE_ARMED && meta_same_context(&q0, &qa) &&
+               qa.q.generation != 0;
+    sprintf_s(why, sizeof(why), "ACTIVATE op=0x%016llX base=%lld ntstatus=0x%08lX information=%lu, record %s%d, pair epoch %llu generation %llu -> %llu",
+              op.client_op_id, base, (unsigned long)st, (unsigned long)information, record ? "" : "unread ", record ? (int)s.armed : -1,
+              qa.q.context_epoch, q0.q.generation, qa.q.generation);
+    verdict(retained ? "PASS" : "FAIL", "COMMIT", index, id->device_id, why);
+    if (!retained) {
+        static const char *const lines[] = { "INIT_READY", "RESTART", "RESEED", "GENERATION", "ONCE", "STALE_VIEW" };
+        unsigned k;
+
+        for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
+            verdict("BLOCKED", lines[k], index, id->device_id, "no retained schedule (see COMMIT): no restart is triggered and nothing can be judged");
+        }
+        CloseHandle(h2);
+        return query_valid(&qa) ? qa.q.context_epoch : 0;
+    }
+
+    /* INIT_READY: the second instance's INIT_DEVICE on a READY adapter is no invalidating event */
+    ZeroMemory(&hw, sizeof(hw));
+    if (!DeviceIoControl(h2, IOCTL_AVB_GET_HW_STATE, &hw, sizeof(hw), &hw, sizeof(hw), &br, NULL)) {
+        hw.hw_state = (avb_u32)AVB_HW_UNBOUND;
+    }
+    meta_phc_reads(h, "before INIT_DEVICE", &p0);
+    ZeroMemory(&init, sizeof(init));
+    information = 0;
+    st = avb_ioctl_ntstatus(h2, IOCTL_AVB_INIT_DEVICE, &init, sizeof(init), &init, sizeof(init), &information);
+    meta_phc_reads(h, "after INIT_DEVICE", &p1);
+    query(h, &qi);
+    printf("    [EVIDENCE] INIT_DEVICE on the second bound instance: hw_state=%u (READY is %u) ntstatus=0x%08lX generation %llu -> %llu\n", hw.hw_state,
+           (unsigned)AVB_HW_PTP_READY, (unsigned long)st, qa.q.generation, qi.q.generation);
+    reset = tas_phc_reset(&p0, &p1);
+    if (!tas_init_control(hw.hw_state == (avb_u32)AVB_HW_PTP_READY, st == 0, reset)) {
+        sprintf_s(why, sizeof(why), "not the control this line needs: hw_state %u, INIT_DEVICE 0x%08lX, PHC %s (generation %llu -> %llu printed)", hw.hw_state,
+                  (unsigned long)st, reset == TAS_PHC_RESET_SHOWN ? "was reset" : (reset == TAS_PHC_RESET_NOT_SHOWN ? "ran on without a reset" :
+                  "not measured running before and after"), qa.q.generation, qi.q.generation);
+        verdict("INCONCLUSIVE", "INIT_READY", index, id->device_id, why);
+    } else {
+        meta_line("INIT_READY", index, id->device_id, &qa, &qi, 0, "INIT_DEVICE on a second instance of the READY adapter, schedule retained");
+    }
+    CloseHandle(h2);
+
+    /* The trigger: after BaseT, in the open window, with no outstanding send when that can be observed within the bound */
+    t0 = GetTickCount();
+    for (polls = 0; !quiet && GetTickCount() - t0 < META_RESTART_QUIET_MS; polls++) {
+        quiet = read_phc(h, &phc) && phc > base + CYCLE_NS && phc % CYCLE_NS > WINDOW_START_NS + (WINDOW_END_NS - WINDOW_START_NS) / 4 &&
+                phc % CYCLE_NS < WINDOW_END_NS - (WINDOW_END_NS - WINDOW_START_NS) / 4 && read_stats(h, &before) && before.OutstandingSendNBLs == 0;
+        if (!quiet) { Sleep(5); }
+    }
+    ZeroMemory(&job, sizeof(job));
+    job.luid = id->net_luid;
+    trigger = owned_op_new(&g_ops, id->net_luid);
+    query(h, &qt);
+    print_query("before the restart", &qt);
+    meta_phc_reads(h, "before the restart", &p0);
+    if (trigger == NULL || meta_find_instance(h, id->net_luid, &job) != TAS_INSTANCE_FOUND || !read_stats(h, &before)) {
+        static const char *const lines[] = { "RESTART", "RESEED", "GENERATION", "ONCE", "STALE_VIEW" };
+        unsigned k;
+
+        for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
+            verdict("INCONCLUSIVE", lines[k], index, id->device_id, "the restart was not triggered: no single filter instance, no statistics or no memory");
+        }
+        return qa.q.context_epoch;
+    }
+    printf("    [EVIDENCE] trigger: PHC %lld (BaseT %lld), quiet moment %d after %u polls, outstanding sends %llu, pause=%llu restart=%llu gen=%llu attach=%llu "
+           "detach=%llu\n", phc, base, quiet, polls, before.OutstandingSendNBLs, before.FilterPauseCount, before.FilterRestartCount,
+           before.PauseRestartGeneration, before.FilterAttachCount, before.FilterDetachCount);
+    trigger->effect_open = TRUE;   /* it only schedules: its returning settles nothing */
+    if (!owned_worker_start(&trigger->worker, meta_restart_worker, &job, sizeof(job))) {
+        trigger->effect_open = FALSE;
+    }
+    (void)owned_worker_wait(&trigger->worker, META_RESTART_IOCTL_MS);
+    done = (META_RESTART_JOB *)owned_worker_result(&trigger->worker);
+    printf("    [EVIDENCE] IOCTL_FILTER_RESTART_ONE_INSTANCE: returned=%d opened=%d ntstatus=0x%08lX information=%lu (no evidence of a restart)\n", done != NULL,
+           done != NULL && done->opened, (unsigned long)(done != NULL ? done->st : (LONG)AVB_NTSTATUS_UNAVAILABLE), (unsigned long)(done != NULL ? done->information : 0));
+    if (done != NULL && (!done->opened || !NT_SUCCESS(done->st))) {
+        trigger->effect_open = FALSE;   /* it was not sent, or it was refused: nothing was scheduled */
+    }
+
+    /* RESTART: counters and epoch; then the end of the event */
+    t0 = GetTickCount();
+    ZeroMemory(&le, sizeof(le));
+    now = before;
+    while (GetTickCount() - t0 < META_RESTART_BOUND_MS) {
+        if (read_stats(h, &now)) {
+            tas_lifecycle_evidence(&before, &now, FALSE, &le);
+            outcome = tas_lifecycle_outcome(&le);
+            if (outcome != TAS_LIFECYCLE_NOT_TRIGGERED && outcome != TAS_LIFECYCLE_PAUSE_ONLY) {
+                break;
+            }
+        }
+        Sleep(20);
+    }
+    printf("    [EVIDENCE] after %lu ms: outcome %d pause%+lld restart%+lld gen%+lld attach%+lld detach%+lld outstanding sends %llu\n",
+           (unsigned long)(GetTickCount() - t0), outcome, le.pause_delta, le.restart_delta, le.generation_delta, le.attach_delta, le.detach_delta,
+           now.OutstandingSendNBLs);
+    entered = outcome == TAS_LIFECYCLE_RESTART_ENTERED;   /* seen before any query that could show the end */
+    t0 = GetTickCount();
+    do {
+        query(h, &qe);
+        readable = query_readable(&qe);
+        if (!readable) { Sleep(50); }
+    } while (entered && !readable && GetTickCount() - t0 < META_RESTART_BOUND_MS);
+    meta_phc_reads(h, "after the restart", &p1);
+    query(h, &qe);
+    readable = query_readable(&qe);   /* the judged query; it shows the end only after the Restart entry was seen (tas_restart_stage) */
+    print_query("after the restart", &qe);
+    if (read_stats(h, &now)) {
+        tas_lifecycle_evidence(&before, &now, FALSE, &le);   /* after the judged query: a pause that began since then is not missed */
+        outcome = tas_lifecycle_outcome(&le);
+    } else {
+        outcome = TAS_LIFECYCLE_NOT_TRIGGERED;   /* not measured after the query: nothing is established */
+    }
+    stage = tas_restart_stage(entered, outcome == TAS_LIFECYCLE_RESTART_ENTERED, meta_same_context(&qt, &qe), readable);
+    completed = stage == TAS_RESTART_COMPLETED;
+    if (completed) {
+        trigger->effect_open = FALSE;   /* only a shown end closes it: the entry counters move before the bring-up */
+    }
+    sprintf_s(why, sizeof(why), "pause%+lld restart%+lld gen%+lld attach%+lld detach%+lld, epoch %llu -> %llu, bring-up %s: %s", le.pause_delta, le.restart_delta,
+              le.generation_delta, le.attach_delta, le.detach_delta, qt.q.context_epoch, qe.q.context_epoch,
+              completed ? "completed (hw_read READ)" : "completion not shown within the bound",
+              completed ? "one restart in the same context" :
+              (stage == TAS_RESTART_ENTERED ? "entered in the same context, its end is not shown: it may still write and stays an open operation" :
+               "one restart in the same context is not established"));
+    verdict(completed ? "PASS" : "INCONCLUSIVE", "RESTART", index, id->device_id, why);
+    reset = tas_phc_reset(&p0, &p1);
+    sprintf_s(why, sizeof(why), "PHC %lld, %lld before, %lld, %lld after: %s", p0.phc[0], p0.phc[1], p1.phc[0], p1.phc[1],
+              reset == TAS_PHC_RESET_SHOWN ? "the clock went below its last value and runs: reset" :
+              (reset == TAS_PHC_RESET_NOT_SHOWN ? "no reset shown (it advanced; continuity is not judged)" : "not measured"));
+    verdict(reset == TAS_PHC_RESET_SHOWN ? "PASS" : "INCONCLUSIVE", "RESEED", index, id->device_id, why);
+    event = completed && reset == TAS_PHC_RESET_SHOWN;
+    if (event) {
+        meta_line("GENERATION", index, id->device_id, &qt, &qe, 1, "one FilterRestart that reset the PHC under a retained schedule (L10)");
+    } else {
+        sprintf_s(why, sizeof(why), "the invalidating event is not established (see RESTART and RESEED): no step is required (generation %llu -> %llu printed)",
+                  qt.q.generation, qe.q.generation);
+        verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, why);
+    }
+    record = read_state(h, &s);
+    printf("    [EVIDENCE] record after the restart: %s%d; registers (TQAVCTRL 0x%08X BASET 0x%08X/0x%08X) against before (0x%08X 0x%08X/0x%08X), reported only (#364)\n",
+           record ? "" : "unread ", record ? (int)s.armed : -1, qe.q.regs.tqavctrl, qe.q.regs.baset_h, qe.q.regs.baset_l, qt.q.regs.tqavctrl, qt.q.regs.baset_h,
+           qt.q.regs.baset_l);
+
+    /* ONCE: the query is a read-only observer of the same event */
+    query(h, &qx);
+    query(h, &qy);
+    printf("    [EVIDENCE] two further queries: generation %llu, %llu\n", qx.q.generation, qy.q.generation);
+    if (trigger->effect_open) {
+        verdict("INCONCLUSIVE", "ONCE", index, id->device_id, "the end of the restart is not shown (see RESTART): a change could still come from it");
+    } else {
+        meta_line("ONCE", index, id->device_id, &qe, &qy, 0, "two further queries after the same event");
+    }
+
+    /* STALE_VIEW: the pair from before the event, told apart by the driver's record of this arm and this operation */
+    if (!event) {
+        verdict("INCONCLUSIVE", "STALE_VIEW", index, id->device_id, "the invalidating event is not established (see RESTART and RESEED): whether the old pair is stale is "
+                "not judged");
+    } else {
+#ifndef NDEBUG
+        AVB_DEBUG_PHC_HOLD_REQUEST armed, r, d;
+        IOCTL_VERSION ver = {0};
+        TAS_STALE_VIEW stale = TAS_STALE_NOT_JUDGED;
+        LONG sta = (LONG)AVB_NTSTATUS_UNAVAILABLE, stact = (LONG)AVB_NTSTATUS_UNAVAILABLE, stq = (LONG)AVB_NTSTATUS_UNAVAILABLE, std;
+        DWORD hinfo = 0;
+        BOOL mine;
+
+        ZeroMemory(&armed, sizeof(armed));
+        ZeroMemory(&r, sizeof(r));
+        ZeroMemory(&d, sizeof(d));
+        ZeroMemory(&op, sizeof(op));
+        if (DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &ver, sizeof(ver), &ver, sizeof(ver), &br, NULL) && br >= sizeof(ver) &&
+            (ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) && read_phc(h, &phc)) {
+            sta = holdctl(h, AVB_DEBUG_PHC_HOLD_ARM, AVB_DEBUG_PHC_HOLD_MIN_HOLD_MS, META_STALE_ARM_MS, &armed, &hinfo);
+            holdctl_print("ARM for the recorded result", sta, hinfo, &armed);
+        }
+        if (sta == 0) {
+            build_op(&op, id->net_luid, &qt.q, (phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS, frame);   /* the pair before the event */
+            op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+            information = 0;
+            stact = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &information);
+            stq = holdctl(h, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &hinfo);
+            holdctl_print("QUERY after the old-pair ACTIVATE", stq, hinfo, &r);
+            std = holdctl(h, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &hinfo);
+            holdctl_print("DISARM", std, hinfo, &d);
+        }
+        mine = sta == 0 && stq == 0 && armed.arm_id != 0 && r.arm_id == armed.arm_id && r.activate_op_id == op.client_op_id && op.client_op_id != 0 &&
+               r.net_luid == id->net_luid && r.context_epoch == qt.q.context_epoch && r.activate_arrival_seq > r.armed_seq;
+        if (mine) {
+            stale = tas_stale_view(r.activate_result);
+        }
+        sprintf_s(why, sizeof(why), "ACTIVATE op=0x%016llX with the old pair (generation %llu, epoch %llu): ntstatus=0x%08lX information=%lu; recorded for this arm %llu "
+                  "and op: %s result %u: %s", op.client_op_id, qt.q.generation, qt.q.context_epoch, (unsigned long)stact, (unsigned long)information, armed.arm_id,
+                  mine ? "yes," : "no,", r.activate_result, stale == TAS_STALE_REFUSED ? "STATE_CONFLICT, the old view is refused" :
+                  (stale == TAS_STALE_STILL_CURRENT ? "it passed the metadata check, the old view is still current (STATE_CONFLICT required)" : "not judged"));
+        verdict(stale == TAS_STALE_REFUSED ? "PASS" : (stale == TAS_STALE_STILL_CURRENT ? "FAIL" : "INCONCLUSIVE"), "STALE_VIEW", index, id->device_id, why);
+#else
+        verdict("INCONCLUSIVE", "STALE_VIEW", index, id->device_id, "Release build: the recorded result is Debug-only, not exercised (never PASS)");
+#endif
+    }
+    return qt.q.context_epoch;
+}
+
+/** NEW_CONTEXT: after the owned NIC cycle, the pair and the record of the context the adapter has now */
+static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch)
+{
+    HANDLE h = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
+    AVB_TAS_STATE s;
+    QUERY_READ q;
+    TAS_NEW_CONTEXT c;
+    BOOL record = FALSE, valid = FALSE;
+    char why[400];
+
+    ZeroMemory(&q, sizeof(q));
+    ZeroMemory(&s, sizeof(s));
+    if (h != INVALID_HANDLE_VALUE) {
+        record = read_state(h, &s);
+        query(h, &q);
+        print_query("in the context after the cleanup", &q);
+        valid = query_valid(&q);
+        CloseHandle(h);
+    }
+    c = owned_ops_settled(&g_ops, id->net_luid, 0) ? tas_new_context(old_epoch, valid, q.q.context_epoch, q.q.generation, record, s.armed == AVB_TAS_STATE_CLEAN)
+                                                   : TAS_NEW_CONTEXT_NOT_SHOWN;
+    sprintf_s(why, sizeof(why), "epoch %llu (the old one %llu), generation %llu, record %s%d: %s", q.q.context_epoch, old_epoch, q.q.generation, record ? "" : "unread ",
+              record ? (int)s.armed : -1, c == TAS_NEW_CONTEXT_OK ? "a new context starts at 1 and CLEAN" :
+              (c == TAS_NEW_CONTEXT_VIOLATION ? "a new epoch that does not start at generation 1 with a CLEAN record" :
+               "no new context is shown, or an operation of this test is still open"));
+    verdict(c == TAS_NEW_CONTEXT_OK ? "PASS" : (c == TAS_NEW_CONTEXT_VIOLATION ? "FAIL" : "INCONCLUSIVE"), "NEW_CONTEXT", index, id->device_id, why);
+}
+
 static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
 #ifdef NDEBUG
@@ -3655,7 +4054,7 @@ static int run_case(void)
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-FAULT-001";
         } else if (g_mode == MODE_META) {
-            /* #357: the sequential events, then the F1 interleaving twice, each a complete run with its own pre-state and owned cleanup */
+            /* #357: the sequential events, the F1 interleaving twice and the FilterRestart, each a complete run with its own pre-state and cleanup */
             g_meta_case = 1;
             run_adapter(ids[i].index, &ids[i]);
             g_meta_case = 2;
@@ -3663,6 +4062,9 @@ static int run_case(void)
             run_adapter(ids[i].index, &ids[i]);
             g_meta_case = 3;
             g_case = "TC-TASACT-META-003";
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 4;
+            g_case = "TC-TASACT-META-004";
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-META-001";
         } else {

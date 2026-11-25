@@ -78,6 +78,8 @@ static __inline BOOL owned_worker_release(OWNED_WORKER *w)
 typedef struct OWNED_OP {
     unsigned long long key;
     OWNED_WORKER worker;
+    BOOL effect_open;   /* the request only schedules its effect (a filter restart): set before it is sent, cleared when the effect was
+                           observed or the request is known to have scheduled nothing. Its returning settles nothing */
     struct OWNED_OP *next;
 } OWNED_OP;
 
@@ -94,8 +96,8 @@ static __inline OWNED_OP *owned_op_new(OWNED_OP **list, unsigned long long key)
     return op;
 }
 
-/* TRUE when no operation of key may still be running: every one is waited for up to ms and freed only after its end was observed.
- * FALSE: at least one is left in the list, its handle and storage stay valid. Other keys are not touched */
+/* TRUE when no operation of key may still be running or take effect: every one is waited for up to ms and freed only after its end was
+ * observed and no effect is open. FALSE: at least one is left in the list, its handle and storage stay valid. Other keys are not touched */
 static __inline BOOL owned_ops_settled(OWNED_OP **list, unsigned long long key, DWORD ms)
 {
     BOOL settled = TRUE;
@@ -105,7 +107,7 @@ static __inline BOOL owned_ops_settled(OWNED_OP **list, unsigned long long key, 
         OWNED_OP *op = *link;
         if (op->key != key) {
             link = &op->next;
-        } else if (owned_worker_wait(&op->worker, ms) == OWNED_WORKER_RUNNING) {
+        } else if (owned_worker_wait(&op->worker, ms) == OWNED_WORKER_RUNNING || op->effect_open) {
             settled = FALSE;
             link = &op->next;
         } else {

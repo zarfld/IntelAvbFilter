@@ -39,9 +39,11 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
+#include "../../devices/i226_phc_seed.h"
 #include "../ioctl/tas_activate_eval.h"
 #include "../ioctl/owned_worker.h"         /* #505: worker ownership, PR #518 review */
 #include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
+#include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 
 /* =========================================================================
@@ -2200,6 +2202,303 @@ static void test_67_pending_operations(void)
     CloseHandle(go);
 }
 
+/*
+ * TC-MOCK-014: which adapter a FilterPause/FilterRestart trigger may name (#364).
+ *
+ * Record layout (USHORT byte length, then UTF-16 name without terminator) is from IOCTL_FILTER_ENUERATE_ALL_INSTANCES in
+ * src/device.c. Name layout {interface GUID}-{filter GUID}-0000 was observed once, on the I210 instance, in
+ * logs/dbgview_test_ptp_phc_stability.exe_20260430_123620.log; its first GUID is that adapter's InterfaceGuid and its
+ * second is NetCfgInstanceId in the INF. The target record below is built on that layout and is UNVERIFIED. The logic
+ * takes any adapter's GUID: these values select nothing. The driver matches by prefix (filterFindFilterModule), which is
+ * why a prefix counts as ambiguous.
+ */
+#define FILTER_GUID_TEXT L"{3F74AE86-14F9-4E79-9445-5B1E52CCD192}"
+#define OBSERVED_GUID_TEXT L"{9F90590F-E0F0-46B7-A69E-BF0A45DEDB6C}"
+#define TARGET_GUID_TEXT   L"{5989BA55-D568-47A4-AFBF-B47F27E1B435}"
+
+static DWORD put_instance(BYTE *list, DWORD at, const WCHAR *name) {
+    USHORT bytes = (USHORT)(wcslen(name) * sizeof(WCHAR));
+    memcpy(list + at, &bytes, sizeof(bytes));
+    memcpy(list + at + sizeof(bytes), name, bytes);
+    return at + sizeof(bytes) + bytes;
+}
+
+static void test_14_instance_find(void) {
+    static const WCHAR observed[] = OBSERVED_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    static const WCHAR target[] = TARGET_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    BYTE list[512];
+    const WCHAR *name = NULL;
+    USHORT bytes = 0;
+    DWORD used;
+
+    printf("\n[TC-MOCK-014] Exact instance for one adapter\n");
+    used = put_instance(list, 0, observed);
+    used = put_instance(list, used, target);
+    EXPECT_EQ("the adapter's own record", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_FOUND);
+    EXPECT_EQ("name length is the record's own", bytes, (int)(wcslen(target) * sizeof(WCHAR)));
+    EXPECT_TRUE("name points at that record", name != NULL && memcmp(name, target, bytes) == 0);
+    EXPECT_EQ("GUID text in any case", tas_instance_find(list, used, L"{5989ba55-d568-47a4-afbf-b47f27e1b435}", &name, &bytes), TAS_INSTANCE_FOUND);
+
+    EXPECT_EQ("adapter not listed", tas_instance_find(list, used, L"{D44A7E27-72EE-480D-958C-558FACF2B105}", &name, &bytes), TAS_INSTANCE_NONE);
+    EXPECT_EQ("empty list", tas_instance_find(list, 0, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    EXPECT_EQ("the filter GUID names no adapter", tas_instance_find(list, used, FILTER_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+
+    used = put_instance(list, 0, TARGET_GUID_TEXT L"X" FILTER_GUID_TEXT L"-0000");
+    EXPECT_EQ("the GUID must end at its separator", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    used = put_instance(list, 0, TARGET_GUID_TEXT);
+    EXPECT_EQ("the GUID alone is not an instance", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+
+    used = put_instance(list, 0, target);
+    used = put_instance(list, used, TARGET_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0001");
+    EXPECT_EQ("two records name the adapter", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+
+    /* The driver stops at the first prefix match, so the shorter record would be restarted instead */
+    used = put_instance(list, 0, L"{5989BA55");
+    used = put_instance(list, used, target);
+    EXPECT_EQ("another record is a prefix of the name", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+    used = put_instance(list, 0, L"");
+    used = put_instance(list, used, target);
+    EXPECT_EQ("an empty record is a prefix of everything", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+
+    used = put_instance(list, 0, target);
+    EXPECT_EQ("list cut inside a name", tas_instance_find(list, used - 2, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    EXPECT_EQ("list cut inside a length", tas_instance_find(list, 1, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    list[0] = 3; list[1] = 0;
+    EXPECT_EQ("odd byte length is not UTF-16", tas_instance_find(list, 16, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+}
+
+static TAS_LIFECYCLE_EVIDENCE full_lifecycle_evidence(void) {
+    TAS_LIFECYCLE_EVIDENCE e;
+    memset(&e, 0, sizeof(e));
+    e.pause_delta = 1;
+    e.restart_delta = 1;
+    e.generation_delta = 1;
+    e.traffic_shown = TRUE;
+    return e;
+}
+
+/* TC-MOCK-015: a successful IOCTL and entry counters are never completion (#364) */
+static void test_15_lifecycle_outcome(void) {
+    TAS_LIFECYCLE_EVIDENCE e;
+    AVB_DRIVER_STATISTICS before, after;
+
+    printf("\n[TC-MOCK-015] Lifecycle outcome from the evidence\n");
+    e = full_lifecycle_evidence();
+    EXPECT_EQ("entries plus traffic through the stack", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESUMED);
+
+    e = full_lifecycle_evidence(); e.traffic_shown = FALSE;
+    EXPECT_EQ("entry counters alone are not completion", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESTART_ENTERED);
+
+    memset(&e, 0, sizeof(e));
+    EXPECT_EQ("no counter moved: the IOCTL's success means nothing", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_NOT_TRIGGERED);
+    e.traffic_shown = TRUE;
+    EXPECT_EQ("traffic without a lifecycle event", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_NOT_TRIGGERED);
+
+    e = full_lifecycle_evidence(); e.restart_delta = 0; e.traffic_shown = FALSE;
+    EXPECT_EQ("Pause entered, Restart not within the bound", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_PAUSE_ONLY);
+
+    e = full_lifecycle_evidence(); e.detach_delta = 1;
+    EXPECT_EQ("detach outranks everything", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+    e = full_lifecycle_evidence(); e.attach_delta = 1;
+    EXPECT_EQ("attach outranks everything", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+    e = full_lifecycle_evidence(); e.pause_delta = -7;
+    EXPECT_EQ("a counter ran backwards: new context", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+
+    e = full_lifecycle_evidence(); e.pause_delta = 2; e.restart_delta = 2; e.generation_delta = 2;
+    EXPECT_EQ("two cycles cannot be attributed to the trigger", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+    e = full_lifecycle_evidence(); e.pause_delta = 0; e.generation_delta = 0;
+    EXPECT_EQ("Restart without Pause", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+    e = full_lifecycle_evidence(); e.generation_delta = 0;
+    EXPECT_EQ("generation disagrees with Pause", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+
+    /* Counters are unsigned and a new context restarts them, so a fall must arrive here as a negative delta */
+    memset(&before, 0, sizeof(before));
+    before.FilterPauseCount = 5; before.FilterRestartCount = 6; before.PauseRestartGeneration = 7;
+    before.FilterDetachCount = 2; before.FilterAttachCount = 3;
+    after = before;
+    after.FilterPauseCount++; after.FilterRestartCount++; after.PauseRestartGeneration++;
+    tas_lifecycle_evidence(&before, &after, TRUE, &e);
+    EXPECT_EQ("one cycle read from the counters", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESUMED);
+    tas_lifecycle_evidence(&before, &after, FALSE, &e);
+    EXPECT_EQ("the same counters without traffic", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESTART_ENTERED);
+    memset(&after, 0, sizeof(after));
+    tas_lifecycle_evidence(&before, &after, TRUE, &e);
+    EXPECT_TRUE("a fallen counter is a negative delta", e.pause_delta == -5);
+    EXPECT_EQ("fallen counters are a new context", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+}
+
+/* TC-MOCK-068: a FilterRestart in the same context (#357, TC-TASACT-META-004; test logic only). OBSERVED: the PHC of the drained Case B run 1
+ * (2026-11-07, I226 0x125B REV_04, Debug driver 1B4F299C; logs/i364-evidence/caseb-drained-run1) went from 1417.92 s to 9.32 s across a
+ * FilterRestart, the second read of each pair is UNVERIFIED. Every other value is UNVERIFIED */
+static void test_68_restart(void)
+{
+    const TAS_PHC_READS observed_before = { TRUE, { 1417920000000LL, 1417920100000LL } };
+    const TAS_PHC_READS observed_after = { TRUE, { 9320000000LL, 9320100000LL } };
+    TAS_PHC_READS a, b;
+    OWNED_OP *ops = NULL, *op;
+    unsigned long r;
+
+    printf("\n[TC-MOCK-068] #357 FilterRestart: reset, stale view, new context, open effect (test logic only)\n");
+    EXPECT_EQ("the observed restart reset the PHC", tas_phc_reset(&observed_before, &observed_after), TAS_PHC_RESET_SHOWN);
+    b = observed_before; b.phc[0] = observed_before.phc[1] + 1; b.phc[1] = b.phc[0] + 1;
+    EXPECT_EQ("a clock that advanced shows no reset", tas_phc_reset(&observed_before, &b), TAS_PHC_RESET_NOT_SHOWN);
+    b = observed_before; b.phc[0] = observed_before.phc[1]; b.phc[1] = b.phc[0] + 1;
+    EXPECT_EQ("an equal value shows no reset", tas_phc_reset(&observed_before, &b), TAS_PHC_RESET_NOT_SHOWN);
+    a = observed_after; a.phc[1] = a.phc[0];
+    EXPECT_EQ("a clock that does not run afterwards is no measured reset", tas_phc_reset(&observed_before, &a), TAS_PHC_RESET_UNMEASURED);
+    b = observed_before; b.phc[1] = b.phc[0];
+    EXPECT_EQ("a clock that did not run before is no measured reset", tas_phc_reset(&b, &observed_after), TAS_PHC_RESET_UNMEASURED);
+    a = observed_after; a.read = FALSE;
+    EXPECT_EQ("an unread clock is no measured reset", tas_phc_reset(&observed_before, &a), TAS_PHC_RESET_UNMEASURED);
+
+    EXPECT_EQ("STATE_CONFLICT refuses the old pair", tas_stale_view(AVB_TAS_ACT_STATE_CONFLICT), TAS_STALE_REFUSED);
+    EXPECT_EQ("NOT_CLEAN passed step 4: the old pair is still current", tas_stale_view(AVB_TAS_ACT_NOT_CLEAN), TAS_STALE_STILL_CURRENT);
+    EXPECT_EQ("COMMITTED used the old pair", tas_stale_view(AVB_TAS_ACT_COMMITTED), TAS_STALE_STILL_CURRENT);
+    for (r = 0; r < 2; r++) {
+        EXPECT_EQ("a refusal that may precede step 4 says nothing", tas_stale_view(r == 0 ? AVB_TAS_ACT_BUSY : AVB_TAS_ACT_NOT_READY), TAS_STALE_NOT_JUDGED);
+    }
+    EXPECT_EQ("no recorded result says nothing", tas_stale_view(0xFFFFFFFFul), TAS_STALE_NOT_JUDGED);
+
+    EXPECT_EQ("new epoch, generation 1, CLEAN", tas_new_context(5, TRUE, 6, 1, TRUE, TRUE), TAS_NEW_CONTEXT_OK);
+    EXPECT_EQ("the same epoch shows no new context", tas_new_context(5, TRUE, 5, 1, TRUE, TRUE), TAS_NEW_CONTEXT_NOT_SHOWN);
+    EXPECT_EQ("a new context that starts above 1 is a violation", tas_new_context(5, TRUE, 6, 2, TRUE, TRUE), TAS_NEW_CONTEXT_VIOLATION);
+    EXPECT_EQ("a new context whose record is not CLEAN is a violation", tas_new_context(5, TRUE, 6, 1, TRUE, FALSE), TAS_NEW_CONTEXT_VIOLATION);
+    EXPECT_EQ("an unread record shows nothing", tas_new_context(5, TRUE, 6, 1, FALSE, FALSE), TAS_NEW_CONTEXT_NOT_SHOWN);
+    EXPECT_EQ("an unreported pair shows nothing", tas_new_context(5, TRUE, 0, 0, TRUE, TRUE), TAS_NEW_CONTEXT_NOT_SHOWN);
+    EXPECT_EQ("without the old epoch nothing is compared", tas_new_context(0, TRUE, 6, 1, TRUE, TRUE), TAS_NEW_CONTEXT_NOT_SHOWN);
+
+    op = owned_op_new(&ops, 1);
+    if (op == NULL) {
+        EXPECT_EQ("memory available", 0, 1);
+        return;
+    }
+    op->effect_open = TRUE;   /* the request returned (no thread runs), its effect has not been observed */
+    EXPECT_EQ("a request whose effect has not been observed is not settled", owned_ops_settled(&ops, 1, 0), FALSE);
+    EXPECT_EQ("... and stays owned", ops == op, 1);
+    EXPECT_EQ("another adapter is not affected", owned_ops_settled(&ops, 2, 0), TRUE);
+    if (ops != NULL) {
+        ops->effect_open = FALSE;
+    }
+    EXPECT_EQ("an observed effect settles it", owned_ops_settled(&ops, 1, 0), TRUE);
+    EXPECT_EQ("... and nothing is owned afterwards", ops == NULL, 1);
+}
+
+/* TC-MOCK-069: a device initialization under a retained schedule (#357, #352 R1 L10/L12 and the restart-path clarification of 2026-11-25; test
+ * logic only, a fake write). UNVERIFIED on hardware except the normal path (TC-TASACT-META-004) */
+static int g_seed_fail_at, g_seed_writes;
+static avb_u32 g_seed_offset[2];
+
+static int seed_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    (void)ctx; (void)value;
+    if (g_seed_writes < 2) {
+        g_seed_offset[g_seed_writes] = offset;
+    }
+    g_seed_writes++;
+    return g_seed_writes == g_seed_fail_at ? -1 : 0;
+}
+
+static int seed(int fail_at, int *invalidated)
+{
+    g_seed_fail_at = fail_at;
+    g_seed_writes = 0;
+    return i226_phc_seed(seed_write, NULL, invalidated);
+}
+
+static void test_69_init_event(void)
+{
+    const avb_u64 max = ~(avb_u64)0;
+    AVB_TAS_INIT_EVENT none, done;
+    int inv;
+
+    printf("\n[TC-MOCK-069] #357 device initialization under a retained schedule (test logic only)\n");
+    ZeroMemory(&none, sizeof(none));
+    done.counted = 1;
+    done.counted_generation = 3;
+
+    /* the device's own report */
+    inv = 0;
+    EXPECT_EQ("the seed succeeds", seed(0, &inv), 0);
+    EXPECT_EQ("... with SYSTIML then SYSTIMH", g_seed_writes == 2 && g_seed_offset[0] == I226_SYSTIML && g_seed_offset[1] == I226_SYSTIMH, 1);
+    EXPECT_EQ("... and reports the reset", inv, 1);
+    inv = 0;
+    EXPECT_EQ("the first write fails", seed(1, &inv), -1);
+    EXPECT_EQ("... nothing more is written", g_seed_writes, 1);
+    EXPECT_EQ("... and no reset is reported", inv, 0);
+    inv = 0;
+    EXPECT_EQ("the second write fails", seed(2, &inv), -1);
+    EXPECT_EQ("... the reset already performed is reported", inv, 1);
+    EXPECT_EQ("a caller without a report is served", seed(0, NULL), 0);
+
+    /* L10: once, only for a performed invalidation of a retained schedule */
+    EXPECT_EQ("retained, reset: one transition", avb_tas_init_advances(&none, 1, 1, 2), 1);
+    EXPECT_EQ("retained, no reset and no other invalidating write: none", avb_tas_init_advances(&none, 1, 0, 2), 0);
+    EXPECT_EQ("CLEAN, reset: none", avb_tas_init_advances(&none, 0, 1, 2), 0);
+    EXPECT_EQ("a second initialization of the same event: none", avb_tas_init_advances(&done, 1, 1, 3), 0);
+    EXPECT_EQ("... unless another writer moved the generation in between", avb_tas_init_advances(&done, 1, 1, 4), 1);
+    /* a schedule retained only between two initializations of one bring-up is invalidated by the second */
+    EXPECT_EQ("first on CLEAN, second on a schedule retained since: one transition", avb_tas_init_advances(&none, 1, 1, 2), 1);
+
+    /* L12: before the first device write */
+    EXPECT_EQ("at the maximum, retained, it would invalidate: refused", avb_tas_init_refused(&none, 1, 1, 0, max), 1);
+    EXPECT_EQ("at the maximum, CLEAN: not refused", avb_tas_init_refused(&none, 0, 1, 0, max), 0);
+    EXPECT_EQ("at the maximum, the device's initialization does not invalidate: not refused", avb_tas_init_refused(&none, 1, 0, 0, max), 0);
+    EXPECT_EQ("below the maximum: not refused", avb_tas_init_refused(&none, 1, 1, 1, max - 1), 0);
+    done.counted_generation = max;
+    EXPECT_EQ("the event that reached the maximum itself is not refused halfway", avb_tas_init_refused(&done, 1, 1, 0, max), 0);
+    EXPECT_EQ("... and counts no second time", avb_tas_init_advances(&done, 1, 1, max), 0);
+}
+
+/* TC-MOCK-070: META-004 review findings (PR review 2026-11-25; test logic only). The end of a restart is shown by the reopened query gate,
+ * never by its entry counters; until then the restart stays an open operation and no restoration is final. A control without a
+ * measured, running PHC is no control */
+static void test_70_restart_end(void)
+{
+    const TAS_PHC_READS running = { TRUE, { 1000, 2000 } }, later = { TRUE, { 3000, 4000 } };
+    TAS_PHC_READS unread = { FALSE, { 0, 0 } }, frozen = { TRUE, { 3000, 3000 } };
+    TAS_ACT_RESTORE_EVIDENCE e;
+    OWNED_OP *ops = NULL, *op;
+    TAS_RESTART_STAGE stage;
+
+    printf("\n[TC-MOCK-070] #357 end of a restart and the INIT_DEVICE control (test logic only)\n");
+    EXPECT_EQ("entered, gate reopened: completed", tas_restart_stage(TRUE, TRUE, TRUE, TRUE), TAS_RESTART_COMPLETED);
+    EXPECT_EQ("entered, gate not reopened: only entered", tas_restart_stage(TRUE, TRUE, TRUE, FALSE), TAS_RESTART_ENTERED);
+    EXPECT_EQ("not entered: not shown, whatever the query reads", tas_restart_stage(FALSE, FALSE, TRUE, TRUE), TAS_RESTART_NOT_SHOWN);
+    EXPECT_EQ("another context: not shown", tas_restart_stage(TRUE, TRUE, FALSE, TRUE), TAS_RESTART_NOT_SHOWN);
+    EXPECT_EQ("entered only after the query: a READ from before the pause is no end", tas_restart_stage(FALSE, TRUE, TRUE, TRUE), TAS_RESTART_ENTERED);
+    EXPECT_EQ("a further pause after the query: not shown", tas_restart_stage(TRUE, FALSE, TRUE, TRUE), TAS_RESTART_NOT_SHOWN);
+
+    op = owned_op_new(&ops, 1);
+    if (op == NULL) {
+        EXPECT_EQ("memory available", 0, 1);
+        return;
+    }
+    op->effect_open = TRUE;
+    stage = tas_restart_stage(TRUE, TRUE, TRUE, FALSE);      /* counters 1/1, completion not shown within the bound */
+    op->effect_open = stage != TAS_RESTART_COMPLETED;
+    ZeroMemory(&e, sizeof(e));
+    e.cycle_completed = TRUE; e.adapter_returned = TRUE; e.driver_clean = TRUE; e.regs_measured = TRUE;
+    e.tsn_mode_off = TRUE; e.tx_probed = TRUE; e.tx_on_wire = TRUE;
+    e.operations_pending = !owned_ops_settled(&ops, 1, 0);
+    EXPECT_EQ("a restart without a shown end stays an open operation", e.operations_pending, 1);
+    EXPECT_EQ("... so no restoration PASS", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    EXPECT_EQ("... and no CLEANUP PASS", tas_act_cycle(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    if (ops != NULL) {
+        ops->effect_open = tas_restart_stage(TRUE, TRUE, TRUE, TRUE) != TAS_RESTART_COMPLETED;
+    }
+    e.operations_pending = !owned_ops_settled(&ops, 1, 0);
+    EXPECT_EQ("with the end shown it is settled", e.operations_pending, 0);
+    EXPECT_EQ("... and a fully measured restoration is complete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+
+    EXPECT_EQ("READY, SUCCESS, PHC ran on: the control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &later)), TRUE);
+    EXPECT_EQ("a reset is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&later, &running)), FALSE);
+    EXPECT_EQ("an unread PHC before is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&unread, &later)), FALSE);
+    EXPECT_EQ("an unread PHC after is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &unread)), FALSE);
+    EXPECT_EQ("a PHC that does not run after is no control", tas_init_control(TRUE, TRUE, tas_phc_reset(&running, &frozen)), FALSE);
+    EXPECT_EQ("not READY is no control", tas_init_control(FALSE, TRUE, TAS_PHC_RESET_NOT_SHOWN), FALSE);
+    EXPECT_EQ("a failed INIT_DEVICE is no control", tas_init_control(TRUE, FALSE, TAS_PHC_RESET_NOT_SHOWN), FALSE);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2251,6 +2550,11 @@ int main(void) {
     test_65_owned_worker();
     test_66_race_order();
     test_67_pending_operations();
+    test_14_instance_find();
+    test_15_lifecycle_outcome();
+    test_68_restart();
+    test_69_init_event();
+    test_70_restart_end();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

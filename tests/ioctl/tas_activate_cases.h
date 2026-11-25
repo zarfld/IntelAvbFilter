@@ -27,7 +27,7 @@ static const TAS_ACT_CASE g_tas_act_cases[] = {
     { "--fault", MODE_FAULT, "TC-TASACT-FAULT-001" },                 /* #357, function-71 withdrawal (#482) */
     { "--fault-versioned", MODE_FAULTV, "TC-TASACT-FAULT-001" },      /* #482 */
     { "--phc-hold-control", MODE_HOLDCTL, "TC-TASACT-HOLDCTL-001" },  /* #505 */
-    { "--metadata-events", MODE_META, "TC-TASACT-META-001" },         /* #357: L9/L10 events, then -002/-003 (F1) */
+    { "--metadata-events", MODE_META, "TC-TASACT-META-001" },         /* #357: L9/L10 events, -002/-003 (F1), -004 (restart) */
 };
 #define TAS_ACT_CASE_COUNT ((unsigned)(sizeof(g_tas_act_cases) / sizeof(g_tas_act_cases[0])))
 
