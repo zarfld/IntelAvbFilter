@@ -168,12 +168,14 @@ typedef struct {
     BOOL tx_probed;           /* tagged frames were sent and the observer was alive */
     BOOL tx_on_wire;          /* the baseline share arrived, none held */
     TAS_ACT_PHC_FACT phc;     /* reported, never used below */
+    BOOL operations_pending;  /* an operation this test issued on the adapter was not observed to have ended before the cycle */
 } TAS_ACT_RESTORE_EVIDENCE;
 
 typedef enum {
     TAS_ACT_RESTORE_COMPLETE = 0,
     TAS_ACT_RESTORE_INCOMPLETE,   /* an observed failure: residue, mode on, a dirty record, no TX, or no cycle */
-    TAS_ACT_RESTORE_UNVERIFIED    /* nothing observed failed, but the registers or the wire were not measured */
+    TAS_ACT_RESTORE_UNVERIFIED    /* nothing observed failed, but the registers or the wire were not measured, or an operation of the
+                                     test may still change what was measured */
 } TAS_ACT_RESTORE_CLASS;
 
 static __inline TAS_ACT_RESTORE_CLASS tas_act_restore(const TAS_ACT_RESTORE_EVIDENCE *e)
@@ -182,10 +184,19 @@ static __inline TAS_ACT_RESTORE_CLASS tas_act_restore(const TAS_ACT_RESTORE_EVID
         (e->regs_measured && (e->regs_differing != 0 || !e->tsn_mode_off))) {
         return TAS_ACT_RESTORE_INCOMPLETE;
     }
-    if (!e->regs_measured || !e->tx_probed) {
+    if (!e->regs_measured || !e->tx_probed || e->operations_pending) {
         return TAS_ACT_RESTORE_UNVERIFIED;
     }
     return TAS_ACT_RESTORE_COMPLETE;
+}
+
+/* The CLEANUP line: the NIC cycle itself ran and the adapter came back, with no operation of the test left to undo it */
+static __inline TAS_ACT_RESTORE_CLASS tas_act_cycle(const TAS_ACT_RESTORE_EVIDENCE *e)
+{
+    if (!e->cycle_completed || !e->adapter_returned) {
+        return TAS_ACT_RESTORE_INCOMPLETE;
+    }
+    return e->operations_pending ? TAS_ACT_RESTORE_UNVERIFIED : TAS_ACT_RESTORE_COMPLETE;
 }
 
 /* The PHC across the cycle against wall time. A NIC cycle reseeds it, which #361 reports as a discontinuity */

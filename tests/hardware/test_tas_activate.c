@@ -118,8 +118,9 @@
  *                          INCONCLUSIVE, and GENERATION with it, never PASS (tas_race_order, TC-MOCK-066).
  *              GENERATION  commit before the write entry: the reseed hit a retained schedule, +2 in total (commit +1, L10 +1).
  *                          Write done before the commit: the reseed hit a CLEAN record, +1 in total.
- *              SETTLED     both operations ended within their bounds; otherwise INCONCLUSIVE_RESTORATION, the cleanup's final
- *                          state may still be changed by them.
+ *              SETTLED     both operations ended within their bounds; otherwise INCONCLUSIVE. While one has not ended when the
+ *                          cleanup starts (after a further bounded wait), CLEANUP and RESTORE are INCONCLUSIVE_RESTORATION at best,
+ *                          a measured failure stays CLEANUP_FAILED, and a later case on this adapter is BLOCKED (TC-MOCK-067).
  *            TC-TASACT-META-003, a third complete run: the same interleaving, but the held reseed steps the PHC back (5 s) and BaseT had
  *            already passed on the old PHC, which refuses it (STATUS_INVALID_PARAMETER, TAS-DR-08). Additional line:
  *              NEW_PHC     write before commit and the request COMMITTED: it was judged by the new PHC (tas_race_phc_used). A commit
@@ -314,6 +315,8 @@ static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 static const AVB_ADAPTER_IDENTITY_REQUEST *g_all;   /* every validated identity: the observer candidates */
 static UINT32 g_nall;
 static BOOL g_cleanup_link_was_up = TRUE;            /* cleanup: the link before the test (an adapter down before is not a failure) */
+static OWNED_OP *g_ops;                              /* operations this process issued in workers and has not seen end (key: NET_LUID) */
+#define OPS_SETTLE_MS        30000u                  /* further bounded wait per such operation when the cleanup starts */
 static avb_u64 g_op_id;                              /* client_op_id of the next versioned request: non-zero, distinct */
 
 #define LEAD_HEADROOM_NS     (500LL * NS_PER_MS)    /* test scheduling headroom above an established limits.min_margin_ns */
@@ -985,6 +988,12 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     ZeroMemory(&e, sizeof(e));
     e.phc = TAS_ACT_PHC_UNMEASURED;
     printf("\n  --- Primary cleanup: NIC cycle of this adapter ---\n");
+    /* The cleanup judges a final state only when no operation of this test can still change it. The cycle runs either way: it is the
+     * recovery, bounded, and an open operation may hold the disable back */
+    e.operations_pending = !owned_ops_settled(&g_ops, id->net_luid, OPS_SETTLE_MS);
+    if (e.operations_pending) {
+        printf("    [EVIDENCE] an operation of this test on this adapter has not been observed to end: whatever is measured below is not final\n");
+    }
     if (find_devinst(id->net_luid, &inst)) {
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
         h = INVALID_HANDLE_VALUE;
@@ -1002,10 +1011,21 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     fresh = e.cycle_completed ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
     e.adapter_returned = (fresh != INVALID_HANDLE_VALUE);
     InterlockedExchange(&g_pending_adapter, -1);
-    verdict(e.cycle_completed && e.adapter_returned ? "PASS" : "CLEANUP_FAILED", "CLEANUP", index, id->device_id,
-            e.cycle_completed && e.adapter_returned ? NULL
-                                                    : "the NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
-                                                      "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+    switch (tas_act_cycle(&e)) {
+    case TAS_ACT_RESTORE_COMPLETE:
+        verdict("PASS", "CLEANUP", index, id->device_id, NULL);
+        break;
+    case TAS_ACT_RESTORE_UNVERIFIED:
+        verdict("INCONCLUSIVE_RESTORATION", "CLEANUP", index, id->device_id,
+                "the NIC cycle ran and the adapter returned, but an operation of this test had not been observed to end before it and may still "
+                "change the state. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+        break;
+    default:
+        verdict("CLEANUP_FAILED", "CLEANUP", index, id->device_id,
+                "the NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
+                "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+        break;
+    }
 
     if (e.adapter_returned) {
         AVB_DRIVER_STATISTICS stats_after;
@@ -1102,8 +1122,8 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
         CloseHandle(fresh);
     }
     printf("    evidence: cycle=%d returned=%d attach=%d driverClean=%d regsMeasured=%d regsDiffering=%u tsnOff=%d link=%d txProbed=%d "
-           "txOnWire=%d\n", e.cycle_completed, e.adapter_returned, attach, e.driver_clean, e.regs_measured, e.regs_differing,
-           e.tsn_mode_off, link_up, e.tx_probed, e.tx_on_wire);
+           "txOnWire=%d opsPending=%d\n", e.cycle_completed, e.adapter_returned, attach, e.driver_clean, e.regs_measured, e.regs_differing,
+           e.tsn_mode_off, link_up, e.tx_probed, e.tx_on_wire, e.operations_pending);
     restore = tas_act_restore(&e);
     /* A separate outcome (#361): the cycle reseeds the PHC, which is reported, not judged as restoration */
     printf("    [EVIDENCE] PHC across the cleanup: %s (before=%lld after=%lld wallNs=%lld)\n", tas_act_phc_name(e.phc), phc_before,
@@ -1115,6 +1135,8 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
         break;
     case TAS_ACT_RESTORE_UNVERIFIED:
         verdict("INCONCLUSIVE_RESTORATION", "RESTORE", index, id->device_id,
+                e.operations_pending ? "nothing observed failed, but an operation of this test had not been observed to end before the cycle: the "
+                "measured state is not final" :
                 "nothing observed failed, but the restoration set (no valid query before and after) or the wire was not measured; see the evidence line");
         break;
     default:
@@ -1447,6 +1469,11 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     g_next_seq = 0;   /* per adapter run: no capture is active here, so every tag slot is free */
     g_capture_luid = 0;   /* no observer carried over from the previous adapter run; find_observer sets it only when one is found (PR #481) */
     ZeroMemory(&ipv4, sizeof(ipv4));
+    if (!owned_ops_settled(&g_ops, id->net_luid, 0)) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id,
+                "an operation of an earlier case of this process on this adapter has not been observed to end: no pre-state can be established");
+        return;
+    }
     if (!find_devinst(id->net_luid, &inst)) {
         verdict("BLOCKED", "COMMIT", index, id->device_id,
                 "cannot resolve the adapter device node required for NIC-cycle cleanup");
@@ -2958,7 +2985,7 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     AVB_DEBUG_PHC_HOLD_REQUEST armed, r, d;
     HOLDCTL_PHC_JOB job, reseed;
     META_RACE_ACT act, done;
-    OWNED_WORKER wp, wa;
+    OWNED_OP *wp, *wa;   /* registered: cleanup_and_verify waits for them itself and never judges a final state while one is open */
     QUERY_READ q0, q1;
     DWORD br = 0, info = 0, t0;
     LONG st, stq;
@@ -2970,8 +2997,13 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     unsigned polls = 0;
     char why[700];
 
-    ZeroMemory(&wp, sizeof(wp));
-    ZeroMemory(&wa, sizeof(wa));
+    wp = owned_op_new(&g_ops, id->net_luid);
+    wa = owned_op_new(&g_ops, id->net_luid);
+    if (wp == NULL || wa == NULL) {
+        CloseHandle(ha);
+        meta_race_not_run(index, id, back, "no memory to own the operations of the race: not started");
+        return;
+    }
     if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &ver, sizeof(ver), &ver, sizeof(ver), &br, NULL) || br < sizeof(ver) ||
         !(ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
         CloseHandle(ha);
@@ -3015,7 +3047,7 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     job.offset_ns = step_ns;
     reseed.st = (LONG)AVB_NTSTATUS_UNAVAILABLE;
     t0 = GetTickCount();
-    held = owned_worker_start(&wp, holdctl_phc_worker, &job, sizeof(job));
+    held = owned_worker_start(&wp->worker, holdctl_phc_worker, &job, sizeof(job));
     while (held && !holding && GetTickCount() - t0 < META_RACE_HOLDING_MS) {
         stq = holdctl(h, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
         polls++;
@@ -3023,22 +3055,22 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
         if (!holding) { Sleep(1); }
     }
     if (holding) {
-        sent = owned_worker_start(&wa, meta_race_activate, &act, sizeof(act));   /* arrives while the reseed is held */
+        sent = owned_worker_start(&wa->worker, meta_race_activate, &act, sizeof(act));   /* arrives while the reseed is held */
     }
     if (!sent) {
         CloseHandle(ha);
     }
     (void)holdctl(h, AVB_DEBUG_PHC_HOLD_DISARM, 0, 0, &d, &info);   /* an unused arm only; no-op while HOLDING */
-    (void)owned_worker_wait(&wa, META_RACE_WORKER_MS);
-    (void)owned_worker_wait(&wp, META_RACE_WORKER_MS);
-    settled = wp.state != OWNED_WORKER_RUNNING && wa.state != OWNED_WORKER_RUNNING;
-    if (wp.state == OWNED_WORKER_DONE) { reseed = *(const HOLDCTL_PHC_JOB *)owned_worker_result(&wp); }
-    if (wa.state == OWNED_WORKER_DONE) { done = *(const META_RACE_ACT *)owned_worker_result(&wa); }
+    (void)owned_worker_wait(&wa->worker, META_RACE_WORKER_MS);
+    (void)owned_worker_wait(&wp->worker, META_RACE_WORKER_MS);
+    settled = wp->worker.state != OWNED_WORKER_RUNNING && wa->worker.state != OWNED_WORKER_RUNNING;
+    if (wp->worker.state == OWNED_WORKER_DONE) { reseed = *(const HOLDCTL_PHC_JOB *)owned_worker_result(&wp->worker); }
+    if (wa->worker.state == OWNED_WORKER_DONE) { done = *(const META_RACE_ACT *)owned_worker_result(&wa->worker); }
     printf("    [EVIDENCE] HOLDING observed=%d after %u polls; PHC_OFFSET_ADJUST %+lld ns: started=%d ended=%d ntstatus=0x%08lX status=0x%X "
            "%lu ms; ACTIVATE op=0x%016llX gen=%llu epoch=%llu base=%lld (PHC %lld): sent=%d ended=%d ntstatus=0x%08lX information=%lu\n",
-           holding, polls, (long long)step_ns, held, wp.state == OWNED_WORKER_DONE, (unsigned long)reseed.st, reseed.status,
+           holding, polls, (long long)step_ns, held, wp->worker.state == OWNED_WORKER_DONE, (unsigned long)reseed.st, reseed.status,
            (unsigned long)reseed.ms, act.op.client_op_id, act.op.expected_generation, act.op.context_epoch, base, phc, sent,
-           wa.state == OWNED_WORKER_DONE, (unsigned long)done.st, (unsigned long)done.information);
+           wa->worker.state == OWNED_WORKER_DONE, (unsigned long)done.st, (unsigned long)done.information);
     stq = holdctl(h, AVB_DEBUG_PHC_HOLD_QUERY, 0, 0, &r, &info);
     holdctl_print("QUERY after the race", stq, info, &r);
     query(h, &q1);
@@ -3083,11 +3115,9 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
     if (settled) {
         verdict("PASS", "SETTLED", index, id->device_id, "the PHC reseed and the ACTIVATE ended within their bounds");
     } else {
-        verdict("INCONCLUSIVE_RESTORATION", "SETTLED", index, id->device_id, "the PHC reseed or the ACTIVATE has not been observed to end: it may "
-                "still change the state after the cleanup; its storage stays valid until the process ends");
+        verdict("INCONCLUSIVE", "SETTLED", index, id->device_id, "the PHC reseed or the ACTIVATE did not end within its bound: the race is not judged, "
+                "and the cleanup decides whether a final state can be established");
     }
-    (void)owned_worker_release(&wp);
-    (void)owned_worker_release(&wa);
 #endif
 }
 

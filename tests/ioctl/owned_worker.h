@@ -72,6 +72,51 @@ static __inline BOOL owned_worker_release(OWNED_WORKER *w)
     return TRUE;
 }
 
+/* Operations a test has issued on an adapter (key: its NET_LUID). Registered before they are started and kept until each was observed
+ * to have ended, so a cleanup can ask for itself whether the test may still be changing the state it is about to judge (#357,
+ * TC-MOCK-067): no caller has to pass that on */
+typedef struct OWNED_OP {
+    unsigned long long key;
+    OWNED_WORKER worker;
+    struct OWNED_OP *next;
+} OWNED_OP;
+
+/* A registered operation that has not been started yet; NULL without memory: then nothing may be started */
+static __inline OWNED_OP *owned_op_new(OWNED_OP **list, unsigned long long key)
+{
+    OWNED_OP *op = (OWNED_OP *)calloc(1, sizeof(*op));
+
+    if (op != NULL) {
+        op->key = key;
+        op->next = *list;
+        *list = op;
+    }
+    return op;
+}
+
+/* TRUE when no operation of key may still be running: every one is waited for up to ms and freed only after its end was observed.
+ * FALSE: at least one is left in the list, its handle and storage stay valid. Other keys are not touched */
+static __inline BOOL owned_ops_settled(OWNED_OP **list, unsigned long long key, DWORD ms)
+{
+    BOOL settled = TRUE;
+    OWNED_OP **link = list;
+
+    while (*link != NULL) {
+        OWNED_OP *op = *link;
+        if (op->key != key) {
+            link = &op->next;
+        } else if (owned_worker_wait(&op->worker, ms) == OWNED_WORKER_RUNNING) {
+            settled = FALSE;
+            link = &op->next;
+        } else {
+            (void)owned_worker_release(&op->worker);
+            *link = op->next;
+            free(op);
+        }
+    }
+    return settled;
+}
+
 /* CLEANUP verdict of the hold control. settled: no PHC operation this test sent can still be running */
 typedef enum { HOLDCTL_CLEANUP_PASS = 0, HOLDCTL_CLEANUP_FAILED, HOLDCTL_CLEANUP_INCONCLUSIVE, HOLDCTL_CLEANUP_UNSETTLED } HOLDCTL_CLEANUP;
 

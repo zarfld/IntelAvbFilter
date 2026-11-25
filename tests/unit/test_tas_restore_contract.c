@@ -2137,6 +2137,69 @@ static void test_65_owned_worker(void)
     EXPECT_EQ("unsettled, deviation measured: the final state is unsettled", holdctl_cleanup(FALSE, TRUE, FALSE), HOLDCTL_CLEANUP_UNSETTLED);
 }
 
+/* TC-MOCK-067: a cleanup while an operation of the test may still be running (#357 race, review 2026-11-25; test logic only, real threads,
+ * no driver). Whatever was measured, no final restoration PASS and no CLEANUP PASS; a measured failure stays a failure; the operation
+ * stays owned until its end was observed; other adapters are not affected */
+static void test_67_pending_operations(void)
+{
+    const unsigned long long adapter_a = 0x0006008006000000ull, adapter_b = 0x0006008005000000ull;
+    volatile LONG observed = 0;
+    OWNED_OP *ops = NULL, *op;
+    OWNED_WORKER_JOB init;
+    TAS_ACT_RESTORE_EVIDENCE e, ok;
+    HANDLE go = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+    printf("\n[TC-MOCK-067] #357 no restoration PASS while an operation of the test may still be running (test logic only)\n");
+    if (go == NULL) {
+        EXPECT_EQ("event available", 0, 1);
+        return;
+    }
+    init.go = go;
+    init.observed = &observed;
+    init.input = 41;
+    init.output = 0;
+    ZeroMemory(&ok, sizeof(ok));
+    ok.cycle_completed = TRUE; ok.adapter_returned = TRUE; ok.driver_clean = TRUE; ok.regs_measured = TRUE;
+    ok.tsn_mode_off = TRUE; ok.tx_probed = TRUE; ok.tx_on_wire = TRUE;
+
+    EXPECT_EQ("no operation issued: settled", owned_ops_settled(&ops, adapter_a, 0), TRUE);
+    op = owned_op_new(&ops, adapter_a);
+    EXPECT_EQ("an operation is registered before it is started", op != NULL && ops == op, 1);
+    EXPECT_EQ("a registered operation that was never started is settled", owned_ops_settled(&ops, adapter_a, 0), TRUE);
+    EXPECT_EQ("... and not kept", ops == NULL, 1);
+
+    (void)owned_op_new(&ops, adapter_b);
+    op = owned_op_new(&ops, adapter_a);
+    EXPECT_EQ("the operation starts", op != NULL && owned_worker_start(&op->worker, owned_worker_late, &init, sizeof(init)), TRUE);
+    EXPECT_EQ("an operation that has not ended is not settled", owned_ops_settled(&ops, adapter_a, 50), FALSE);
+    EXPECT_EQ("... and asking again does not settle it", owned_ops_settled(&ops, adapter_a, 0), FALSE);
+    EXPECT_EQ("... it stays owned with its storage", op != NULL && op->worker.state == OWNED_WORKER_RUNNING && op->worker.ctx != NULL, 1);
+    EXPECT_EQ("another adapter is not affected", owned_ops_settled(&ops, adapter_b, 0), TRUE);
+
+    e = ok;
+    e.operations_pending = !owned_ops_settled(&ops, adapter_a, 0);
+    EXPECT_EQ("everything measured good, operation open: no restoration PASS", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    EXPECT_EQ("cycle completed, operation open: no CLEANUP PASS", tas_act_cycle(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e.regs_measured = FALSE;
+    EXPECT_EQ("unmeasured registers, operation open: unverified", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.operations_pending = TRUE; e.regs_differing = 1;
+    EXPECT_EQ("a measured residue stays a failure while an operation is open", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.operations_pending = TRUE; e.cycle_completed = FALSE;
+    EXPECT_EQ("an incomplete cycle stays a failure while an operation is open", tas_act_cycle(&e), TAS_ACT_RESTORE_INCOMPLETE);
+
+    SetEvent(go);
+    EXPECT_EQ("a late end is established", owned_ops_settled(&ops, adapter_a, 10000), TRUE);
+    EXPECT_EQ("... with its real effect", (int)observed, 41);
+    EXPECT_EQ("... and nothing is owned afterwards", ops == NULL, 1);
+    e = ok;
+    e.operations_pending = !owned_ops_settled(&ops, adapter_a, 0);
+    EXPECT_EQ("settled before the cycle, everything measured good: complete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+    EXPECT_EQ("settled before the cycle, cycle completed: complete", tas_act_cycle(&e), TAS_ACT_RESTORE_COMPLETE);
+    e.adapter_returned = FALSE;
+    EXPECT_EQ("settled, adapter not back: incomplete", tas_act_cycle(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    CloseHandle(go);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -2187,6 +2250,7 @@ int main(void) {
     test_64_activate_cases();
     test_65_owned_worker();
     test_66_race_order();
+    test_67_pending_operations();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
