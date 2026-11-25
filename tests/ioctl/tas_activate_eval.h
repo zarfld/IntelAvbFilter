@@ -798,15 +798,20 @@ static __inline TAS_NEW_CONTEXT tas_new_context(unsigned long long old_epoch, BO
 /* ---- #369 --hold (TEST-TAS-API-004): the schedule status of #350 from IOCTL_AVB_TAS_QUERY_HW (TC-MOCK-071) ----
  * Published prerequisites only: #350's acceptance criteria, #365 12.2 (commit bracket), 12.4 (S1 to S4) and 12.7, DES-C-TAS-010 4.1.
  * The test measures the prerequisites itself; a register readback or BaseT having passed is never evidence of an activation here, and
- * no rule turns a missing measurement into PASS. HARDWARE_VERIFIED is a failure in every reply (#381) */
+ * no rule turns a missing measurement into PASS. HARDWARE_VERIFIED is a failure in every reply (#381).
+ * K8 (link events, #351/#472): #365 12.4 "While K8 is unverified, v1 never returns INFERRED_ACTIVE", and 12.6 keeps this part of #369 not
+ * GREEN until then. So UNKNOWN for LINK_EVENTS_UNOBSERVED past BaseT is the published answer and only a gap to the full #369 requirement,
+ * and INFERRED_ACTIVE is none a test may accept. That no event was counted is that observation only: it proves neither complete event
+ * capture nor the path of #472 EVENT, and so it never replaces K8 */
 
 /* What the test measured between the commit and the judged query, besides the query's own status */
 typedef struct {
     avb_u64 base;           /* the BaseT the test requested */
     BOOL measured;          /* the facts below were measured: both queries observable, generation and epoch reported in both */
     avb_u32 contradiction;  /* TAS_STATUS_C_*: a measured fact that contradicts the progression */
-    BOOL events_excluded;   /* measured: no status, power, pause, restart, attach or detach event of this adapter since before the
-                               commit, the OS link unchanged and connected, the driver's link speed unchanged and non-zero */
+    BOOL no_event_counted;  /* observed: the driver counted no status, PnP, pause, restart, attach or detach event of this adapter since
+                               before the commit, OS link unchanged and connected, the driver's link speed unchanged and non-zero */
+    BOOL k8_verified;       /* #472 EVENT is verified evidence (a published fact, never inferred by the test) */
 } TAS_STATUS_CONTROL;
 
 #define TAS_STATUS_C_MODE_OFF   0x01u   /* hw_mode is not TSN */
@@ -821,17 +826,26 @@ typedef enum {
     TAS_STATUS_S1,               /* FAIL: a status other than UNKNOWN although its inputs were not observable (12.4 S1) */
     TAS_STATUS_CLAIMED,          /* FAIL: PENDING or INFERRED_ACTIVE against a measured contradiction */
     TAS_STATUS_REASONS,          /* FAIL: the expected status with slot reasons that 12.4 S2/S3 exclude */
-    TAS_STATUS_LINK_OPEN,        /* FAIL: UNKNOWN only because link or power events are unobserved (K8), although none occurred */
+    TAS_STATUS_K8_PREMATURE,     /* FAIL: INFERRED_ACTIVE although K8 is not verified (12.4: never returned until then) */
     TAS_STATUS_WRONG,            /* FAIL: any other status, reason or record although every prerequisite was measured */
+    TAS_STATUS_K8_GAP,           /* SKIP_NOT_IMPLEMENTED: UNKNOWN for LINK_EVENTS_UNOBSERVED while K8 is not verified: as published, and
+                                    an observed gap to #369's INFERRED_ACTIVE; nonpassing */
     TAS_STATUS_NOT_MEASURED,     /* INCONCLUSIVE: no observable reply, or the test's own control was not measured */
     TAS_STATUS_NOT_PHASE,        /* INCONCLUSIVE: the query did not lie in the judged phase (before BaseT, or past it) */
     TAS_STATUS_CONTROL_LOST,     /* INCONCLUSIVE: a measured contradiction, and the reply did not claim the progression */
-    TAS_STATUS_EVENT_POSSIBLE    /* INCONCLUSIVE: a link or power event since the commit is not excluded by the test */
+    TAS_STATUS_UNRECONCILED,     /* INCONCLUSIVE: the driver reports EVENT_UNRECONCILED; no published rule says what sets or clears it */
+    TAS_STATUS_EVENT_POSSIBLE    /* INCONCLUSIVE: an event since the commit was counted, or the counters or the link were not measured */
 } TAS_STATUS_CLASS;
 
 static __inline BOOL tas_status_is_fail(TAS_STATUS_CLASS c)
 {
     return c >= TAS_STATUS_HW_VERIFIED && c <= TAS_STATUS_WRONG;
+}
+
+static __inline const char *tas_status_tag(TAS_STATUS_CLASS c)
+{
+    if (c == TAS_STATUS_K8_GAP) { return "SKIP_NOT_IMPLEMENTED"; }
+    return c == TAS_STATUS_PASS ? "PASS" : (tas_status_is_fail(c) ? "FAIL" : "INCONCLUSIVE");
 }
 
 /* The worse of two classes of one line: a failure, then an unmeasured one, then PASS */
@@ -850,12 +864,14 @@ static __inline const char *tas_status_class_name(TAS_STATUS_CLASS c)
     case TAS_STATUS_S1:             return "a status other than UNKNOWN although its inputs were not observable (#365 12.4 S1)";
     case TAS_STATUS_CLAIMED:        return "the progression claimed against a contradiction this test measured";
     case TAS_STATUS_REASONS:        return "the expected status with slot reasons that #365 12.4 S2/S3 exclude for it";
-    case TAS_STATUS_LINK_OPEN:      return "UNKNOWN only because link or power events are unobserved (K8, #365 12.4), although this test excluded one";
+    case TAS_STATUS_K8_PREMATURE:   return "INFERRED_ACTIVE although K8 is not verified (#365 12.4: v1 never returns it until then)";
+    case TAS_STATUS_K8_GAP:         return "as published while K8 is not verified (#365 12.4), and an observed gap to the full #369 requirement (12.6)";
     case TAS_STATUS_WRONG:          return "a wrong or missing driver answer";
     case TAS_STATUS_NOT_MEASURED:   return "not measured: no observable reply, or a prerequisite this test did not measure";
     case TAS_STATUS_NOT_PHASE:      return "not measured: the query's PHC bracket does not lie in the judged phase";
     case TAS_STATUS_CONTROL_LOST:   return "not judged: this test measured a contradiction, so the prerequisites of the progression do not hold";
-    case TAS_STATUS_EVENT_POSSIBLE: return "not judged: a link or power event since the commit is not excluded";
+    case TAS_STATUS_UNRECONCILED:   return "not judged: EVENT_UNRECONCILED reported; no published rule says what sets or clears it";
+    case TAS_STATUS_EVENT_POSSIBLE: return "not judged: an event since the commit was counted, or the counters or the link were not measured";
     default:                        return "?";
     }
 }
@@ -876,14 +892,15 @@ static __inline BOOL tas_status_observable(BOOL valid, const AVB_TAS_QUERY_HW_RE
 /* The control between the query right after the commit and the judged one. Unobservable or unreported is "not measured", never "no
  * contradiction". The shadow cycle, BASET and TXQCTL are no compared fields of the activation's record (12.4) */
 static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_HW_REQUEST *commit, BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q,
-                                        avb_u64 base, BOOL events_excluded, TAS_STATUS_CONTROL *c)
+                                        avb_u64 base, BOOL no_event_counted, BOOL k8_verified, TAS_STATUS_CONTROL *c)
 {
     BOOL same = TRUE;
     unsigned i;
 
     ZeroMemory(c, sizeof(*c));
     c->base = base;
-    c->events_excluded = events_excluded;
+    c->no_event_counted = no_event_counted;
+    c->k8_verified = k8_verified;
     if (!tas_status_observable(commit_valid, commit) || !tas_status_observable(valid, q) || commit->generation == 0 || q->generation == 0 ||
         commit->context_epoch == 0 || q->context_epoch == 0) {
         return;
@@ -918,6 +935,9 @@ static __inline TAS_STATUS_CLASS tas_status_slot(avb_u32 expected, BOOL valid, c
     if (unreconciled && q->current_status != AVB_TAS_ST_UNKNOWN) {
         return TAS_STATUS_S1;
     }
+    if (q->current_status == AVB_TAS_ST_INFERRED_ACTIVE && !c->k8_verified) {
+        return TAS_STATUS_K8_PREMATURE;   /* 12.4: never while K8 is unverified, whatever else holds */
+    }
     if (expected == AVB_TAS_ST_PENDING ? q->phc_after_ns >= c->base : q->phc_before_ns < c->base) {
         return TAS_STATUS_NOT_PHASE;
     }
@@ -931,11 +951,18 @@ static __inline TAS_STATUS_CLASS tas_status_slot(avb_u32 expected, BOOL valid, c
         if (q->current_reasons != 0) {
             return TAS_STATUS_REASONS;
         }
-        return expected == AVB_TAS_ST_INFERRED_ACTIVE && !c->events_excluded ? TAS_STATUS_EVENT_POSSIBLE : TAS_STATUS_PASS;
+        return expected == AVB_TAS_ST_INFERRED_ACTIVE && !c->no_event_counted ? TAS_STATUS_EVENT_POSSIBLE : TAS_STATUS_PASS;
     }
-    if (q->current_status == AVB_TAS_ST_UNKNOWN && (q->current_reasons & ~AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED) == 0 &&
-        (q->current_reasons != 0 || unreconciled)) {
-        return c->events_excluded ? TAS_STATUS_LINK_OPEN : TAS_STATUS_EVENT_POSSIBLE;
+    if (q->current_status == AVB_TAS_ST_UNKNOWN && (q->current_reasons & ~AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED) == 0) {
+        if (unreconciled) {
+            return TAS_STATUS_UNRECONCILED;
+        }
+        if (q->current_reasons != 0 && expected == AVB_TAS_ST_INFERRED_ACTIVE && !c->k8_verified) {
+            return TAS_STATUS_K8_GAP;
+        }
+        if (q->current_reasons != 0 && !c->no_event_counted) {
+            return TAS_STATUS_EVENT_POSSIBLE;
+        }
     }
     return TAS_STATUS_WRONG;
 }
@@ -986,16 +1013,16 @@ static __inline TAS_STATUS_CLASS tas_status_next(BOOL valid, const AVB_TAS_QUERY
         return TAS_STATUS_NOT_MEASURED;
     }
     if ((q->snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0 && q->next_status == AVB_TAS_ST_UNKNOWN && q->next_reasons == 0) {
-        return c->events_excluded ? TAS_STATUS_LINK_OPEN : TAS_STATUS_EVENT_POSSIBLE;   /* S1 applies to both slots */
+        return TAS_STATUS_UNRECONCILED;   /* S1 applies to both slots */
     }
     return c->contradiction != 0 ? TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
 }
 
-/* No link or power event of this adapter between two statistics readings of one context. Every status indication counts: this driver
- * has no separate link event counter, so an unrelated indication only withholds a verdict. A counter that fell is another context or a
- * reset and excludes nothing */
-static __inline BOOL tas_status_events_excluded(BOOL read0, const AVB_DRIVER_STATISTICS *a, BOOL read1, const AVB_DRIVER_STATISTICS *b,
-                                                BOOL link_same)
+/* The driver counted no event of this adapter between two statistics readings of one context. Every status indication counts: this driver
+ * has no separate link event counter, so an unrelated one only withholds a verdict. A counter that fell is another context or a reset. What
+ * the driver does not count is not excluded by this (K8) */
+static __inline BOOL tas_status_no_event_counted(BOOL read0, const AVB_DRIVER_STATISTICS *a, BOOL read1, const AVB_DRIVER_STATISTICS *b,
+                                                 BOOL link_same)
 {
     return read0 && read1 && link_same && b->IoctlCount >= a->IoctlCount && a->FilterStatusCount == b->FilterStatusCount &&
            a->FilterNetPnPCount == b->FilterNetPnPCount && a->FilterPauseCount == b->FilterPauseCount &&
