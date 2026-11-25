@@ -794,3 +794,275 @@ static __inline TAS_NEW_CONTEXT tas_new_context(unsigned long long old_epoch, BO
     }
     return generation == 1 && record_clean ? TAS_NEW_CONTEXT_OK : TAS_NEW_CONTEXT_VIOLATION;
 }
+
+/* ---- #369 --hold (TEST-TAS-API-004): the schedule status of #350 from IOCTL_AVB_TAS_QUERY_HW (TC-MOCK-071) ----
+ * Published prerequisites only: #350's acceptance criteria, #365 12.2 (commit bracket), 12.4 (S1 to S4) and 12.7, DES-C-TAS-010 4.1.
+ * The test measures the prerequisites itself; a register readback or BaseT having passed is never evidence of an activation here, and
+ * no rule turns a missing measurement into PASS. HARDWARE_VERIFIED is a failure in every reply (#381).
+ * K8 (link events, #351/#472): #365 12.4 "While K8 is unverified, v1 never returns INFERRED_ACTIVE", and 12.6 keeps this part of #369 not
+ * GREEN until then. So UNKNOWN for LINK_EVENTS_UNOBSERVED past BaseT is the published answer and only a gap to the full #369 requirement,
+ * and INFERRED_ACTIVE is none a test may accept. That no event was counted is that observation only: it proves neither complete event
+ * capture nor the path of #472 EVENT, and so it never replaces K8 */
+
+/* What the test measured between the commit and the judged query, besides the query's own status */
+typedef struct {
+    avb_u64 base;           /* the BaseT the test requested */
+    BOOL identified;        /* the judged reply and the committed request both carry a generation and an epoch */
+    BOOL measured;          /* the facts below were measured: both queries observable, and the one after the commit is of that commit */
+    avb_u32 contradiction;  /* TAS_STATUS_C_*: a measured fact that contradicts the progression */
+    BOOL no_event_counted;  /* observed: the driver counted no status, PnP, pause, restart, attach or detach event of this adapter since
+                               before the commit, OS link unchanged and connected, the driver's link speed unchanged and non-zero */
+    BOOL k8_verified;       /* #472 EVENT is verified evidence (a published fact, never inferred by the test) */
+} TAS_STATUS_CONTROL;
+
+#define TAS_STATUS_C_MODE_OFF   0x01u   /* hw_mode is not TSN */
+#define TAS_STATUS_C_REGS       0x02u   /* a compared schedule register (STQT, ENDQT, QBVCYCLET) differs from right after the commit */
+#define TAS_STATUS_C_PHC_BACK   0x04u   /* the PHC is below its value right after the commit */
+#define TAS_STATUS_C_CONTEXT    0x08u   /* another context epoch than the committed request's */
+#define TAS_STATUS_C_GENERATION 0x10u   /* another generation than its commit published: an invalidating event or a further mutation (L7, L10) */
+#define TAS_STATUS_C_IDENTITY   (TAS_STATUS_C_CONTEXT | TAS_STATUS_C_GENERATION)
+
+typedef enum {
+    TAS_STATUS_PASS = 0,
+    TAS_STATUS_HW_VERIFIED,      /* FAIL: HARDWARE_VERIFIED in either slot */
+    TAS_STATUS_S1,               /* FAIL: a status other than UNKNOWN although its inputs were not observable (12.4 S1) */
+    TAS_STATUS_CLAIMED,          /* FAIL: PENDING or INFERRED_ACTIVE against a measured contradiction */
+    TAS_STATUS_REASONS,          /* FAIL: the expected status with slot reasons that 12.4 S2/S3 exclude */
+    TAS_STATUS_K8_PREMATURE,     /* FAIL: INFERRED_ACTIVE although K8 is not verified (12.4: never returned until then) */
+    TAS_STATUS_WRONG,            /* FAIL: any other status, reason or record although every prerequisite was measured */
+    TAS_STATUS_K8_GAP,           /* SKIP_NOT_IMPLEMENTED: UNKNOWN for LINK_EVENTS_UNOBSERVED while K8 is not verified: as published, and
+                                    an observed gap to #369's INFERRED_ACTIVE; nonpassing */
+    TAS_STATUS_NOT_MEASURED,     /* INCONCLUSIVE: no observable reply, or the test's own control was not measured */
+    TAS_STATUS_NOT_PHASE,        /* INCONCLUSIVE: the query did not lie in the judged phase (before BaseT, or past it) */
+    TAS_STATUS_CONTROL_LOST,     /* INCONCLUSIVE: a measured contradiction, and the reply did not claim the progression */
+    TAS_STATUS_UNRECONCILED,     /* INCONCLUSIVE: the driver reports EVENT_UNRECONCILED; no published rule says what sets or clears it */
+    TAS_STATUS_EVENT_POSSIBLE    /* INCONCLUSIVE: an event since the commit was counted, or the counters or the link were not measured */
+} TAS_STATUS_CLASS;
+
+static __inline BOOL tas_status_is_fail(TAS_STATUS_CLASS c)
+{
+    return c >= TAS_STATUS_HW_VERIFIED && c <= TAS_STATUS_WRONG;
+}
+
+static __inline const char *tas_status_tag(TAS_STATUS_CLASS c)
+{
+    if (c == TAS_STATUS_K8_GAP) { return "SKIP_NOT_IMPLEMENTED"; }
+    return c == TAS_STATUS_PASS ? "PASS" : (tas_status_is_fail(c) ? "FAIL" : "INCONCLUSIVE");
+}
+
+/* The worse of two classes of one line: a failure, then an unmeasured one, then PASS */
+static __inline TAS_STATUS_CLASS tas_status_worst(TAS_STATUS_CLASS a, TAS_STATUS_CLASS b)
+{
+    if (tas_status_is_fail(a)) { return a; }
+    if (tas_status_is_fail(b)) { return b; }
+    return a != TAS_STATUS_PASS ? a : b;
+}
+
+static __inline const char *tas_status_class_name(TAS_STATUS_CLASS c)
+{
+    switch (c) {
+    case TAS_STATUS_PASS:           return "as published";
+    case TAS_STATUS_HW_VERIFIED:    return "HARDWARE_VERIFIED returned (never allowed, #381)";
+    case TAS_STATUS_S1:             return "a status other than UNKNOWN although its inputs were not observable (#365 12.4 S1)";
+    case TAS_STATUS_CLAIMED:        return "the progression claimed against a contradiction this test measured";
+    case TAS_STATUS_REASONS:        return "the expected status with slot reasons that #365 12.4 S2/S3 exclude for it";
+    case TAS_STATUS_K8_PREMATURE:   return "INFERRED_ACTIVE although K8 is not verified (#365 12.4: v1 never returns it until then)";
+    case TAS_STATUS_K8_GAP:         return "as published while K8 is not verified (#365 12.4), and an observed gap to the full #369 requirement (12.6)";
+    case TAS_STATUS_WRONG:          return "a wrong or missing driver answer";
+    case TAS_STATUS_NOT_MEASURED:   return "not measured: no observable reply, or a prerequisite this test did not measure";
+    case TAS_STATUS_NOT_PHASE:      return "not measured: the query's PHC bracket does not lie in the judged phase";
+    case TAS_STATUS_CONTROL_LOST:   return "not judged: this test measured a contradiction, so the prerequisites of the progression do not hold";
+    case TAS_STATUS_UNRECONCILED:   return "not judged: EVENT_UNRECONCILED reported; no published rule says what sets or clears it";
+    case TAS_STATUS_EVENT_POSSIBLE: return "not judged: an event since the commit was counted, or the counters or the link were not measured";
+    default:                        return "?";
+    }
+}
+
+/* read_failed bits 0 to 16, the status inputs of 12.4; DTXMXPKTSZ (bit 17) is none */
+#define TAS_STATUS_INPUT_BITS ((1u << 17) - 1u)
+
+/* The inputs of 12.4 S1 that a reply itself shows as observed. EVENT_UNRECONCILED is judged apart: it is a driver statement */
+static __inline BOOL tas_status_observable(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    const avb_u32 invalid = AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID | AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID | AVB_TAS_SNAP_RSN_READ_INCONSISTENT;
+
+    return valid && (q->hw_read == AVB_TAS_HWREAD_READ || q->hw_read == AVB_TAS_HWREAD_PARTIAL) &&
+           (q->regs.read_failed & TAS_STATUS_INPUT_BITS) == 0 && (q->flags & AVB_TAS_FLAG_OP_IN_PROGRESS) == 0 &&
+           (q->snapshot_reasons & invalid) == 0 && q->phc_before_ns <= q->phc_after_ns;
+}
+
+/* The control between the query right after the commit and the judged one. Unobservable or unreported is "not measured", never "no
+ * contradiction". The shadow cycle, BASET and TXQCTL are no compared fields of the activation's record (12.4).
+ * Whose reply it is comes from the committed request itself (op): the driver compared its pair under the claim and advanced once, so its
+ * commit is (context_epoch, expected_generation + 1) (#352 R1 L7, L8). Any other pair is another context, an invalidating event or
+ * another mutation: what that reply says, matching or not, is not about this commit */
+static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_HW_REQUEST *commit, BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q,
+                                        const AVB_TAS_OP_REQUEST *op, BOOL no_event_counted, BOOL k8_verified, TAS_STATUS_CONTROL *c)
+{
+    BOOL same = TRUE;
+    unsigned i;
+
+    ZeroMemory(c, sizeof(*c));
+    c->base = op->schedule.base_time_ns;
+    c->no_event_counted = no_event_counted;
+    c->k8_verified = k8_verified;
+    c->identified = valid && q->generation != 0 && q->context_epoch != 0 && op->expected_generation != 0 && op->context_epoch != 0;
+    if (c->identified && q->context_epoch != op->context_epoch)            { c->contradiction |= TAS_STATUS_C_CONTEXT; }
+    if (c->identified && q->generation != op->expected_generation + 1)     { c->contradiction |= TAS_STATUS_C_GENERATION; }
+    if (!c->identified || !tas_status_observable(commit_valid, commit) || !tas_status_observable(valid, q) ||
+        commit->context_epoch != op->context_epoch || commit->generation != op->expected_generation + 1) {
+        return;
+    }
+    c->measured = TRUE;
+    for (i = 0; i < AVB_TAS_QUEUES; i++) {
+        same = same && commit->regs.stqt[i] == q->regs.stqt[i] && commit->regs.endqt[i] == q->regs.endqt[i];
+    }
+    same = same && commit->regs.qbvcyclet == q->regs.qbvcyclet;
+    if (q->hw_mode != AVB_TAS_HWMODE_TSN)          { c->contradiction |= TAS_STATUS_C_MODE_OFF; }
+    if (!same)                                     { c->contradiction |= TAS_STATUS_C_REGS; }
+    if (q->phc_before_ns < commit->phc_after_ns)   { c->contradiction |= TAS_STATUS_C_PHC_BACK; }
+}
+
+/* The current slot against PENDING (query before BaseT) or INFERRED_ACTIVE (query past BaseT) */
+static __inline TAS_STATUS_CLASS tas_status_slot(avb_u32 expected, BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q, const TAS_STATUS_CONTROL *c)
+{
+    const BOOL progressed = q->current_status == AVB_TAS_ST_PENDING || q->current_status == AVB_TAS_ST_INFERRED_ACTIVE;
+    const BOOL unreconciled = (q->snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0;
+
+    if (!valid) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if (q->current_status == AVB_TAS_ST_HARDWARE_VERIFIED || q->next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
+        return TAS_STATUS_HW_VERIFIED;
+    }
+    if (!tas_status_observable(valid, q)) {
+        return q->current_status == AVB_TAS_ST_UNKNOWN ? TAS_STATUS_NOT_MEASURED : TAS_STATUS_S1;
+    }
+    if (unreconciled && q->current_status != AVB_TAS_ST_UNKNOWN) {
+        return TAS_STATUS_S1;
+    }
+    if (q->current_status == AVB_TAS_ST_INFERRED_ACTIVE && !c->k8_verified) {
+        return TAS_STATUS_K8_PREMATURE;   /* 12.4: never while K8 is unverified, whatever else holds */
+    }
+    if (expected == AVB_TAS_ST_PENDING ? q->phc_after_ns >= c->base : q->phc_before_ns < c->base) {
+        return TAS_STATUS_NOT_PHASE;
+    }
+    if (!c->measured) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if (c->contradiction != 0) {
+        return progressed && (c->contradiction & TAS_STATUS_C_IDENTITY) == 0 ? TAS_STATUS_CLAIMED : TAS_STATUS_CONTROL_LOST;
+    }
+    if (q->current_status == expected) {
+        if (q->current_reasons != 0) {
+            return TAS_STATUS_REASONS;
+        }
+        return expected == AVB_TAS_ST_INFERRED_ACTIVE && !c->no_event_counted ? TAS_STATUS_EVENT_POSSIBLE : TAS_STATUS_PASS;
+    }
+    if (q->current_status == AVB_TAS_ST_UNKNOWN && (q->current_reasons & ~AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED) == 0) {
+        if (unreconciled) {
+            return TAS_STATUS_UNRECONCILED;
+        }
+        if (q->current_reasons != 0 && expected == AVB_TAS_ST_INFERRED_ACTIVE && !c->k8_verified) {
+            return TAS_STATUS_K8_GAP;
+        }
+        if (q->current_reasons != 0 && !c->no_event_counted) {
+            return TAS_STATUS_EVENT_POSSIBLE;
+        }
+    }
+    return TAS_STATUS_WRONG;
+}
+
+/* The retained commit of 12.2: state RETAINED, the schedule exactly as requested, and a bracket that is ordered, ends before BaseT (the
+ * operation completed COMMITTED) and lies between the test's own PHC readings around the race (outer: those were measured) */
+static __inline TAS_STATUS_CLASS tas_status_record(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_SCHEDULE *sent, BOOL outer,
+                                                   avb_u64 phc_lo, avb_u64 phc_hi, const TAS_STATUS_CONTROL *c)
+{
+    const AVB_TAS_COMMIT_INFO *i = &q->current_commit;
+
+    if (!valid || (q->flags & AVB_TAS_FLAG_OP_IN_PROGRESS) != 0) {
+        return TAS_STATUS_NOT_MEASURED;   /* sampled while an operation runs: the state before or after it (12.10) */
+    }
+    if (i->state == AVB_TAS_COMMIT_RETAINED && (i->phc_before_commit_ns > i->phc_after_commit_ns || q->current.cycle_ns == 0)) {
+        return TAS_STATUS_WRONG;   /* malformed by itself, whoever's record it is */
+    }
+    if (!c->identified) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if ((c->contradiction & TAS_STATUS_C_IDENTITY) != 0) {
+        return TAS_STATUS_CONTROL_LOST;   /* not this commit's record, whatever it holds */
+    }
+    if (i->state != AVB_TAS_COMMIT_RETAINED) {
+        if (!c->measured) {
+            return TAS_STATUS_NOT_MEASURED;
+        }
+        return c->contradiction != 0 ? TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
+    }
+    if (memcmp(&q->current, sent, sizeof(*sent)) != 0 || i->phc_after_commit_ns >= sent->base_time_ns) {
+        return TAS_STATUS_WRONG;
+    }
+    if (!outer) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    return i->phc_before_commit_ns < phc_lo || i->phc_after_commit_ns > phc_hi ? TAS_STATUS_WRONG : TAS_STATUS_PASS;
+}
+
+/* 12.7 (#369 row): after the activation next NONE, next_reasons 0, no CYCLE_MISMATCH; v1 has no next record (next_commit NONE) */
+static __inline TAS_STATUS_CLASS tas_status_next(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q, const TAS_STATUS_CONTROL *c)
+{
+    if (!valid) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if (q->next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
+        return TAS_STATUS_HW_VERIFIED;
+    }
+    if (!tas_status_observable(valid, q)) {
+        return q->next_status == AVB_TAS_ST_UNKNOWN ? TAS_STATUS_NOT_MEASURED : TAS_STATUS_S1;
+    }
+    if ((q->snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0) {
+        return q->next_status == AVB_TAS_ST_UNKNOWN ? TAS_STATUS_UNRECONCILED : TAS_STATUS_S1;   /* S1 applies to both slots */
+    }
+    if (!c->identified) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if ((c->contradiction & TAS_STATUS_C_IDENTITY) != 0) {
+        return TAS_STATUS_CONTROL_LOST;
+    }
+    if (q->next_status == AVB_TAS_ST_NONE && q->next_reasons == 0 && (q->current_reasons & AVB_TAS_SLOT_RSN_CYCLE_MISMATCH) == 0 &&
+        q->next_commit.state == AVB_TAS_COMMIT_NONE) {
+        return TAS_STATUS_PASS;
+    }
+    if (!c->measured) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    return c->contradiction != 0 ? TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
+}
+
+/* The driver counted no event of this adapter between two statistics readings of one context. Every status indication counts: this driver
+ * has no separate link event counter, so an unrelated one only withholds a verdict. A counter that fell is another context or a reset. What
+ * the driver does not count is not excluded by this (K8) */
+static __inline BOOL tas_status_no_event_counted(BOOL read0, const AVB_DRIVER_STATISTICS *a, BOOL read1, const AVB_DRIVER_STATISTICS *b,
+                                                 BOOL link_same)
+{
+    return read0 && read1 && link_same && b->IoctlCount >= a->IoctlCount && a->FilterStatusCount == b->FilterStatusCount &&
+           a->FilterNetPnPCount == b->FilterNetPnPCount && a->FilterPauseCount == b->FilterPauseCount &&
+           a->FilterRestartCount == b->FilterRestartCount && a->FilterAttachCount == b->FilterAttachCount &&
+           a->FilterDetachCount == b->FilterDetachCount && a->PauseRestartGeneration == b->PauseRestartGeneration;
+}
+
+/* Queries only observe: generation and epoch stay (#352 R1 L10, L13). writers_excluded: no other IOCTL of this adapter and no pause or
+ * restart was counted in between, so no other owner explains a step */
+static __inline TAS_STATUS_CLASS tas_status_readonly(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *a, const AVB_TAS_QUERY_HW_REQUEST *b,
+                                                     BOOL writers_excluded)
+{
+    if (!valid || a->generation == 0 || b->generation == 0 || a->context_epoch == 0 || b->context_epoch == 0) {
+        return TAS_STATUS_NOT_MEASURED;
+    }
+    if (a->context_epoch != b->context_epoch) {
+        return TAS_STATUS_CONTROL_LOST;
+    }
+    if (a->generation == b->generation) {
+        return TAS_STATUS_PASS;
+    }
+    return writers_excluded ? TAS_STATUS_WRONG : TAS_STATUS_CONTROL_LOST;
+}
