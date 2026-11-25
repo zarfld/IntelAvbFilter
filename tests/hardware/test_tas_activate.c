@@ -163,6 +163,21 @@
  *                          (tas_stale_view). Nothing is written in either case (the record is ARMED). Release: INCONCLUSIVE.
  *              NEW_CONTEXT after the owned NIC cycle: an epoch that differs from the old one (compared, never assumed), generation 1 and
  *                          record CLEAN, although attach and its restart reset the PHC again (no retained schedule: no step).
+ *            TC-TASACT-META-005, a fifth complete run (#369, Debug only; the approved exception is stated at m5_restore): the STATUS oracle of
+ *            --hold and the driver's answer under a real deviation of one compared register.
+ *              COMMIT      a HOLD of its own, BaseT at least 3 s ahead.
+ *              GUARD       a query of its own, reads only: this commit's pair, ARMED, PENDING and RETAINED, nine registers (STQT, ENDQT,
+ *                          QBVCYCLET) read through the bound handle equal to the query, the PHC at least 1.5 s before BaseT. Anything
+ *                          missing: INCONCLUSIVE and nothing is written.
+ *              DEVIATION   ENDQT3.END_TIME 400 -> 450 ms, read back, present in the reference query and in the judged one, nothing else
+ *                          changed. REG_RESTORE: the exact raw value back and read; otherwise CLEANUP_FAILED or
+ *                          INCONCLUSIVE_RESTORATION, whatever the NIC cycle recovers later.
+ *              GENERATION, GENERATION_RESTORED   +0, measured.
+ *              R2          the driver: 6/0x8, next 7/0x1000, commit 4, record kept, in both queries.
+ *              ORACLE_SLOT, ORACLE_NEXT   the oracle on these replies: a correct R2 answer is no positive control and no failure.
+ *              CONTROL     after the restoration: 3/0x0, next 1/0x0, commit 2.
+ *              ORACLE_RESTORED_SLOT, _NEXT   the oracle with the deviated query as the one after the commit: PASS.
+ *            PENDING or NONE accepted against a deviation needs a driver that answers wrongly: not reachable here, offline only.
  *            The trigger is sent when no send is outstanding, waited for within bounds, never withheld because of it. It only schedules the
  *            restart: until the END of the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before
  *            (TC-MOCK-068, TC-MOCK-070).
@@ -300,7 +315,8 @@
  * Mutations: TAS_ACTIVATE, bounded broadcast UDP and ICMP on the adapter under test, and the NIC cycle of that adapter
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
  * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
- * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER); that mode also
+ * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER) and META-005 (the approved
+ * exception there: nine READ_REGISTER, ENDQT3 written and restored); that mode also
  * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, SET_HW_TIMESTAMPING, INIT_DEVICE and one filter restart. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
@@ -370,7 +386,7 @@ typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of fil
 static RUN_MODE g_mode;
 #define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
 #define META_STATUS_STEP_NS   (100LL * NS_PER_MS)     /* STATUS_OFFSET: a step that can be measured against wall time (META-003: back) */
-static int g_meta_case;                              /* --metadata-events: 1 to 4 = META-001 to -004 (the run_adapter call in progress) */
+static int g_meta_case;                              /* --metadata-events: 1 to 5 = META-001 to -005 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
 static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
@@ -437,8 +453,86 @@ static void report_abort(void)
     }
 }
 
-static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; report_abort(); return FALSE; }
-static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
+/* ---- --metadata-events, TC-TASACT-META-005 (#369): the STATUS oracle of --hold under a real deviation of a compared register ----
+ * EXCEPTION, approved by Q on 2026-11-25 for this case alone: the Debug-only generic READ_REGISTER / WRITE_REGISTER, one deviation of
+ * ENDQT3.END_TIME at the generated SSOT offset and the restoration of its exact raw value. It is no permission for generic register writes in
+ * regression tests. Nothing else is written: no mode, no cycle, no BaseT, no other bit of the register. Every access uses the one bound
+ * handle of the case. Nothing is written unless every precondition below was measured. Once the write was sent the restoration runs on every
+ * way out (also on Ctrl-C and on an unhandled exception); a process that is terminated from outside cannot restore, the NIC cycle is then owed.
+ */
+#define M5_LEAD_NS        (3 * NS_PER_SEC)        /* BaseT at least this far ahead of the commit */
+#define M5_MARGIN_NS      (1500LL * NS_PER_MS)    /* PHC before BaseT immediately before the write: measured, never assumed from a duration */
+#define M5_END_NS         450000000u              /* the deviated END_TIME of queue 3 (committed: WINDOW_END_NS, 400 ms) */
+#define M5_REGS           9u
+
+typedef enum { M5_RESTORE_NONE = 0, M5_RESTORE_VERIFIED, M5_RESTORE_DIFFERS, M5_RESTORE_UNREAD } M5_RESTORE;
+
+static volatile LONG g_m5_state;   /* 0 nothing written; 1 the write was sent and is not restored; 2 the restoration is running */
+static HANDLE g_m5_handle = INVALID_HANDLE_VALUE;
+static avb_u32 g_m5_offset, g_m5_raw, g_m5_value;
+static LONG g_m5_write_st, g_m5_read_st;
+
+#ifndef NDEBUG
+static LONG m5_access(HANDLE h, DWORD code, avb_u32 offset, avb_u32 *value)
+{
+    AVB_REGISTER_REQUEST r;
+    DWORD information = 0;
+    LONG st;
+
+    ZeroMemory(&r, sizeof(r));
+    r.offset = offset;
+    r.value = *value;
+    st = avb_ioctl_ntstatus(h, code, &r, sizeof(r), &r, sizeof(r), &information);
+    if (st == 0 && (information != (DWORD)sizeof(r) || r.status != 0 || r.offset != offset)) {
+        st = (LONG)STATUS_UNSUCCESSFUL;
+    }
+    if (st == 0) {
+        *value = r.value;
+    }
+    return st;
+}
+
+/** Back to the raw value read before the write, then read. Once; runs on whichever way out comes first */
+static M5_RESTORE m5_restore(void)
+{
+    avb_u32 value = g_m5_raw;
+    M5_RESTORE r;
+
+    if (InterlockedCompareExchange(&g_m5_state, 2, 1) != 1) {
+        return M5_RESTORE_NONE;
+    }
+    g_m5_write_st = m5_access(g_m5_handle, IOCTL_AVB_WRITE_REGISTER, g_m5_offset, &value);
+    value = 0;
+    g_m5_read_st = m5_access(g_m5_handle, IOCTL_AVB_READ_REGISTER, g_m5_offset, &value);
+    g_m5_value = value;
+    r = g_m5_read_st != 0 ? M5_RESTORE_UNREAD : (value == g_m5_raw ? M5_RESTORE_VERIFIED : M5_RESTORE_DIFFERS);
+    InterlockedExchange(&g_m5_state, 0);
+    return r;
+}
+#else
+static M5_RESTORE m5_restore(void) { return M5_RESTORE_NONE; }
+#endif
+
+static const char *m5_restore_tag(M5_RESTORE r)
+{
+    return r == M5_RESTORE_VERIFIED ? "PASS" : (r == M5_RESTORE_DIFFERS ? "CLEANUP_FAILED" : "INCONCLUSIVE_RESTORATION");
+}
+
+/** The case did not reach its own restoration (Ctrl-C, unhandled exception): restored from here, and named */
+static void m5_abort(void)
+{
+    if (InterlockedCompareExchange(&g_m5_state, 0, 0) != 0) {
+        M5_RESTORE r = m5_restore();
+
+        printf("[%s] %s-REG_RESTORE: aborted with the ENDQT3 deviation sent; write 0x%08lX, read 0x%08lX value 0x%08X (raw before 0x%08X); "
+               "operator: NIC cycle of this adapter\n", r == M5_RESTORE_VERIFIED ? "INCONCLUSIVE" : m5_restore_tag(r), g_case,
+               (unsigned long)g_m5_write_st, (unsigned long)g_m5_read_st, g_m5_value, g_m5_raw);
+        fflush(stdout);
+    }
+}
+
+static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; m5_abort(); report_abort(); return FALSE; }
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; m5_abort(); report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
 
 /* One verdict line. Nonpassing tags count as failures, BLOCKED separately */
 static void verdict(const char *tag, const char *check, UINT32 adapter, avb_u16 did, const char *reason)
@@ -1675,6 +1769,7 @@ static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQU
 static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame, BOOL back);
 static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch);
+static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
@@ -1825,6 +1920,16 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         old_epoch = run_meta_restart(h, h2, index, id, frame);
         (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         meta_new_context(index, id, old_epoch);
+        return;
+    }
+
+    if (g_mode == MODE_META && g_meta_case == 5) {
+        /* TC-TASACT-META-005: one handle for every access of the case */
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        CloseHandle(h2);
+        run_meta_mismatch(h, index, id, frame);
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         return;
     }
 
@@ -4214,6 +4319,228 @@ static void run_holdctl_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 #endif
 }
 
+/* ---- --metadata-events, TC-TASACT-META-005 (#369): see the exception at m5_restore ---- */
+static const char *const m5_lines[] = { "REG_RESTORE", "DEVIATION", "GENERATION", "R2", "ORACLE_SLOT", "ORACLE_NEXT", "CONTROL", "GENERATION_RESTORED",
+                                        "ORACLE_RESTORED_SLOT", "ORACLE_RESTORED_NEXT" };
+
+static void m5_not_run(const char *tag, UINT32 index, avb_u16 did, const char *reason)
+{
+    unsigned k;
+
+    for (k = 0; k < sizeof(m5_lines) / sizeof(m5_lines[0]); k++) {
+        verdict(tag, m5_lines[k], index, did, reason);
+    }
+}
+
+#ifndef NDEBUG
+/** The compared registers and the transmit mode of two replies, ENDQT3 excepted */
+static BOOL m5_others_equal(const AVB_TAS_REGS *a, const AVB_TAS_REGS *b)
+{
+    return memcmp(a->stqt, b->stqt, sizeof(a->stqt)) == 0 && memcmp(a->endqt, b->endqt, 3 * sizeof(a->endqt[0])) == 0 &&
+           a->qbvcyclet == b->qbvcyclet && a->tqavctrl == b->tqavctrl;
+}
+
+/** This case's commit: the bound adapter, its epoch and expected_generation + 1, observable, its bracket before BaseT */
+static BOOL m5_mine(const QUERY_READ *r, const AVB_TAS_OP_REQUEST *op, const AVB_ADAPTER_IDENTITY_REQUEST *id)
+{
+    return query_readable(r) && tas_status_observable(TRUE, &r->q) && r->q.net_luid == id->net_luid && r->q.device_id == id->device_id &&
+           op->context_epoch != 0 && op->expected_generation != 0 && r->q.context_epoch == op->context_epoch &&
+           r->q.generation == op->expected_generation + 1 && r->q.phc_after_ns < op->schedule.base_time_ns;
+}
+
+/** The retained record of the guard's reply, unchanged */
+static BOOL m5_record(const QUERY_READ *r, const QUERY_READ *guard, const AVB_TAS_OP_REQUEST *op)
+{
+    return memcmp(&r->q.current, &op->schedule, sizeof(op->schedule)) == 0 && r->q.next_commit.state == AVB_TAS_COMMIT_NONE &&
+           r->q.current_commit.phc_before_commit_ns == guard->q.current_commit.phc_before_commit_ns &&
+           r->q.current_commit.phc_after_commit_ns == guard->q.current_commit.phc_after_commit_ns;
+}
+
+static BOOL m5_r1(const QUERY_READ *r)
+{
+    return r->q.current_status == AVB_TAS_ST_PENDING && r->q.current_reasons == 0 && r->q.next_status == AVB_TAS_ST_NONE && r->q.next_reasons == 0 &&
+           r->q.current_commit.state == AVB_TAS_COMMIT_RETAINED;
+}
+
+static BOOL m5_r2(const QUERY_READ *r)
+{
+    return r->q.current_status == AVB_TAS_ST_INCONSISTENT && r->q.current_reasons == AVB_TAS_SLOT_RSN_WINDOW_MISMATCH &&
+           r->q.next_status == AVB_TAS_ST_UNKNOWN && r->q.next_reasons == AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED &&
+           r->q.current_commit.state == AVB_TAS_COMMIT_HW_MISMATCH;
+}
+#endif
+
+/** h: the bound handle of every access of this case. The caller owns the NIC-cycle cleanup. No print between the commit and the last query:
+ *  the PHC phase of every step is measured, and the fewer delays the better */
+static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame)
+{
+#ifdef NDEBUG
+    (void)h; (void)frame;
+    verdict("INCONCLUSIVE", "COMMIT", index, id->device_id, "Release build: READ_REGISTER and WRITE_REGISTER are Debug-only, nothing is committed or written");
+    verdict("INCONCLUSIVE", "GUARD", index, id->device_id, "Release build: nothing is written");
+    m5_not_run("INCONCLUSIVE", index, id->device_id, "Release build: not executable here (never PASS)");
+#else
+    static const avb_u32 offset[M5_REGS] = { I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3, I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3,
+                                             I226_QBVCYCLET };
+    IOCTL_VERSION ver = {0};
+    AVB_TAS_OP_REQUEST op, sent;
+    AVB_TAS_STATE s0, s;
+    QUERY_READ q0, qg, qr, qj, qc;
+    avb_u32 reg[M5_REGS], want[M5_REGS], deviated = 0, back = 0, v;
+    LONG reg_st[M5_REGS], wst = (LONG)AVB_NTSTATUS_UNAVAILABLE, bst = (LONG)AVB_NTSTATUS_UNAVAILABLE, st;
+    M5_RESTORE restored = M5_RESTORE_NONE;
+    TAS_STATUS_CONTROL c;
+    TAS_STATUS_CLASS cls;
+    DWORD br = 0, information = 0;
+    long long phc = 0, phc_write = 0, base;
+    BOOL committed, armed, nine = TRUE, phase, guard, deviation, r2, r1, control;
+    const char *missing;
+    char why[800];
+    unsigned k;
+
+    if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &ver, sizeof(ver), &ver, sizeof(ver), &br, NULL) || br < sizeof(ver) ||
+        !(ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
+        verdict("INCONCLUSIVE", "COMMIT", index, id->device_id, "no Debug driver shown (GET_VERSION): nothing is committed or written");
+        verdict("INCONCLUSIVE", "GUARD", index, id->device_id, "no Debug driver shown (GET_VERSION): nothing is written");
+        m5_not_run("INCONCLUSIVE", index, id->device_id, "no Debug driver shown: not exercised (never PASS)");
+        return;
+    }
+    ZeroMemory(&qr, sizeof(qr));
+    ZeroMemory(&qj, sizeof(qj));
+    ZeroMemory(&qc, sizeof(qc));
+    ZeroMemory(&s, sizeof(s));
+    query(h, &q0);
+    if (!read_state(h, &s0) || s0.armed != AVB_TAS_STATE_CLEAN || !query_clean(&q0) || q0.q.net_luid != id->net_luid || q0.q.generation == 0 ||
+        q0.q.context_epoch == 0 || !read_phc(h, &phc)) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id, "no clean pre-state with a reported pair on the bound adapter, or no PHC: nothing is committed");
+        verdict("BLOCKED", "GUARD", index, id->device_id, "nothing was committed (see COMMIT): nothing is written");
+        m5_not_run("BLOCKED", index, id->device_id, "nothing was committed (see COMMIT): nothing was written");
+        return;
+    }
+    base = (phc + M5_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+    build_op(&op, id->net_luid, &q0.q, base, frame);
+    op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+    sent = op;
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &information);
+    committed = st == 0 && information == (DWORD)sizeof(op) && op.client_op_id == sent.client_op_id && op.net_luid == sent.net_luid &&
+                op.context_epoch == sent.context_epoch && op.expected_generation == sent.expected_generation &&
+                memcmp(&op.schedule, &sent.schedule, sizeof(op.schedule)) == 0;
+    op = sent;
+
+    /* The guard: its own query, apart from the oracle's reference. Reads only */
+    armed = read_state(h, &s) && state_matches(&s, base);
+    query(h, &qg);
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        want[k] = qg.q.regs.stqt[k];
+        want[4 + k] = qg.q.regs.endqt[k];
+    }
+    want[8] = qg.q.regs.qbvcyclet;
+    for (k = 0; k < M5_REGS; k++) {
+        reg[k] = 0;
+        reg_st[k] = committed ? m5_access(h, IOCTL_AVB_READ_REGISTER, offset[k], &reg[k]) : (LONG)AVB_NTSTATUS_UNAVAILABLE;
+        nine = nine && reg_st[k] == 0 && reg[k] == want[k];
+    }
+    deviated = (avb_u32)I226_ENDQT_SET(reg[7], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT, M5_END_NS);
+    phase = read_phc(h, &phc_write) && phc_write < base && base - phc_write >= M5_MARGIN_NS;
+    missing = !committed ? "this case's commit (one complete STATUS_SUCCESS reply)" :
+              (!armed ? "the driver record ARMED with the committed gate list" :
+              (!m5_mine(&qg, &op, id) ? "an observable reply of this adapter at this commit's epoch and generation, before BaseT" :
+              (qg.q.hw_mode != AVB_TAS_HWMODE_TSN || !m5_r1(&qg) || !m5_record(&qg, &qg, &op) ? "the initial state: TSN mode, PENDING, next NONE, RETAINED "
+               "with the committed schedule" :
+              (!nine ? "nine registers read through the bound handle equal to the query's own values" :
+              (I226_ENDQT_GET(reg[7], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT) != op.schedule.queue[3].end_ns ||
+               deviated == reg[7] ? "ENDQT3.END_TIME as committed and different from the deviation" :
+              (!phase ? "the PHC read at least 1.5 s before BaseT immediately before the write" : NULL))))));
+    guard = missing == NULL;
+    if (guard) {
+        g_m5_handle = h;
+        g_m5_offset = offset[7];
+        g_m5_raw = reg[7];
+        InterlockedExchange(&g_m5_state, 1);   /* owed from before the write is sent */
+        __try {
+            v = deviated;
+            wst = m5_access(h, IOCTL_AVB_WRITE_REGISTER, offset[7], &v);
+            bst = m5_access(h, IOCTL_AVB_READ_REGISTER, offset[7], &back);
+            query(h, &qr);   /* the oracle's reference: the deviation is there before it */
+            query(h, &qj);   /* the judged query */
+        } __finally {
+            restored = m5_restore();
+        }
+        query(h, &qc);       /* after the restoration */
+    }
+
+    /* Everything below only prints and judges */
+    printf("    [EVIDENCE] EXCEPTION (Q 2026-11-25, this case only): READ_REGISTER x9, WRITE_REGISTER x2 at the generated ENDQT3 offset; Debug driver flags=0x%04X\n",
+           ver.Flags);
+    print_status("before the commit", &q0);
+    sprintf_s(why, sizeof(why), "ACTIVATE op=0x%016llX base=%lld (PHC %lld) ntstatus=0x%08lX information=%lu, pair epoch %llu generation %llu -> %llu, record %d",
+              op.client_op_id, base, phc, (unsigned long)st, information, op.context_epoch, op.expected_generation, qg.q.generation, (int)s.armed);
+    verdict(committed ? "PASS" : "FAIL", "COMMIT", index, id->device_id, why);
+    print_status("guard", &qg);
+    for (k = 0; k < M5_REGS; k++) {
+        printf("    [EVIDENCE] guard %s%u offset 0x%05X: READ_REGISTER 0x%08lX value 0x%08X, query 0x%08X\n", k < 4 ? "STQT" : (k < 8 ? "ENDQT" : "QBVCYCLET"),
+               k < 4 ? k : (k < 8 ? k - 4 : 0), offset[k], (unsigned long)reg_st[k], reg[k], want[k]);
+    }
+    printf("    [EVIDENCE] PHC immediately before the write %lld, BaseT %lld\n", phc_write, base);
+    sprintf_s(why, sizeof(why), "%s%s", guard ? "every precondition measured on the bound handle" : "missing: ", guard ? "" : missing);
+    verdict(guard ? "PASS" : "INCONCLUSIVE", "GUARD", index, id->device_id, why);
+    if (!guard) {
+        m5_not_run("INCONCLUSIVE", index, id->device_id, "the guard did not hold (see GUARD): nothing was written");
+        return;
+    }
+    print_status("reference under the deviation", &qr);
+    print_status("judged under the deviation", &qj);
+    print_status("after the restoration", &qc);
+    sprintf_s(why, sizeof(why), "ENDQT3 offset 0x%05X raw before 0x%08X, deviation 0x%08X: write 0x%08lX; restoration write 0x%08lX, read 0x%08lX value 0x%08X%s",
+              g_m5_offset, g_m5_raw, deviated, (unsigned long)wst, (unsigned long)g_m5_write_st, (unsigned long)g_m5_read_st, g_m5_value,
+              restored == M5_RESTORE_VERIFIED ? ": the exact raw value" : (restored == M5_RESTORE_DIFFERS ? ": another value" : ": not read"));
+    verdict(m5_restore_tag(restored), "REG_RESTORE", index, id->device_id, why);
+
+    deviation = bst == 0 && back == deviated && m5_mine(&qr, &op, id) && m5_mine(&qj, &op, id) && qr.q.regs.endqt[3] == deviated &&
+                qj.q.regs.endqt[3] == deviated && m5_others_equal(&qr.q.regs, &qg.q.regs) && m5_others_equal(&qj.q.regs, &qg.q.regs);
+    sprintf_s(why, sizeof(why), "read back 0x%08lX value 0x%08X; ENDQT3 in the reference 0x%08X and in the judged query 0x%08X (required 0x%08X before both), other "
+              "compared registers %s, this commit's pair before BaseT: reference %d, judged %d", (unsigned long)bst, back, qr.q.regs.endqt[3],
+              qj.q.regs.endqt[3], deviated, m5_others_equal(&qr.q.regs, &qg.q.regs) && m5_others_equal(&qj.q.regs, &qg.q.regs) ? "unchanged" : "CHANGED",
+              m5_mine(&qr, &op, id), m5_mine(&qj, &op, id));
+    verdict(deviation ? "PASS" : "INCONCLUSIVE", "DEVIATION", index, id->device_id, why);
+    meta_line("GENERATION", index, id->device_id, &qg, &qj, 0, "two queries and a raw register write under the committed schedule");
+
+    /* R2: the driver's own answer to the real deviation, in both queries */
+    r2 = deviation && m5_r2(&qr) && m5_r2(&qj) && m5_record(&qr, &qg, &op) && m5_record(&qj, &qg, &op);
+    sprintf_s(why, sizeof(why), "required 6/0x8, next 7/0x1000, commit 4 with the committed schedule and bracket; reference %u/0x%X next %u/0x%X commit %u, judged "
+              "%u/0x%X next %u/0x%X commit %u, record and bracket kept %d/%d%s", qr.q.current_status, qr.q.current_reasons, qr.q.next_status,
+              qr.q.next_reasons, qr.q.current_commit.state, qj.q.current_status, qj.q.current_reasons, qj.q.next_status, qj.q.next_reasons,
+              qj.q.current_commit.state, m5_record(&qr, &qg, &op), m5_record(&qj, &qg, &op), deviation ? "" : "; the deviation is not established (see DEVIATION)");
+    verdict(!deviation ? "INCONCLUSIVE" : (r2 ? "PASS" : "FAIL"), "R2", index, id->device_id, why);
+
+    /* The --hold oracle on these real replies: a correct R2 answer is no positive control and no failure */
+    tas_status_control(query_valid(&qr), &qr.q, query_valid(&qj), &qj.q, &op, FALSE, TAS_STATUS_K8_VERIFIED, &c);
+    for (k = 0; k < 2; k++) {
+        cls = k == 0 ? tas_status_slot(AVB_TAS_ST_PENDING, query_valid(&qj), &qj.q, &c) : tas_status_next(query_valid(&qj), &qj.q, &c);
+        sprintf_s(why, sizeof(why), "oracle class %d (%s: %s), contradiction 0x%X; required: not judged, a measured contradiction (a correct R2 answer is no positive "
+                  "control and no failure)%s", (int)cls, tas_status_tag(cls), tas_status_class_name(cls), c.contradiction, r2 ? "" : "; R2 is not established");
+        verdict(!r2 ? "INCONCLUSIVE" : (cls == TAS_STATUS_CONTROL_LOST ? "PASS" : "FAIL"), k == 0 ? "ORACLE_SLOT" : "ORACLE_NEXT", index, id->device_id, why);
+    }
+
+    /* After the restoration: the driver's answer, then the oracle with the deviated reference */
+    control = restored == M5_RESTORE_VERIFIED && m5_mine(&qc, &op, id) && qc.q.regs.endqt[3] == qg.q.regs.endqt[3] && m5_others_equal(&qc.q.regs, &qg.q.regs);
+    r1 = control && m5_r1(&qc) && m5_record(&qc, &qg, &op);
+    sprintf_s(why, sizeof(why), "required 3/0x0, next 1/0x0, commit 2 with the committed schedule and bracket; observed %u/0x%X next %u/0x%X commit %u, ENDQT3 0x%08X%s",
+              qc.q.current_status, qc.q.current_reasons, qc.q.next_status, qc.q.next_reasons, qc.q.current_commit.state, qc.q.regs.endqt[3],
+              control ? "" : "; the restored state before BaseT is not established");
+    verdict(!control ? "INCONCLUSIVE" : (r1 ? "PASS" : "FAIL"), "CONTROL", index, id->device_id, why);
+    meta_line("GENERATION_RESTORED", index, id->device_id, &qj, &qc, 0, "the restoration of the register");
+    tas_status_control(query_valid(&qr), &qr.q, query_valid(&qc), &qc.q, &op, FALSE, TAS_STATUS_K8_VERIFIED, &c);
+    for (k = 0; k < 2; k++) {
+        cls = k == 0 ? tas_status_slot(AVB_TAS_ST_PENDING, query_valid(&qc), &qc.q, &c) : tas_status_next(query_valid(&qc), &qc.q, &c);
+        sprintf_s(why, sizeof(why), "oracle class %d (%s: %s), contradiction 0x%X, reference with the deviation; required: PASS, the current registers equal the committed "
+                  "schedule%s", (int)cls, tas_status_tag(cls), tas_status_class_name(cls), c.contradiction, r1 && r2 ? "" : "; R2 or CONTROL is not established");
+        verdict(!(r1 && r2) ? "INCONCLUSIVE" : (cls == TAS_STATUS_PASS ? "PASS" : "FAIL"), k == 0 ? "ORACLE_RESTORED_SLOT" : "ORACLE_RESTORED_NEXT", index,
+                id->device_id, why);
+    }
+#endif
+}
+
 /* Every case starts from its own state: nothing a previous case counted, captured or left pending is carried over. g_op_id alone
  * continues - client_op_id stays distinct within the process */
 static void reset_case_state(const TAS_ACT_CASE *c)
@@ -4328,6 +4655,9 @@ static int run_case(void)
             run_adapter(ids[i].index, &ids[i]);
             g_meta_case = 4;
             g_case = "TC-TASACT-META-004";
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 5;
+            g_case = "TC-TASACT-META-005";
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-META-001";
         } else {
