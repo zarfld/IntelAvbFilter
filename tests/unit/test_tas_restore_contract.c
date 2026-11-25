@@ -2533,10 +2533,17 @@ static void st_query(AVB_TAS_QUERY_HW_REQUEST *q, avb_u64 before, avb_u64 after,
     }
 }
 
-/* The committed request of st_query: pair (7, 1), so its commit is (7, 2); BaseT 5000 */
+/* The committed request of st_query: pair (7, 1), so its commit is (7, 2); BaseT 5000, cycle 1000, windows 200 to 400 */
 static void st_op(AVB_TAS_OP_REQUEST *op)
 {
+    unsigned i;
+
     ZeroMemory(op, sizeof(*op));
+    op->schedule.cycle_ns = 1000;
+    for (i = 0; i < AVB_TAS_QUEUES; i++) {
+        op->schedule.queue[i].start_ns = 200;
+        op->schedule.queue[i].end_ns = 400;
+    }
     op->context_epoch = 7;
     op->expected_generation = 1;
     op->schedule.base_time_ns = 5000;
@@ -2655,6 +2662,7 @@ static void test_71_hold_status(void)
     /* contradictions measured by the test */
     st_query(&q, 6000, 6100, A, 0);
     q.hw_mode = AVB_TAS_HWMODE_OFF;
+    q.regs.tqavctrl = 0;
     EXPECT_EQ("TSN mode off and INFERRED_ACTIVE", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
     q.current_status = AVB_TAS_ST_INCONSISTENT;
     q.current_reasons = AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
@@ -2865,6 +2873,10 @@ static void test_71_hold_status(void)
     ZeroMemory(&sent, sizeof(sent));
     sent.base_time_ns = 14000000000ULL;
     sent.cycle_ns = 1000000000u;
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {   /* the request the run printed: window=200..400 ms */
+        sent.queue[k].start_ns = 200000000u;
+        sent.queue[k].end_ns = 400000000u;
+    }
     ZeroMemory(&run, sizeof(run));
     run.schedule = sent;
     run.context_epoch = 1876755727363736502ULL;
@@ -2882,6 +2894,226 @@ static void test_71_hold_status(void)
 
     EXPECT_EQ("a failure outranks a missing measurement", tas_status_worst(TAS_STATUS_NOT_MEASURED, TAS_STATUS_WRONG), TAS_STATUS_WRONG);
     EXPECT_EQ("a missing measurement outranks a pass", tas_status_worst(TAS_STATUS_PASS, TAS_STATUS_NOT_PHASE), TAS_STATUS_NOT_PHASE);
+}
+
+/* TC-MOCK-071, the compared registers of a HOLD reply against the committed schedule (review follow-up of PR #522; test logic only): the
+ * registers of the query right after the commit prove no agreement with the schedule */
+static TAS_STATUS_CLASS st_next(const AVB_TAS_QUERY_HW_REQUEST *commit, const AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    TAS_STATUS_CONTROL c;
+    AVB_TAS_OP_REQUEST op;
+
+    st_op(&op);
+    tas_status_control(TRUE, commit, TRUE, q, &op, TRUE, FALSE, &c);
+    return tas_status_next(TRUE, q, &c);
+}
+
+/* The deviations of the compared fields; returns the reason each has. which: 0 to 3 STQT, 4 to 7 ENDQT, 8 cycle, 9 mode */
+#define ST_DEVIATIONS 10u
+static avb_u32 st_deviate(AVB_TAS_QUERY_HW_REQUEST *q, unsigned which)
+{
+    if (which < 4) {
+        q->regs.stqt[which] = 150;
+        return AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+    }
+    if (which < 8) {
+        q->regs.endqt[which - 4] = 450;
+        return AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+    }
+    if (which == 8) {
+        q->regs.qbvcyclet = 2000;
+        return AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
+    }
+    q->regs.tqavctrl = 0;
+    q->hw_mode = AVB_TAS_HWMODE_OFF;
+    return AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+}
+
+static void test_71_hold_match(void)
+{
+    const avb_u32 P = AVB_TAS_ST_PENDING, A = AVB_TAS_ST_INFERRED_ACTIVE, U = AVB_TAS_ST_UNKNOWN, I = AVB_TAS_ST_INCONSISTENT;
+    const avb_u32 LINK = AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED, UNATT = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    const avb_u32 OTHER = AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH;
+    AVB_TAS_QUERY_HW_REQUEST commit, q;
+    AVB_TAS_OP_REQUEST op;
+    TAS_STATUS_CONTROL c;
+    avb_u32 reason;
+    unsigned k;
+
+    printf("\n[TC-MOCK-071] #369 the compared registers against the committed schedule (test logic only)\n");
+
+    /* The ordinary control */
+    st_query(&commit, 1100, 1200, P, 0);
+    st_query(&q, 2000, 2100, P, 0);
+    EXPECT_EQ("every compared field as committed: PENDING", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_PASS);
+    EXPECT_EQ("... next NONE (R1)", st_next(&commit, &q), TAS_STATUS_PASS);
+    st_query(&q, 6000, 6100, U, LINK);
+    EXPECT_EQ("... past BaseT the K8 gap", st_slot_k8(A, &commit, &q, TRUE, FALSE), TAS_STATUS_K8_GAP);
+
+    for (k = 0; k < ST_DEVIATIONS; k++) {
+        /* wrong since the commit, unchanged */
+        st_query(&commit, 1100, 1200, P, 0);
+        (void)st_deviate(&commit, k);
+        st_query(&q, 2000, 2100, P, 0);
+        reason = st_deviate(&q, k);
+        EXPECT_EQ("a deviation since the commit: PENDING is claimed against it", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CLAIMED);
+        EXPECT_EQ("... next NONE as well", st_next(&commit, &q), TAS_STATUS_CLAIMED);
+        q.current_status = I;
+        q.current_reasons = reason;
+        q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+        q.next_status = U;
+        q.next_reasons = UNATT;
+        EXPECT_EQ("... the correct R2 answer is no positive control: not judged", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CONTROL_LOST);
+        EXPECT_EQ("... nor for the next slot", st_next(&commit, &q), TAS_STATUS_CONTROL_LOST);
+        q.current_reasons = reason | OTHER;
+        EXPECT_EQ("... with a further reason it stays that", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CONTROL_LOST);
+        q.current_reasons = OTHER;
+        EXPECT_EQ("... INCONSISTENT without the measured mismatch: wrong", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_WRONG);
+        q.current_reasons = AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
+        EXPECT_EQ("... with a mismatch that is none: wrong", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_WRONG);
+        q.current_status = U;
+        q.current_reasons = AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST;
+        EXPECT_EQ("... UNKNOWN although S2 precedes S3: wrong", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_WRONG);
+        q.next_reasons = 0;
+        EXPECT_EQ("... next UNKNOWN without its reason: wrong", st_next(&commit, &q), TAS_STATUS_WRONG);
+        st_query(&q, 6000, 6100, U, LINK);
+        (void)st_deviate(&q, k);
+        EXPECT_EQ("... past BaseT it is not the published K8 answer", st_slot_k8(A, &commit, &q, TRUE, FALSE), TAS_STATUS_WRONG);
+        st_query(&q, 6000, 6100, A, 0);
+        (void)st_deviate(&q, k);
+        EXPECT_EQ("... INFERRED_ACTIVE with K8 verified: claimed", st_slot(A, &commit, &q, TRUE), TAS_STATUS_CLAIMED);
+        EXPECT_EQ("... while K8 is not verified it is premature first", st_slot_k8(A, &commit, &q, TRUE, FALSE), TAS_STATUS_K8_PREMATURE);
+
+        /* it was there after the commit and is gone: the current comparison decides */
+        st_query(&q, 2000, 2100, P, 0);
+        EXPECT_EQ("a deviation that is gone: PENDING", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_PASS);
+        EXPECT_EQ("... next NONE", st_next(&commit, &q), TAS_STATUS_PASS);
+        q.current_status = I;
+        q.current_reasons = reason;
+        q.next_status = U;
+        q.next_reasons = UNATT;
+        EXPECT_EQ("... the R2 answer from before: wrong", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_WRONG);
+        EXPECT_EQ("... and its next slot", st_next(&commit, &q), TAS_STATUS_WRONG);
+
+        /* it arose after the commit */
+        st_query(&commit, 1100, 1200, P, 0);
+        st_query(&q, 2000, 2100, P, 0);
+        (void)st_deviate(&q, k);
+        EXPECT_EQ("a deviation since: PENDING claimed", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CLAIMED);
+        EXPECT_EQ("... next NONE claimed", st_next(&commit, &q), TAS_STATUS_CLAIMED);
+    }
+
+    /* Precedence over the comparison: S1, HARDWARE_VERIFIED, whose reply it is */
+    st_query(&commit, 1100, 1200, P, 0);
+    (void)st_deviate(&commit, 5);
+    st_query(&q, 2000, 2100, P, 0);
+    (void)st_deviate(&q, 5);
+    q.flags = AVB_TAS_FLAG_OP_IN_PROGRESS;
+    EXPECT_EQ("an operation runs: PENDING violates S1", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_S1);
+    EXPECT_EQ("... next NONE as well", st_next(&commit, &q), TAS_STATUS_S1);
+    q.current_status = q.next_status = U;
+    EXPECT_EQ("... UNKNOWN: not measured", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("... in the next slot too", st_next(&commit, &q), TAS_STATUS_NOT_MEASURED);
+    q.flags = 0;
+    q.snapshot_reasons = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED;
+    EXPECT_EQ("an unreconciled event, UNKNOWN: not judged, whatever the registers", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_UNRECONCILED);
+    EXPECT_EQ("... in the next slot too", st_next(&commit, &q), TAS_STATUS_UNRECONCILED);
+    q.next_status = AVB_TAS_ST_NONE;
+    EXPECT_EQ("... next NONE violates S1", st_next(&commit, &q), TAS_STATUS_S1);
+    q.snapshot_reasons = 0;
+    q.next_status = AVB_TAS_ST_HARDWARE_VERIFIED;
+    EXPECT_EQ("HARDWARE_VERIFIED under a deviation", st_next(&commit, &q), TAS_STATUS_HW_VERIFIED);
+    st_query(&q, 2000, 2100, P, 0);
+    (void)st_deviate(&q, 5);
+    q.generation = 3;
+    EXPECT_EQ("another generation: the deviation is not about this commit", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CONTROL_LOST);
+    EXPECT_EQ("... nor for the next slot", st_next(&commit, &q), TAS_STATUS_CONTROL_LOST);
+    q.generation = 2;
+    q.context_epoch = 8;
+    EXPECT_EQ("another context as well", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_CONTROL_LOST);
+    EXPECT_EQ("... and its next slot", st_next(&commit, &q), TAS_STATUS_CONTROL_LOST);
+    st_query(&q, 4990, 5000, P, 0);
+    (void)st_deviate(&q, 5);
+    EXPECT_EQ("outside the judged phase it stays not judged", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_NOT_PHASE);
+
+    /* Missing measurements */
+    st_op(&op);
+    st_query(&q, 2000, 2100, P, 0);
+    q.generation = 0;
+    tas_status_control(TRUE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("an unreported generation: PENDING not measured", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("... next NONE not measured", tas_status_next(TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    (void)st_deviate(&q, 5);
+    tas_status_control(TRUE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("... with a deviation: whose it is stays open", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    st_query(&q, 2000, 2100, P, 0);
+    tas_status_control(FALSE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("no query after the commit: PENDING not measured", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("... next NONE needs only its own reply", tas_status_next(TRUE, &q, &c), TAS_STATUS_PASS);
+    (void)st_deviate(&q, 5);
+    tas_status_control(FALSE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("... an observed deviation needs none either: PENDING claimed", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_CLAIMED);
+    EXPECT_EQ("... next NONE claimed", tas_status_next(TRUE, &q, &c), TAS_STATUS_CLAIMED);
+
+    /* A comparison that cannot be established */
+    st_query(&commit, 1100, 1200, P, 0);
+    st_query(&q, 2000, 2100, P, 0);
+    q.hw_mode = AVB_TAS_HWMODE_OFF;
+    EXPECT_EQ("hw_mode against the raw register: PENDING not measured", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_NOT_MEASURED);
+    EXPECT_EQ("... next NONE not measured", st_next(&commit, &q), TAS_STATUS_NOT_MEASURED);
+    for (k = 0; k < 3; k++) {
+        st_op(&op);
+        if (k == 0) { op.schedule.cycle_ns = 0x40000000u; }
+        if (k == 1) { op.schedule.queue[2].start_ns = 0x40000000u; }
+        if (k == 2) { op.schedule.cycle_ns = 0; }
+        st_query(&q, 2000, 2100, P, 0);
+        tas_status_control(TRUE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+        EXPECT_EQ("a schedule value outside its field, or none: PENDING not measured", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+        EXPECT_EQ("... next NONE not measured", tas_status_next(TRUE, &q, &c), TAS_STATUS_NOT_MEASURED);
+    }
+
+    /* Compared fields only */
+    st_query(&q, 2000, 2100, P, 0);
+    q.regs.stqt[0] |= 0x80000000u;
+    q.regs.qbvcyclet |= 0x80000000u;
+    q.regs.tqavctrl |= 0x80000000u;
+    q.regs.baset_h = 99;
+    q.regs.qbvcyclet_s = 7;
+    q.regs.txqctl[1] = 3;
+    EXPECT_EQ("bits outside the fields, BASET, shadow and TXQCTL are not compared", st_slot_k8(P, &commit, &q, TRUE, FALSE), TAS_STATUS_PASS);
+    EXPECT_EQ("... for the next slot either", st_next(&commit, &q), TAS_STATUS_PASS);
+
+    /* The 12:06 replies (I226 0x125B, driver 0D4498F7): their verdicts stay */
+    st_run_1003(&commit, 70386769367ULL, 70386786040ULL, 0x48);
+    commit.current_status = P; commit.current_reasons = 0;
+    commit.next_status = AVB_TAS_ST_NONE; commit.next_reasons = 0;
+    commit.context_epoch = 10335857420850035094ULL;
+    commit.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    commit.current_commit.phc_before_commit_ns = 70386436309ULL;
+    commit.current_commit.phc_after_commit_ns = 70386438793ULL;
+    ZeroMemory(&op, sizeof(op));
+    op.context_epoch = commit.context_epoch;
+    op.expected_generation = 1;
+    op.schedule.base_time_ns = 72000000000ULL;
+    op.schedule.cycle_ns = 1000000000u;
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        op.schedule.queue[k].start_ns = 200000000u;
+        op.schedule.queue[k].end_ns = 400000000u;
+        op.schedule.queue[k].max_frame_bytes = 1538;
+    }
+    commit.current = op.schedule;
+    q = commit;
+    q.phc_before_ns = 70401943317ULL; q.phc_after_ns = 70401960201ULL;
+    tas_status_control(TRUE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("12:06 replay STATUS_PENDING", tas_status_slot(P, TRUE, &q, &c), TAS_STATUS_PASS);
+    EXPECT_EQ("12:06 replay STATUS_NEXT", tas_status_next(TRUE, &q, &c), TAS_STATUS_PASS);
+    EXPECT_EQ("12:06 replay STATUS_RECORD", tas_status_record(TRUE, &q, &op.schedule, TRUE, 70384782636ULL, 70386769367ULL, &c), TAS_STATUS_PASS);
+    q.current_status = U; q.current_reasons = LINK;
+    q.phc_before_ns = 77404125540ULL; q.phc_after_ns = 77404145210ULL;
+    q.regs.baset_h = 0x4E;
+    tas_status_control(TRUE, &commit, TRUE, &q, &op, TRUE, FALSE, &c);
+    EXPECT_EQ("12:06 replay STATUS_ACTIVE: still the K8 gap, not accepted", tas_status_slot(A, TRUE, &q, &c), TAS_STATUS_K8_GAP);
+    EXPECT_EQ("12:06 replay STATUS_NEXT past BaseT", tas_status_next(TRUE, &q, &c), TAS_STATUS_PASS);
 }
 
 /* TC-MOCK-072: the status lines of --metadata-events after a PHC reseed under a retained schedule (#350; test logic only, no hardware
@@ -3783,6 +4015,7 @@ int main(void) {
     test_69_init_event();
     test_70_restart_end();
     test_71_hold_status();
+    test_71_hold_match();
     test_72_reseed_status();
     test_72_reseed_match();
     test_73_retained();

@@ -242,7 +242,8 @@
  *   STATUS_* (#369 only, for #350) the schedule status from IOCTL_AVB_TAS_QUERY_HW, judged by tas_status_* in
  *            tests/ioctl/tas_activate_eval.h (TC-MOCK-071) against the published prerequisites only (#350, #365 12.2, 12.4, 12.7). The
  *            test measures each prerequisite itself: the COMMITTED reply, the PHC bracket on the right side of the requested BaseT, a
- *            PHC not below its value after the commit, TSN mode, unchanged windows and cycle, the same context and generation, and that
+ *            PHC not below its value after the commit, TSN mode, windows and cycle as committed (the reply's own registers against the
+ *            schedule, tas_status_match; not against an earlier reading), the same context and generation, and that
  *            the driver counted no status, PnP, pause, restart, attach or detach event with an unchanged link (that observation only: no
  *            complete event capture, no #472 EVENT). BLOCKED without a commit; a prerequisite or reply not measured is INCONCLUSIVE; an
  *            observed wrong or missing driver answer is FAIL. Neither a register readback nor BaseT having passed is evidence of an
@@ -257,7 +258,10 @@
  *                     #365 12.4 never returns it: then it is FAIL, and UNKNOWN only for LINK_EVENTS_UNOBSERVED is the published answer,
  *                     reported as the observed gap (SKIP_NOT_IMPLEMENTED, nonpassing; 12.6: this part stays not GREEN). A lost commit or
  *                     any other answer is FAIL. EVENT_UNRECONCILED is INCONCLUSIVE: no published rule sets or clears it.
- *     STATUS_NEXT     both queries: next NONE, no reasons, no CYCLE_MISMATCH, next_commit NONE (12.7). QBVCYCLET_S is printed only.
+ *     STATUS_NEXT     both queries: next NONE, no reasons, no CYCLE_MISMATCH, next_commit NONE (12.7, R1). QBVCYCLET_S is printed only.
+ *                     Under a measured mismatch with the committed schedule (R2) PENDING, INFERRED_ACTIVE and next NONE are FAIL, the
+ *                     correct R2 answer is INCONCLUSIVE (no positive control), any other answer FAIL. A comparison that cannot be
+ *                     established is INCONCLUSIVE.
  *     STATUS_READONLY two queries in immediate succession, and across BaseT: generation and epoch unchanged.
  *   CLEANUP  the test's own NIC cycle ran and the adapter came back: primary cleanup, owned by this test.
  *   RESTORE  restoration as #361 states it (tas_act_restore in tests/ioctl/tas_activate_eval.h): restoration-set registers at
@@ -1616,11 +1620,13 @@ static void check_status(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQU
                        TAS_STATUS_K8_VERIFIED, &cp);
     tas_status_control(query_valid(commit), &commit->q, query_valid(&past), &past.q, op, none_counted,
                        TAS_STATUS_K8_VERIFIED, &ca);
-    printf("    [EVIDENCE] control since the query after the commit: before BaseT %s contradiction=0x%X, past BaseT %s contradiction=0x%X "
-           "(0x1 mode off, 0x2 windows or cycle changed, 0x4 PHC below, 0x8 context, 0x10 generation); this commit is epoch %llu "
+    printf("    [EVIDENCE] control of this commit: before BaseT %s contradiction=0x%X, past BaseT %s contradiction=0x%X "
+           "(0x1 mode off, 0x2 windows or cycle differ from the committed schedule, 0x4 PHC below, 0x8 context, 0x10 generation); this commit is epoch %llu "
            "generation %llu (request + 1), identified before BaseT %d, past it %d\n", cp.measured ? "measured" : "NOT measured",
            cp.contradiction, ca.measured ? "measured" : "NOT measured", ca.contradiction, op->context_epoch, op->expected_generation + 1,
            cp.identified, ca.identified);
+    printf("    [EVIDENCE] registers against the committed schedule: before BaseT %s mismatch=0x%X, past BaseT %s mismatch=0x%X (slot reason bits)\n",
+           cp.compared ? "compared" : "NOT compared", cp.mismatch, ca.compared ? "compared" : "NOT compared", ca.mismatch);
 
     outer = tas_status_observable(query_valid(race), &race->q) && tas_status_observable(query_valid(commit), &commit->q);
     if (outer) {
