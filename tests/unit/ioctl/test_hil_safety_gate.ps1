@@ -115,26 +115,12 @@ tc_check 'TEST-HILGATE-002-registry-values-valid-no-stale-keys' (($registry.Coun
     ("invalid: {0}; stale (not in any Hardware list or coverage-gap table): {1}" -f ($badClass -join ', '), ($stale -join ', '))
 
 # The suite lists are authoritative (Q 2026-10-22): safety is enforced at DISPATCH, never by keeping a test out of a
-# list.  Runner gate + hazard holds, both from the runner AST.
+# list.  Runner gate from the runner AST; there is no hazard-hold table (Q 2026-11-22: a hold in the infrastructure
+# violates the no-blocked-tests rule, #328 needs reproduction, not containment).
 foreach ($n in 'Get-AvbHilGateDecision', 'Get-AvbHilEffectiveGaps') {
     $f = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
     if ($f) { . ([scriptblock]::Create($f.Extent.Text)) }
 }
-$holds = @{}
-$hAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                       $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
-function Get-AstStringValue($Node) {   # string literal, or a variable assigned a string literal in the runner
-    $s = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
-    if ($s) { return $s.Value }
-    $v = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
-    if (-not $v) { return '' }
-    $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                        $x.Left.VariablePath.UserPath -eq $v.VariablePath.UserPath }, $true) | Select-Object -First 1
-    if (-not $a) { return '' }
-    $s = $a.Right.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
-    if ($s) { return $s.Value } else { return '' }
-}
-if ($hAst) { foreach ($kv in $hAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $holds[$kv.Item1.Value] = Get-AstStringValue $kv.Item2 } }
 function Get-Cls([string]$e) { $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }; if ($registry.ContainsKey($k)) { return $registry[$k] }; return '' }
 function Get-Gate([string]$e, [string]$Target, [string]$Halt = '') {
     $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }
@@ -182,23 +168,21 @@ tc_check 'TEST-HILGATE-099-ownership-halt-blocks-every-non-readonly-class-alike-
     ($null -ne $gateCmd -and $gateInputs.Count -eq 0 -and $ownBad.Count -eq 0) `
     ("attendance/authorization inputs: [{0}]; decided against the rule: {1}" -f ($gateInputs -join ','), ($ownBad -join '; '))
 
-# 081: #328 hazard annotations (Q 2026-11-03): an entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM keeps its
-#      #328 record in $HilHazardHolds and stays listed, but the record no longer prohibits dispatch - the runner never
-#      reads the table at dispatch, and the gate runs the entry whatever its target or attendance.
+# 081: TSN configuration entries (Q 2026-11-22, replacing the 2026-11-03 #328 hazard annotations): an entry whose
+#      source can issue SETUP_TAS/SETUP_FP/SETUP_PTM stays listed and is dispatched whatever its target or attendance,
+#      and the runner keeps no hazard-hold table at all - #328 must be reproduced by these entries, never contained.
 $tsnEntries = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_tsn_ioctl_handlers_um', 'test_tsn_ioctl_handlers')
 $holdBad = @()
 foreach ($e in $tsnEntries) {
-    if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hazard record"; continue }
     if ($hwKeys0 -notcontains $e) { $holdBad += "${e}: no longer listed" }
     foreach ($tgt in '', '0x125B') {
         $d = Get-Gate $e $tgt
         if ($d.Action -ne 'Run') { $holdBad += "${e}: target='$tgt' -> $($d.Action) $($d.Reason)" }
     }
 }
-$holdReads = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) |
-               Where-Object { -not ($_.Parent -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Parent.Left -eq $_) })
-if ($holdReads.Count -gt 0) { $holdBad += "runner reads `$HilHazardHolds at line(s) $(@($holdReads | ForEach-Object { $_.Extent.StartLineNumber }) -join ',')" }
-tc_check 'TEST-HILGATE-081-hazard-annotated-entries-keep-their-328-record-and-are-dispatched' ($holdBad.Count -eq 0) ($holdBad -join '; ')
+$holdVars = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -match '^(HilHazardHolds|Hold\d+\w*)$' }, $true))
+if ($holdVars.Count -gt 0) { $holdBad += "runner keeps a hazard-hold table: $(@($holdVars | ForEach-Object { '$' + $_.VariablePath.UserPath + ' line ' + $_.Extent.StartLineNumber }) -join ', ')" }
+tc_check 'TEST-HILGATE-081-tsn-configuration-entries-are-listed-and-dispatched-with-no-hazard-hold-table' ($holdBad.Count -eq 0) ($holdBad -join '; ')
 
 # 080: a listed entry is executed (or gate-blocked with its reason) - never ALSO reported as a NOT EXECUTED coverage gap.
 $effBad = @()
@@ -243,8 +227,8 @@ $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_
               HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
 # Lists are authoritative (Q 2026-10-22): each entry is either a declared gap or listed and dispatched.  Since the static
 # dispatch blocks were removed (Q 2026-11-03) nothing contains the TSN configuration entries at dispatch: they execute
-# unattended (actual gate decision, no target, GitHub Actions) and keep their #328 hazard record only as documentation
-# (081) - it is no containment and the runner does not observe TAS/FP/PTM restoration.  test_ptp_freq_complete (I226
+# unattended (actual gate decision, no target, GitHub Actions) with no hazard hold (081, Q 2026-11-22); the runner does
+# not observe TAS/FP/PTM restoration, the tests' own cleanup verdicts do.  test_ptp_freq_complete (I226
 # TIMINCA CLEANUP_FAILED 2026-10-20) is exact-target with TIMINCA among the runner-verified states, so a repeat is an
 # observed cleanup FAILED, never hidden.
 $notGap = @()
@@ -253,10 +237,10 @@ foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) {
     $isGap = ($null -ne $gapTables[$s] -and $gapTables[$s].Contains($e))
     $listed = (@($hwLists["${s}Tests"]) | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } }) -contains $e
     $dispatched = (Get-Gate $e '').Action -eq 'Run'
-    $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) -and $holds[$e] -match '#328' }
+    $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $true }   # listed and dispatched suffice (no hold, 081)
     if (-not ($isGap -or ($listed -and $dispatched -and $accounted))) { $notGap += "${s}: $e (gap=$isGap listed=$listed dispatched=$dispatched accounted=$accounted)" }
 } }
-tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-dispatched-with-hazard-record-or-observed-restoration' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
+tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-dispatched-phc-with-observed-restoration' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
 
 # Coverage restored (Q 2026-10-22: repair, do not exclude).  test_ptp_phc_stability without arguments runs only
 # UT-CORR-007/008 (main(): run_009 needs --case UT-CORR-009 or --allow-lifecycle, both runner-controlled); the
@@ -281,7 +265,8 @@ $hwKeys = @($hwEntries | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey
 $initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ -and $hwKeys -notcontains $_ })
 $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
 $expectInit = @('avb_comprehensive_test', 'avb_hw_state_test_um',   # registered 2026-10-29 (TEST-COMPLETE-001)
-                'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
+                'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_dev_lifecycle --init-contract',   # --init-contract: #313 amendment, #404 (2026-11-17)
+                'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
 # 118 (#458, Q 2026-11-19): execution exceptions apply at testcase level - only an identified case or mode that needs
 #      interaction or a long-duration lane stays out of automatic HIL, with its reason; nothing is inferred from a program
 #      name.  UT-CORR-009 (test_ptp_phc_lifecycle) and TC-LCY-328 (test_control_device_lifecycle) are standalone cases
@@ -375,12 +360,13 @@ function Get-StrippedSource([string]$bin, [bool]$keepStrings) {
     }
     return $code
 }
-$mutRx  = '\bIOCTL_AVB_(WRITE_REGISTER|SET_TIMESTAMP|SETUP_TAS|SETUP_FP|SETUP_PTM|MDIO_WRITE|SETUP_QAV|ADJUST_FREQUENCY|SET_HW_TIMESTAMPING|SET_RX_TIMESTAMP|SET_QUEUE_TIMESTAMP|SET_TARGET_TIME|PHC_OFFSET_ADJUST|SET_PORT_LATENCY|SET_LAUNCH_TIME|DISARM_TAS|RESET_STATISTICS|VLAN_ENABLE|VLAN_DISABLE|EEE_ENABLE|EEE_DISABLE|PFC_ENABLE|SRP_REGISTER_STREAM|SRP_DEREGISTER_STREAM)\b|\b(AvbWriteReg|AvbWriteRegVerified|AvbTestAdjustFrequency|AvbTestI210RestoreVerified|AvbTestI210RestoreVerifiedAs|AvbTestI210ExpectRejectedUnchanged)\s*\('
+$mutRx  = '\bIOCTL_AVB_(WRITE_REGISTER|SET_TIMESTAMP|SETUP_TAS|SETUP_FP|SETUP_PTM|MDIO_WRITE|SETUP_QAV|ADJUST_FREQUENCY|SET_HW_TIMESTAMPING|SET_RX_TIMESTAMP|SET_QUEUE_TIMESTAMP|SET_TARGET_TIME|PHC_OFFSET_ADJUST|SET_PORT_LATENCY|SET_LAUNCH_TIME|DISARM_TAS|TAS_ACTIVATE|RESET_STATISTICS|VLAN_ENABLE|VLAN_DISABLE|EEE_ENABLE|EEE_DISABLE|PFC_ENABLE|SRP_REGISTER_STREAM|SRP_DEREGISTER_STREAM)\b|\b(AvbWriteReg|AvbWriteRegVerified|AvbTestAdjustFrequency|AvbTestI210RestoreVerified|AvbTestI210RestoreVerifiedAs|AvbTestI210ExpectRejectedUnchanged)\s*\('
 $nicRx  = 'CM_Disable_DevNode|CM_Enable_DevNode|CM_Reenumerate_DevNode|SetupDiCallClassInstaller|DIF_PROPERTYCHANGE|SetSuspendState|ControlService|\bdevcon\b|\bpnputil\b|Disable-NetAdapter|Enable-NetAdapter|Restart-NetAdapter'
 # Documented exceptions (each states why the hit is not executed by the registered entry).
 $roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case'
                     'test_ioctl_routing' = 'IOCTL_AVB_INIT_DEVICE only as a case label of GetIoctlName(); never passed to DeviceIoControl' }
-$nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
+$nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message; CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault and --init-concurrent (Unsafe entries), which the default run does not execute'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
+                    'test_dev_lifecycle --init-contract' = 'devcon appears only in a SKIP message of the default run and CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault and --init-concurrent; --init-contract executes neither'
                     'test_ptp_phc_stability' = 'ControlService/system only in UT-CORR-009 (--case UT-CORR-009 / --allow-lifecycle)'
                     'test_ptp_phc_stability --case UT-CORR-005' = 'UT-CORR-009 not selected'; 'test_ptp_phc_stability --case UT-CORR-006' = 'UT-CORR-009 not selected' }
 
@@ -419,15 +405,18 @@ tc_check 'TEST-HILGATE-005-target-aware-entries-select-the-exact-target' ($regis
 tc_check 'TEST-HILGATE-006-readonly-entries-contain-no-mutating-ioctl' ($registry.Count -gt 0 -and $bad006.Count -eq 0) ("mutating code in ReadOnly: {0}" -f ($bad006 -join ', '))
 tc_check 'TEST-HILGATE-007-init-entries-only-init' ($registry.Count -gt 0 -and $bad007.Count -eq 0) ("Init misclassified: {0}" -f ($bad007 -join ', '))
 tc_check 'TEST-HILGATE-008-mutating-entries-really-mutate' ($registry.Count -gt 0 -and $bad008.Count -eq 0) ("Mutating without mutating code: {0}" -f ($bad008 -join ', '))
-# 093: the #328 hold derived from the source, not from a fixed name list (081): every classified entry whose
-#      program can issue SETUP_TAS / SETUP_FP / SETUP_PTM carries the #328 hold, so a newly registered TSN
-#      configuration program cannot be dispatched before the TAS/FP restore defect is hardware-verified fixed.
-$tsnNoHold = @(foreach ($k in @($registry.Keys)) {
+# 093: derived from the source, not from a fixed name list (081), Q 2026-11-22: every classified entry whose program
+#      can issue SETUP_TAS / SETUP_FP / SETUP_PTM is dispatched by the gate (no target) - no hold, no block, so a newly
+#      registered TSN configuration program executes and reproduces #328 instead of hiding it.
+$tsnNotRun = @(foreach ($k in @($registry.Keys)) {
     if ($roExceptions.ContainsKey($k)) { continue }   # documented: the codes are data, never passed to DeviceIoControl
     $c = Get-StrippedSource (($k -split '\s+', 2)[0]) $false
-    if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b') -and -not ($holds.ContainsKey($k) -and $holds[$k] -match '#328')) { $k }
+    if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b')) {
+        $d = Get-AvbHilGateDecision -Entry $k -Class $registry[$k] -Target '' -Halt ''
+        if ($d.Action -ne 'Run') { "$k -> $($d.Action) $($d.Reason)" }
+    }
 })
-tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held' ($tsnNoHold.Count -eq 0) ("SETUP_TAS/FP/PTM in source without a #328 hold: {0}" -f ($tsnNoHold -join ', '))
+tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-dispatched-without-hold' ($tsnNotRun.Count -eq 0) ("SETUP_TAS/FP/PTM in source but not dispatched: {0}" -f ($tsnNotRun -join ', '))
 # 095: this test's own per-test timeout (Q 2026-10-29: test-specific, measured budget, no issue-level requirement; 750 s
 #      since #458 round 2: 484 s standalone + 48 %)
 #      is selected for this entry only - every other Unit entry keeps the suite timeout and the global Unit default
@@ -437,9 +426,11 @@ tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held'
 $toBad = @()
 $toAsg = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilTestTimeoutSeconds' }, $true) | Select-Object -First 1
 $toFn  = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbTestTimeoutSeconds' }, $true)
-if (-not $toAsg -or -not $toFn) { $toBad += 'timeout table or Get-AvbTestTimeoutSeconds missing' }
+$paAsg = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilTestTimeoutPerAdapter' }, $true) | Select-Object -First 1
+if (-not $toAsg -or -not $toFn -or -not $paAsg) { $toBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
 else {
-    $toCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" +
+    $toCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" +
+        '$HilTestTimeoutPerAdapter = ' + $paAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1" -SuiteSeconds 60' + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_artifact_completeness.ps1" -SuiteSeconds 60' + "`n" +
         # #493 / PR #494: the deployment-orchestration test's own measured budget, and a larger suite timeout never lowered.
@@ -452,8 +443,8 @@ else {
     if ($toVals.Count -ne 5 -or [int]$toVals[2] -ne 180) { $toBad += "test_ci_driver_deploy.ps1 selects $($toVals[2]) s with the 60 s Unit default, expected 180 s" }
     if ($toVals.Count -ne 5 -or [int]$toVals[3] -ne 300) { $toBad += "a 300 s suite timeout was lowered to $($toVals[3]) s for test_ci_driver_deploy.ps1" }
     if ($toVals.Count -ne 5 -or [int]$toVals[4] -ne 900) { $toBad += "a 900 s suite timeout was lowered to $($toVals[4]) s for test_hil_safety_gate.ps1" }
-    # Every other master budget is unchanged and nothing is added or removed silently: complete table snapshot
-    # (master 2d8a06e plus the #493 deployment-test entry).
+    # Every other budget is unchanged and nothing is added or removed silently: snapshots of BOTH tables
+    # (integration inventory of feat/357-tas-activate-master b56d943 plus the #494 entry).
     $toWant = [ordered]@{
         'test_tas_isolated_arm' = 480; 'test_tas_isolated_arm --armed-period-ms 200' = 480; 'test_tas_isolated_arm --stall-probe 64' = 480
         'test_tas_isolated_arm --stall-probe 512' = 480; 'test_tas_isolated_arm --stall-probe 1400' = 480; 'test_atdecc_aen_protocol' = 420
@@ -463,11 +454,181 @@ else {
     foreach ($kv in @($toAsg.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs)) { $toHave[[string]$kv.Item1.Value] = $kv.Item2.Extent.Text }
     foreach ($k in $toWant.Keys) { if (-not $toHave.Contains($k)) { $toBad += "table entry '$k' missing" } elseif ([string]$toHave[$k] -ne [string]$toWant[$k]) { $toBad += "table entry '$k' = $($toHave[$k]) s, expected $($toWant[$k]) s" } }
     foreach ($k in $toHave.Keys) { if (-not $toWant.Contains($k)) { $toBad += "unexpected table entry '$k' = $($toHave[$k]) s" } }
-    # master has only HilTestTimeoutSeconds; its per-adapter feature-branch table is not part of this backport.
+    $paWant = [ordered]@{
+        'test_tas_activate --hold' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'; 'test_tas_activate --pass' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'
+        'test_tas_activate --fault' = '@{ Seconds = 980; PerOtherAdapterSeconds = 5 }'; 'test_tas_activate --fault-versioned' = '@{ Seconds = 1960; PerOtherAdapterSeconds = 10 }'
+        'test_tas_query_clean' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --hw-verified' = '@{ Seconds = 560; MaxAdapters = 8 }'
+        'test_tas_query_clean --tiers-unbound' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --invalid' = '@{ Seconds = 935; PerOtherAdapterSeconds = 335 }'
+        'test_tas_query_clean --restore' = '@{ Seconds = 560; MaxAdapters = 8 }'; 'test_tas_query_clean --link-speed' = '@{ Seconds = 560 }'
+        'test_dev_lifecycle --init-retry-fault' = '@{ Seconds = 1220 }'; 'test_dev_lifecycle --init-concurrent' = '@{ Seconds = 1130 }'
+    }
+    $paHave = [ordered]@{}
+    $paTop = $paAsg.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    foreach ($kv in @($paTop.KeyValuePairs)) { $paHave[[string]$kv.Item1.Value] = (($kv.Item2.Extent.Text -replace '\s+', ' ').Trim()) }
+    foreach ($k in $paWant.Keys) { if (-not $paHave.Contains($k)) { $toBad += "per-adapter entry '$k' missing" } elseif ([string]$paHave[$k] -ne [string]$paWant[$k]) { $toBad += "per-adapter entry '$k' = $($paHave[$k]), expected $($paWant[$k])" } }
+    foreach ($k in $paHave.Keys) { if (-not $paWant.Contains($k)) { $toBad += "unexpected per-adapter entry '$k' = $($paHave[$k])" } }
 }
 $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestTimeoutSeconds -eq 0' }, $true)
 if (-not $toDef -or $toDef.Extent.Text -notmatch '"Unit"\s*\{\s*60\s*\}') { $toBad += 'global Unit default is no longer 60 s' }
 tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count -eq 0) ($toBad -join '; ')
+# 098: PR #397 R14.  test_tas_activate runs every adapter it enumerates in one process (per TAS adapter: 706 s of its own
+#      bounds with the #369 setup recovery, budget 920 s; PR #481: 752 s, budget 980 s, the send bound now covers the largest admitted lead).
+#      Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
+#      plus (#369 amendment) 5 s per other enumerated adapter inside each adapter run for the observer trial: n x 980 + n x (n - 1) x 5 s,
+#      uncapped (no fixed inventory any more; the text below about the test's own limit is superseded for this entry),
+#      at most the test's own adapter limit (ARRAYSIZE(ids) in its source), that limit when nothing was observed; never a
+#      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
+#      the dispatch-site wiring is a static source check.
+#      #366: test_tas_query_clean is the fourth per-adapter entry (per TAS adapter: 438.5 s of its own bounds, budget 560 s);
+#      #381: test_tas_query_clean --hw-verified the fifth (about 390 s, same budget and inventory);
+#      #367: test_tas_query_clean --tiers-unbound the sixth (at most 438.5 s, same budget and inventory).
+#      #368: test_tas_query_clean --invalid the seventh (amendment 2026-11-18 and PR #479 review: 935 s per adapter plus 335 s per
+#      other enumerated adapter inside each adapter run, n x 935 + n x (n - 1) x 335 s). It has no
+#      inventory limit: the executable runs every TAS adapter, and its budget scales with the enumerated count, uncapped.
+#      #377: test_tas_query_clean --restore the eighth (about 440 s, same budget and inventory).
+#      #472: test_tas_query_clean --link-speed (about 330 s per adapter, budget 560 s). It has no inventory limit (#472 review
+#      r4619159471): the executable runs every TAS adapter, and its budget scales with the enumerated count, uncapped.
+#      #412: test_dev_lifecycle --init-retry-fault the ninth (per adapter: 960 s of its own bounds, budget 1220 s). It has no
+#      inventory limit (PR #462 review): it runs every validated identity, and its budget scales with the enumerated count, uncapped.
+#      #313: test_dev_lifecycle --init-concurrent the tenth (per adapter: 887 s of its own bounds, budget 1130 s), likewise uncapped.
+#      Its limit is its supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also
+#      caps the TAS adapters that process runs, so the budget always covers them.
+$paBad = @()
+$tasSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_activate.c'))
+# #369 amendment: no fixed inventory (identities allocated from the driver's count) and no observer chosen by adapter model
+if ($tasSrc -match '\bAVB_ADAPTER_IDENTITY_REQUEST\s+ids\s*\[\s*\d+\s*\]') { $paBad += 'tests/hardware/test_tas_activate.c still has a fixed adapter array ids[N]' }
+if ($tasSrc -match '\bINTEL_DEV_I210_AT\b') { $paBad += 'tests/hardware/test_tas_activate.c still chooses its wire observer by adapter model' }
+$qcSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_query_clean.c'))
+$qcMax = [regex]::Match($qcSrc, '(?m)^#define\s+TAS_QUERY_CLEAN_MAX_ADAPTERS\s+(\d+)\s*$')
+if (-not $qcMax.Success) { $paBad += 'supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS not found in tests/hardware/test_tas_query_clean.c' }
+elseif ($qcSrc -notmatch 'if\s*\(\s*g_link_mode\s*\|\|\s*g_invalid_mode\s*\|\|\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*\{\s*run_adapter\(') { $paBad += 'test_tas_query_clean.c does not cap the TAS adapters of its other modes at TAS_QUERY_CLEAN_MAX_ADAPTERS while running every TAS adapter for --link-speed (#472) and --invalid (#368)' }
+$irfSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\test_ioctl_dev_lifecycle.c'))
+if ($irfSrc -match '\bINIT_RETRY_FAULT_MAX_ADAPTERS\b') { $paBad += 'tests/ioctl/test_ioctl_dev_lifecycle.c still has a fixed --init-retry-fault inventory limit' }
+if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*irf_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-retry-fault does not run every validated identity' }
+if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*icc_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-concurrent does not run every validated identity' }
+if (-not $toAsg -or -not $toFn -or -not $paAsg) { $paBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
+if ($paBad.Count -eq 0) {
+    $paCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" +
+        '$HilTestTimeoutPerAdapter = ' + $paAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" + @'
+$o = [ordered]@{ Keys = (@($HilTestTimeoutPerAdapter.Keys) -join '|'); Plain = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_activate').Count }
+foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
+    foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
+    $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
+    $o["$e@suite1000"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 1000 -AdapterCount 1
+    $o["$e@hasLimit"] = $HilTestTimeoutPerAdapter[$e].Contains('MaxAdapters')
+    $o["$e@perOther"] = [int]$HilTestTimeoutPerAdapter[$e].PerOtherAdapterSeconds
+}
+$fv = 'test_tas_activate --fault-versioned'   # #482 (TEST-HILGATE-119); guarded: an unregistered entry must not abort this block
+foreach ($n in -1, 0, 1, 2, 3, 8) { $o["fv@$n"] = Get-AvbTestTimeoutSeconds -Entry $fv -SuiteSeconds 60 -AdapterCount $n }
+$o['fv@registered'] = $HilTestTimeoutPerAdapter.Contains($fv)
+$o['fv@hasLimit'] = $(if ($HilTestTimeoutPerAdapter.Contains($fv)) { $HilTestTimeoutPerAdapter[$fv].Contains('MaxAdapters') } else { $false })
+$o['fv@perOther'] = $(if ($HilTestTimeoutPerAdapter.Contains($fv)) { [int]$HilTestTimeoutPerAdapter[$fv].PerOtherAdapterSeconds } else { -1 })
+$o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
+$o['PlainRetry'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_dev_lifecycle').Count
+foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["irf@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 60 -AdapterCount $n }
+$o['irf@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 600 -AdapterCount 1
+$o['irf@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-retry-fault'].Contains('MaxAdapters')
+foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["icc@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-concurrent' -SuiteSeconds 60 -AdapterCount $n }
+$o['icc@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-concurrent'].Contains('MaxAdapters')
+$o['lifecycle@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle' -SuiteSeconds 300 -AdapterCount 9
+foreach ($n in -1, 0, 1, 2, 3, 8, 9, 20) { $o["ls@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --link-speed' -SuiteSeconds 60 -AdapterCount $n }
+$o['ls@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --link-speed' -SuiteSeconds 600 -AdapterCount 1
+$o['ls@hasLimit'] = $HilTestTimeoutPerAdapter['test_tas_query_clean --link-speed'].Contains('MaxAdapters')
+foreach ($n in -1, 0, 1, 2, 3, 8, 9, 20) { $o["inv@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 60 -AdapterCount $n }
+$o['inv@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 600 -AdapterCount 1
+$o['inv@suite1000'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 1000 -AdapterCount 1
+$o['inv@suite2000'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 2000 -AdapterCount 1
+$o['inv@hasLimit'] = $HilTestTimeoutPerAdapter['test_tas_query_clean --invalid'].Contains('MaxAdapters')
+$o['inv@perOther'] = [int]$HilTestTimeoutPerAdapter['test_tas_query_clean --invalid'].PerOtherAdapterSeconds
+foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --restore') {
+    foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
+    $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
+    $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
+}
+$o['atdecc@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_atdecc_aen_protocol' -SuiteSeconds 60 -AdapterCount 9
+$o['gate@9'] = Get-AvbTestTimeoutSeconds -Entry 'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' -SuiteSeconds 60 -AdapterCount 9
+$o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -SuiteSeconds 300 -AdapterCount 9
+$o
+'@))
+    $pa = & $paCheck
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_activate --fault-versioned|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_tas_query_clean --link-speed|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the four test_tas_activate entries (--fault-versioned: TEST-HILGATE-119), the six test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
+    if ($pa['icc@hasLimit']) { $paBad += 'test_dev_lifecycle --init-concurrent declares MaxAdapters; it has no inventory limit' }
+    $cwant = [ordered]@{ '1' = 1130; '2' = 2260; '3' = 3390; '8' = 9040; '20' = 22600; '0' = 1130; '-1' = 1130 }   # uncapped; unknown (-1) = one adapter
+    foreach ($n in $cwant.Keys) { if ([int]$pa["icc@$n"] -ne [int]$cwant[$n]) { $paBad += "test_dev_lifecycle --init-concurrent with $n enumerated adapter(s): $($pa["icc@$n"]) s, expected $($cwant[$n]) s" } }
+    if ($pa.PlainRetry -ne 0) { $paBad += 'a test_dev_lifecycle entry has a fixed timeout' }
+    if ($pa['irf@hasLimit']) { $paBad += 'test_dev_lifecycle --init-retry-fault declares MaxAdapters; it has no inventory limit' }
+    $iwant = [ordered]@{ '1' = 1220; '2' = 2440; '3' = 3660; '8' = 9760; '20' = 24400; '0' = 1220; '-1' = 1220 }   # uncapped; unknown (-1) = one adapter
+    foreach ($n in $iwant.Keys) { if ([int]$pa["irf@$n"] -ne [int]$iwant[$n]) { $paBad += "test_dev_lifecycle --init-retry-fault with $n enumerated adapter(s): $($pa["irf@$n"]) s, expected $($iwant[$n]) s" } }
+    if ([int]$pa['irf@suite600'] -ne 1220) { $paBad += "test_dev_lifecycle --init-retry-fault with one adapter under a 600 s suite: $($pa['irf@suite600']) s, expected its 1220 s budget" }
+    if ([int]$pa['lifecycle@9'] -ne 300) { $paBad += "plain test_dev_lifecycle depends on the adapter count ($($pa['lifecycle@9']) s)" }
+    $qlim = [int]$qcMax.Groups[1].Value
+    if ($pa.PlainQuery -ne 0) { $paBad += 'test_tas_query_clean has a fixed one-adapter timeout' }
+    $qwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 560 * [Math]::Min(8, $qlim); '20' = 560 * $qlim; '0' = 560; '-1' = 560 * $qlim }
+    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --restore') {   # #366, #381, #367, #377: one process, one inventory
+        if ($pa["$e@limit"] -ne $qlim) { $paBad += "$e adapter limit $($pa["$e@limit"]), its supported inventory is $qlim" }
+        foreach ($n in $qwant.Keys) { if ([int]$pa["$e@$n"] -ne [int]$qwant[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($qwant[$n]) s" } }
+        if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
+    }
+    # #368 amendment: --invalid runs every TAS adapter (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap in its dispatch), and inside each adapter
+    # run it tries, observes and if needed recovers every other adapter (PR #479 review): budget n x 935 + n x (n - 1) x 335 s for n
+    # enumerated adapters, no limit;
+    # enumerated count, uncapped, above eight included; unknown (-1) and 0 are one adapter; the suite timeout is never lowered
+    if ($pa['inv@hasLimit']) { $paBad += 'test_tas_query_clean --invalid declares MaxAdapters; it has no inventory limit' }
+    if ($pa['inv@perOther'] -ne 335) { $paBad += "test_tas_query_clean --invalid PerOtherAdapterSeconds $($pa['inv@perOther']), expected 335" }
+    $iwantq = [ordered]@{ '1' = 935; '2' = 2540; '3' = 4815; '8' = 26240; '9' = 32535; '20' = 146000; '0' = 935; '-1' = 935 }
+    foreach ($n in $iwantq.Keys) { if ([int]$pa["inv@$n"] -ne [int]$iwantq[$n]) { $paBad += "test_tas_query_clean --invalid with $n enumerated adapter(s): $($pa["inv@$n"]) s, expected $($iwantq[$n]) s" } }
+    if ([int]$pa['inv@suite600'] -ne 935) { $paBad += "test_tas_query_clean --invalid with one adapter under a 600 s suite: $($pa['inv@suite600']) s, expected Max(600, 935) = 935 s" }
+    if ([int]$pa['inv@suite1000'] -ne 1000) { $paBad += "test_tas_query_clean --invalid with one adapter under a 1000 s suite: $($pa['inv@suite1000']) s, expected Max(1000, 935) = 1000 s (the suite timeout is never lowered)" }
+    if ([int]$pa['inv@suite2000'] -ne 2000) { $paBad += "test_tas_query_clean --invalid with one adapter under a 2000 s suite: $($pa['inv@suite2000']) s, expected Max(2000, 935) = 2000 s" }
+    # #472: --link-speed runs every TAS adapter (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap in its dispatch), so its budget is 560 s times
+    # the enumerated count, uncapped, above eight included; unknown (-1) and 0 are one adapter, the runner's rule for uncapped entries
+    if ($pa['ls@hasLimit']) { $paBad += 'test_tas_query_clean --link-speed declares MaxAdapters; it has no inventory limit' }
+    $lwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 4480; '9' = 5040; '20' = 11200; '0' = 560; '-1' = 560 }
+    foreach ($n in $lwant.Keys) { if ([int]$pa["ls@$n"] -ne [int]$lwant[$n]) { $paBad += "test_tas_query_clean --link-speed with $n enumerated adapter(s): $($pa["ls@$n"]) s, expected $($lwant[$n]) s" } }
+    if ([int]$pa['ls@suite600'] -ne 600) { $paBad += "test_tas_query_clean --link-speed lowers the 600 s suite timeout to $($pa['ls@suite600']) s" }
+    if ($pa.Plain -ne 0) { $paBad += 'test_tas_activate still has a fixed one-adapter timeout' }
+    foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
+        # #369 amendment: uncapped, n x 980 + n x (n - 1) x 5 s (an observer trial per other enumerated adapter)
+        if ($pa["$e@hasLimit"]) { $paBad += "$e declares MaxAdapters; it has no inventory limit" }
+        if ($pa["$e@perOther"] -ne 5) { $paBad += "$e PerOtherAdapterSeconds $($pa["$e@perOther"]), expected 5" }
+        $want = [ordered]@{ '1' = 980; '2' = 1970; '3' = 2970; '8' = 8120; '20' = 21500; '0' = 980; '-1' = 980 }
+        foreach ($n in $want.Keys) { if ([int]$pa["$e@$n"] -ne [int]$want[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($want[$n]) s" } }
+        # One adapter: the larger of the suite timeout and the 980 s budget, exactly. Below the budget the budget wins
+        # (Max(600, 980) = 980); above it the suite timeout wins (Max(1000, 980) = 1000) and is never lowered
+        if ([int]$pa["$e@suite600"] -ne 980) { $paBad += "$e with one adapter under a 600 s suite: $($pa["$e@suite600"]) s, expected Max(600, 980) = 980 s" }
+        if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 980) = 1000 s (the suite timeout is never lowered)" }
+    }
+    if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
+    if ([int]$pa['gate@9'] -ne 750) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
+    if ([int]$pa['other@9'] -ne 300) { $paBad += "an unlisted entry depends on the adapter count ($($pa['other@9']) s)" }
+    $runnerText = [System.IO.File]::ReadAllText($RunCIPath)
+    if ($runnerText -notmatch '\$enumeratedAdapters\s*=\s*if\s*\(\s*\$script:HilBaseline\s+-and\s+\$script:HilBaseline\.ClockOk\s*\)\s*\{\s*@\(\$script:HilBaseline\.Clock\)\.Count\s*\}\s*else\s*\{\s*-1\s*\}' -or
+        $runnerText -notmatch 'Get-AvbTestTimeoutSeconds\s+-Entry\s+\$TestName\s+-SuiteSeconds\s+\$TestTimeoutSeconds\s+-AdapterCount\s+\$enumeratedAdapters') {
+        $paBad += 'dispatch does not pass the enumerated adapter count of the latest observed state (static check)'
+    }
+}
+tc_check 'TEST-HILGATE-098-tas-activate-timeout-scales-with-enumerated-adapters' ($paBad.Count -eq 0) ($paBad -join '; ')
+# 119 (#482): test_tas_activate --fault-versioned runs F1 then F2 on every TAS adapter, each a complete run with the --fault
+#      bounds (980 s) and its own observer trial per other enumerated adapter (5 s): n x 1960 + n x (n - 1) x 10 s, uncapped.
+#      Unsafe; listed in an automatic hardware suite - no identified interaction or long-duration requirement (#458, testcase-
+#      level exceptions); the legacy function-71 --fault stays registered and executable until the producer's atomic cutover.
+$fvBad = @()
+$fvE = 'test_tas_activate --fault-versioned'
+if ($registry[$fvE] -ne 'Unsafe') { $fvBad += "$fvE classified '$($registry[$fvE])', expected Unsafe (TAS_ACTIVATE plus the owned NIC cycle)" }
+if ($registry['test_tas_activate --fault'] -ne 'Unsafe') { $fvBad += 'the legacy test_tas_activate --fault is no longer registered Unsafe (kept until the cutover)' }
+$fvListed = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) } | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+if ($fvListed -notcontains $fvE) { $fvBad += "$fvE is not listed in an automatic hardware suite" }
+if (@($gapTables.Values | Where-Object { $null -ne $_ -and $_.Contains($fvE) }).Count -gt 0) { $fvBad += "$fvE is a program-level coverage gap" }
+$fvPa = Get-Variable -Name pa -ValueOnly -ErrorAction SilentlyContinue
+if ($null -eq $fvPa) { $fvBad += 'per-adapter budgets not computed (see TEST-HILGATE-098)' }
+else {
+    if (-not $fvPa['fv@registered']) { $fvBad += "$fvE has no per-adapter budget" }
+    if ($fvPa['fv@hasLimit']) { $fvBad += "$fvE declares MaxAdapters; it has no inventory limit" }
+    if ($fvPa['fv@perOther'] -ne 10) { $fvBad += "$fvE PerOtherAdapterSeconds $($fvPa['fv@perOther']), expected 10 (two observer trials)" }
+    $fvWant = [ordered]@{ '1' = 1960; '2' = 3940; '3' = 5940; '8' = 16240; '0' = 1960; '-1' = 1960 }
+    foreach ($n in $fvWant.Keys) { if ([int]$fvPa["fv@$n"] -ne [int]$fvWant[$n]) { $fvBad += "$fvE with $n enumerated adapter(s): $($fvPa["fv@$n"]) s, expected $($fvWant[$n]) s" } }
+}
+tc_check 'TEST-HILGATE-119-fault-versioned-registered-unsafe-automatic-budgeted-per-adapter-legacy-fault-kept' ($fvBad.Count -eq 0) ($fvBad -join '; ')
 tc_check 'TEST-HILGATE-009-nic-admin-only-in-unsafe-entries' ($registry.Count -gt 0 -and $bad009.Count -eq 0) ("NIC/driver administration outside Unsafe: {0}" -f ($bad009 -join ', '))
 
 $commonC = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\common\avb_test_common.c'))

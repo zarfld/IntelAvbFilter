@@ -126,7 +126,7 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;.;</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib;ksecdd.lib</AdditionalDependencies>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
@@ -146,7 +146,7 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;.;</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib;ksecdd.lib</AdditionalDependencies>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
@@ -166,7 +166,7 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;.;</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib;ksecdd.lib</AdditionalDependencies>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
@@ -186,7 +186,7 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);..;.;</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);ndis.lib;ksecdd.lib</AdditionalDependencies>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
@@ -231,6 +231,7 @@
     <ClCompile Include="src\filter.c" />
     <ClCompile Include="src\device.c" />
     <ClCompile Include="src\flt_dbg.c" />
+    <ClCompile Include="src\avb_init_fault_dbg.c" />
     <ClCompile Include="tests\integration\AvbIntegrationTests.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -250,6 +251,7 @@
     <ClInclude Include="devices\intel_device_interface.h" />
     <!-- SSOT: include\avb_ioctl.h (not external copy) -->
     <ClInclude Include="include\avb_ioctl.h" />
+    <ClInclude Include="include\avb_init_fault_dbg.h" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
     <ClInclude Include="external\intel_avb\lib\intel_private.h" />
     <ClInclude Include="external\intel_igb\src\e1000_regs.h" />

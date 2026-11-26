@@ -21,6 +21,9 @@ typedef struct _device_t device_t;
 struct tsn_tas_config;
 struct tsn_fp_config;
 struct ptm_config;
+struct AVB_TAS_SCHEDULE;      /* include/avb_ioctl.h */
+struct AVB_TAS_OP_OUTCOME;    /* src/avb_tas_activate_state.h (#357 producer) */
+struct AVB_TAS_RETAINED;      /* src/avb_tas_retained.h (#350) */
 
 /**
  * @brief Intel device-specific operations interface
@@ -50,11 +53,19 @@ typedef struct _intel_device_ops {
     
     // Basic device operations
     int (*init)(device_t *dev);
+    /* init with a report (#352 R1 L10): NULL when init resets no PHC of a device that can retain a TAS schedule and writes no TAS
+     * register. Otherwise the same initialization; *invalidated (may be NULL, never cleared) becomes 1 as soon as the PHC reset (or a TAS
+     * register write) was performed, also when a later step fails. Called under the adapter's TAS metadata order lock (APC_LEVEL) */
+    int (*init_reported)(device_t *dev, int *invalidated);
     int (*cleanup)(device_t *dev);
     int (*get_info)(device_t *dev, char *buffer, ULONG size);  // Use ULONG for kernel compatibility
     
     // PTP/IEEE 1588 operations
     int (*set_systime)(device_t *dev, uint64_t systime);
+    /* set_systime with a report (#350, #352 R1 L10): the same operation and result; *effect (may be NULL) is AVB_PHC_EFFECT_* of
+     * src/avb_tas_retained.h, what was issued to the clock, apart from the result. NULL: the device has no report, and then a success counts
+     * as issued and a failure as unknown. Called under the adapter's TAS metadata order lock (APC_LEVEL), never under its register lock */
+    int (*set_systime_reported)(device_t *dev, uint64_t systime, int *effect);
     int (*get_systime)(device_t *dev, uint64_t *systime);
     int (*init_ptp)(device_t *dev);
     int (*enable_packet_timestamping)(device_t *dev, int enable);  // Enable TSYNCRXCTL/TSYNCTXCTL
@@ -79,7 +90,26 @@ typedef struct _intel_device_ops {
     int (*clear_aux_timestamp_flag)(device_t *dev, uint8_t aux_index);  // Clear AUTT flag for aux timestamp
     
     // TSN operations (optional - can be NULL for basic devices)
-    int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
+    /* Legacy SETUP_TAS (IOCTL 26). write_attempted (may be NULL): set to 0 on entry and to 1 before the first TAS register
+     * write, also when that write or a later step fails, so the caller advances the TAS generation only for an attempted write
+     * (#352 R1 L9) */
+    int (*setup_tas)(device_t *dev, struct tsn_tas_config *config, int *write_attempted);
+    /* First gate schedule on a clean adapter, HOLD, the versioned IOCTL_AVB_TAS_ACTIVATE (#357 producer; #365 R7 steps 6-9,
+     * R8). Called under the TAS claim and the TAS register lock (no logging). link_mbps: the driver-owned K8 speed sampled
+     * once under the claim (#351 R2, non-zero); flags and debug_fault: from the request, header-validated; min_margin_ns: the
+     * published enforced lead; armed: the driver record is not CLEAN. Fills *outcome (src/avb_tas_activate_state.h).
+     * NULL on TAS-capable hardware means not implemented, never unsupported. */
+    void (*activate_tas_hold)(device_t *dev, const struct AVB_TAS_SCHEDULE *schedule, uint32_t link_mbps, uint32_t flags,
+                              uint32_t debug_fault, uint64_t min_margin_ns, int armed, struct AVB_TAS_OP_OUTCOME *outcome);
+    /* Read-only TAS hardware query (#350, contract #365 "Query v1 contract"): fills the hardware fields of reply (registers,
+     * PHC bracket, decoding, slot statuses, advisory restoration) for this family. running: the filter is Running; mmio:
+     * BAR mapped and INTEL_CAP_MMIO; record: AVB_TAS_STATE_*; op_in_progress: the TAS claim is held; contended: the TAS
+     * register lock was not obtained, so no register may be read; retained: the retained commit of the same published state as
+     * the record, NULL when there is no coherent one; event_seq: the context's event sequence, sampled after the register pass
+     * (#365 K8 events decision 2026-11-26), NULL: not tracked. Never writes a register or the retained commit. Returns 0. NULL on
+     * TAS-capable hardware means the family has no query register map: not implemented. */
+    int (*query_tas)(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
+                     int op_in_progress, int contended, const struct AVB_TAS_RETAINED *retained, volatile long long *event_seq);
         /* disable_tas: clear the hardware TSN transmit mode bit (TQAVCTRL.TRANSMIT_MODE_TSN on I226).
          * Returns 0 on success, -ENOTSUP if hardware has no TAS disable path, <0 on hardware error.
          * NULL means device never had TAS hardware (e.g. I219, I210). */

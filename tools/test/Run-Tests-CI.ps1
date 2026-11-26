@@ -420,6 +420,13 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_hot_plug               -- disables/enables the NIC through devcon (#262).  Unsafe in $HilTestSafety (#343).
 #   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  Unsafe (#343).
 #   test_tas_isolated_arm       -- SETUP_TAS, restored by CM_Disable_DevNode / CM_Enable_DevNode.  Unsafe (#328).
+#   test_tas_activate           -- TAS_ACTIVATE (--hold #369, --pass #370, --fault, --fault-versioned #482), then its own NIC cycle.  Unsafe (#357).
+#   test_tas_query_clean        -- TAS_QUERY_HW checks (#366), then its own NIC cycle as cleanup.  Unsafe (#366).
+#   test_tas_query_clean --hw-verified -- TAS_ACTIVATE, queries past BaseT (#381), then its own NIC cycle.  Unsafe (#381).
+#   test_tas_query_clean --tiers-unbound -- unbound / non-TAS / tiers queries (#367), then its own NIC cycle.  Unsafe (#367).
+#   test_tas_query_clean --invalid -- invalid versioned TAS_ACTIVATE requests on 0x80C, legacy function-71 phase (#368), then its own NIC cycle.  Unsafe (#368).
+#   test_tas_query_clean --restore -- TAS_ACTIVATE HOLD, NIC cycle, reported restoration and PHC (#377).  Unsafe (#377).
+#   test_tas_query_clean --link-speed -- NIC cycle, query link_speed_mbps against GetIfEntry2 (#472, K8).  Unsafe (#472).
 #   Unsafe entries are dispatched like every classified entry (#458), listed or named in -Tests, attended or under
 #   GitHub Actions; only the state-integrity halt (lock ownership, an unterminated timed-out tree, ...) blocks them.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -439,6 +446,7 @@ $HardwareUnitTests = @(
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
     "test_mdio_phy",
     "test_dev_lifecycle",
+    "test_dev_lifecycle --init-contract",  # #313 amendment 2026-11-12: INIT_DEVICE / OPEN_ADAPTER on READY adapters, PHC/TIMINCA before and after, final state (#404)
     "test_ts_event_sub",
     "test_ptp_getset",
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
@@ -451,6 +459,8 @@ $HardwareUnitTests = @(
     "test_rx_timestamp",
     "test_rx_timestamp_complete",
     "test_ioctl_target_time",       # IOCTL target time management -- (#199)
+    "test_ioctl_target_time --case TC-TARGET-015",  # #299 timer-0 target-time event on every adapter (characterization; no timer 1)
+    "test_ioctl_target_time --case TC-TARGET-V2-001",  # #515 V2 target-time QUERY/validation/access on every adapter (invalid ARM only)
     "test_qav_cbs",
     "test_ioctl_tas",
     "test_ioctl_fp_ptm",
@@ -554,23 +564,35 @@ $HardwareIntegrationTests = @(
     # Phase G: built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29); classes in $HilTestSafety
     "avb_capability_validation",      # nmake: capability reporting vs device; exit = validation failures
     "avb_device_separation",          # nmake: per-device separation; exit 1 on failure
-    "avb_test_i226",                  # avb_test_um.c (default command); SETUP_TAS/FP/PTM-capable -> #328 hold
-    "avb_test_i210",                  # avb_test_um.c as avb_test_i210_um.exe; #328 hold
-    "avb_test_project",               # nmake: avb_test_um.c as avb_test_i210.exe; #328 hold
-    "tsn_hardware_activation",        # nmake: SETUP_TAS/FP activation; #328 hold
-    "comprehensive_ioctl_test",       # every IOCTL incl. SETUP_TAS/FP/PTM; #328 hold
-    "avb_i226_test",                  # nmake: SETUP_TAS/FP + WRITE_REGISTER; #328 hold
+    "avb_test_i226",                  # avb_test_um.c (default command); SETUP_TAS/FP/PTM-capable
+    "avb_test_i210",                  # avb_test_um.c as avb_test_i210_um.exe
+    "avb_test_project",               # nmake: avb_test_um.c as avb_test_i210.exe
+    "tsn_hardware_activation",        # nmake: SETUP_TAS/FP activation
+    "comprehensive_ioctl_test",       # every IOCTL incl. SETUP_TAS/FP/PTM
+    "avb_i226_test",                  # nmake: SETUP_TAS/FP + WRITE_REGISTER
     "avb_multi_adapter",              # nmake: WRITE_REGISTER + INIT_DEVICE per adapter
     "avb_i226_advanced",              # nmake: WRITE_REGISTER + INIT_DEVICE
     "chatgpt5_i226_tas",              # nmake: raw TAS register programming
     "corrected_i226_tas",             # nmake: raw TAS register programming
     "avb_test_i210_device",           # device_specific/i210: register reads through the shared enumerator
-    "avb_test_i350",                   # device_specific/i350: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE
+    "avb_test_i350",                  # device_specific/i350: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE
+    "test_dev_lifecycle --init-retry-fault",  # #313 UT-DEV-LIFECYCLE-002 / #412: Debug-only initialization fault, owned NIC
+                                              # cycles, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety;
+                                              # class-only dispatch policy is #458, not decided here
+    "test_dev_lifecycle --init-concurrent",   # #313 UT-DEV-INIT-CONCURRENT: overlap by the #412 HOLD, owned NIC cycles, bounded
+                                              # workers, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety
     # #458 (Q 2026-11-19): exceptions apply at testcase level only; these standalone cases need neither interaction nor a
     # long-duration lane, so they run automatically like every other entry (were program-level coverage gaps).  Each owns
     # its setup, restoration and final-state report; a failure is recorded, never a reason to withhold it.
     "test_ptp_phc_lifecycle",                 # UT-CORR-009: driver reinstall by process creation, restoration verified by the test
-    "test_control_device_lifecycle"           # TC-LCY-328: service stop/restart cycles, recovery verified by the test
+    "test_control_device_lifecycle",          # TC-LCY-328: service stop/restart cycles, recovery verified by the test
+    "test_tas_activate --fault-versioned",    # #482 TEST-TASACT-FAULT-001 F1/F2 on 0x80C (Debug fault injection; Release: not sent),
+                                              # each case with its own pre-state, observer and owned NIC-cycle cleanup. Unsafe
+    "test_tas_activate --phc-hold-control",   # #505 TC-TASACT-HOLDCTL-001: Debug-only PHC reseed hold control on every PHC adapter
+                                              # (Release: every line INCONCLUSIVE). Unsafe (shared source; no NIC cycle in this mode)
+    "test_tas_activate --metadata-events",    # #357 TC-TASACT-META-001/-002 (#352 R1 L9/L10, F1): PHC events, SETUP/DISARM and a held-reseed race. Unsafe
+    "test_tas_activate --failure-retrieval"   # #379 TC-TASAPI-014: a failed 0x80C ACTIVATE (Debug fault injection; Release: not sent) and the
+                                              # lookup of its #352 record on four kinds of instance; owned NIC-cycle cleanup. Unsafe
 )
 
 # ===========================
@@ -595,6 +617,15 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe: same SETUP_TAS and NIC cycle at a 200 ms armed send period, separating a stall that follows time from one that follows frames, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
     'test_tas_isolated_arm'         = 'Unsafe: SETUP_TAS alone on every TAS adapter, then a NIC cycle as the only restoration path, #328; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463'
+    'test_tas_activate --hold'      = 'Unsafe: TAS_ACTIVATE with HOLD on every TAS adapter, TEST-TAS-API-004 #369 (amendments 2026-11-18 and 2026-11-19: AVB_TAS_OP_REQUEST with AVB_TAS_F_ACCEPT_UNVERIFIED on IOCTL_AVB_TAS_ACTIVATE_80C, which the current driver does not serve; ACCESS, METADATA, COMMIT race, STATE, REFUSE, GENERATION, LOOKUP evidence), then the test owned NIC cycle as primary cleanup, #357; the wire observer is any other enumerated adapter that receives the baseline, none is a precondition of the activation; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463; TAS restoration set (DES 12.5, BASET included) and TSN mode read back through TAS_QUERY_HW against its own pre-state query, #361; a pre-state not proved clean is recovered once by the test owned NIC cycle, #369'
+    'test_tas_activate --pass'      = 'Unsafe: TAS_ACTIVATE with PASS on every TAS adapter, TEST-TAS-API-005 #370 (amendment 2026-11-19: AVB_TAS_OP_REQUEST with pre_activation PASS on IOCTL_AVB_TAS_ACTIVATE_80C, which the current driver does not serve; a header-valid PASS must complete STATUS_NOT_IMPLEMENTED with no output and no state change, recorded SKIP_NOT_IMPLEMENTED, never PASS; function 71 is not called), then the test owned NIC cycle as primary cleanup, #357; the wire observer is any other enumerated adapter that receives the baseline (for the cleanup TX probe), none is a precondition; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463; TAS restoration set (DES 12.5, BASET included) and TSN mode read back through TAS_QUERY_HW against its own pre-state query, #361; a pre-state not proved clean is recovered once by the test owned NIC cycle, #369'
+    'test_tas_activate --fault'     = 'Unsafe: TAS_ACTIVATE failed-rollback path, Debug drivers inject a failed write and a failed restore write, Release drivers must refuse the request, then the test owned NIC cycle, #357; the owned NIC cycle may interrupt the host network; neither network topology nor operator attendance is a precondition, per #463; TAS restoration set (DES 12.5, BASET included) and TSN mode read back through TAS_QUERY_HW against its own pre-state query, #361; a pre-state not proved clean is recovered once by the test owned NIC cycle, #369'
+    'test_tas_query_clean'          = 'Unsafe: TAS_QUERY_HW on every TAS adapter, TEST-TAS-API-001 #366, read-only checks, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --tiers-unbound' = 'Unsafe: TEST-TAS-API-002 #367, unbound handle refused with STATUS_INVALID_DEVICE_STATE, query on adapters without the TAS capability, support tiers per #351, then the test owned NIC cycle of each TAS adapter as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --invalid' = 'Unsafe: TEST-TAS-API-003 #368 (amendment 2026-11-18), invalid AVB_TAS_OP_REQUEST requests on IOCTL_AVB_TAS_ACTIVATE_80C on every clean TAS adapter (header and semantic cases, each refused with the TAS query, record and counters unchanged against the test pre-test capture), then a separate LEGACY_FUNCTION_71 phase from its own proven-clean baseline that sends the valid 80-byte request on function 71, which the current driver can commit (recovered once by the test owned NIC cycle when not clean), then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; the wire observer is any other enumerated adapter that receives the baseline, none is a precondition of the field cases; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --restore' = 'Unsafe: TEST-TAS-API-012 #377, TAS_ACTIVATE HOLD on a clean TAS adapter, the reported restoration never COMPLETE while TSN is on, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire, the reported restoration against the test own register observation and the PHC across the cycle reported separately; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --link-speed' = 'Unsafe: TEST-TAS-API-021 #472, the test owned NIC cycle of every TAS adapter as its setup, then TAS_QUERY_HW link_speed_mbps compared with GetIfEntry2 of the same NET_LUID in OS-bracketed observations (ATTACH, STEADY) and the final state (bound, link as before, TAS clean); TIMINCA and TSAUXC read back before the first NIC operation and after cleanup as cleanup-only evidence, never written; no TAS write, no traffic, no wire observer needed; the owned NIC cycle reseeds the PHC and may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
     'test_device_idle_regression'   = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-29 - TC-LCY-IDLE-001 needs a user-initiated session lock or display-off transition inside its window and never triggers one itself, so unattended it can only end INCONCLUSIVE; needs an attended lane or an automated idle trigger, final verdict by Evaluate-IdleTransition.ps1, #328'
@@ -628,33 +659,6 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 # exclusion for GitHub Actions is removed).  INIT_DEVICE re-initializes the targeted adapter's PTP block (I226:
 # SYSTIM := 1, TIMINCA rewritten; I219: TIMINCA rewritten), unbound-handle callers hit whichever adapter the previous
 # test opened, and the post-test state check does not detect a PHC time discontinuity.
-
-# #328 hazard annotations (Q 2026-11-03: retained as hazard descriptions, no longer a dispatch block - these entries
-# execute to expose and reproduce their real failures; the runner does not read this table at dispatch).
-# Key = registry key.  Removed only when the defect is hardware-verified fixed.
-$Hold328Tsn = '#328 SETUP_TAS/FP/PTM put the e2fn-owned I226 into TSN transmit mode without a restorable gate schedule, driver setup_tas defect, TQAVCTRL 0x00000009 read back 2026-10-22 13:44 before I226 send completions stopped and the next driver unload hung, investigations/issue-328-release-reinstall-hang-20261022.md; leaving TSN mode needs an adapter reset, held until the driver TAS/FP restore is fixed and hardware-verified'
-$HilHazardHolds = @{
-    'avb_test_portability'       = $Hold328Tsn
-    'avb_test_i217'              = $Hold328Tsn
-    'avb_test_i225'              = $Hold328Tsn
-    'avb_test_i226_um'           = $Hold328Tsn
-    'test_ioctl_tas'             = $Hold328Tsn
-    'test_tas_isolated_arm'      = $Hold328Tsn
-    'test_tas_isolated_arm --armed-period-ms 200' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 64' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 512' = $Hold328Tsn
-    'test_tas_isolated_arm --stall-probe 1400' = $Hold328Tsn
-    'test_ioctl_fp_ptm'          = $Hold328Tsn
-    'test_tsn_ioctl_handlers_um' = $Hold328Tsn
-    'test_tsn_ioctl_handlers'    = $Hold328Tsn
-    'tsn_ioctl_test'             = $Hold328Tsn
-    'avb_test_i226'              = $Hold328Tsn
-    'avb_test_i210'              = $Hold328Tsn
-    'avb_test_project'           = $Hold328Tsn
-    'tsn_hardware_activation'    = $Hold328Tsn
-    'comprehensive_ioctl_test'   = $Hold328Tsn
-    'avb_i226_test'              = $Hold328Tsn
-}
 
 $HilTestSafety = @{
     # --- ReadOnly ---
@@ -731,6 +735,8 @@ $HilTestSafety = @{
     'test_rx_timestamp'                = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
     'test_rx_timestamp_complete'       = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
     'test_ioctl_target_time'           = 'Mutating'   # SET_TARGET_TIME, SET_HW_TIMESTAMPING
+    'test_ioctl_target_time --case TC-TARGET-015' = 'Mutating'   # SET_TARGET_TIME timer 0 + TS_SUBSCRIBE/RING_MAP/UNSUBSCRIBE (#299)
+    'test_ioctl_target_time --case TC-TARGET-V2-001' = 'Mutating'   # negative mutation boundary (#515): per LUID-bound adapter QUERY_HW_SNAPSHOT x2, V2 QUERY (valid + invalid), invalid V2 ARM only (version 0, operation QUERY, input 47, flags 1; every ARM also carries target 0 ns; D-5 not tested here), read-only-handle QUERY + ARM access probe, QUERY_HW_SNAPSHOT; no valid ARM
     'test_ioctl_tas'                   = 'Mutating'   # SETUP_TAS, DISARM_TAS
     'test_ioctl_fp_ptm'                = 'Mutating'   # SETUP_FP, SETUP_PTM
     'test_ioctl_offset'                = 'Mutating'   # PHC_OFFSET_ADJUST
@@ -749,8 +755,8 @@ $HilTestSafety = @{
     'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
-    'test_tsn_ioctl_handlers'          = 'Mutating'   # same source as test_tsn_ioctl_handlers_um; hazard-held (#328 F23: stale 2026-04-08 binary issued SETUP_TAS/FP/PTM)
-    'tsn_ioctl_test'                   = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (tsn_ioctl_test.mak); hazard-held
+    'test_tsn_ioctl_handlers'          = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (#328 F23: stale 2026-04-08 binary issued SETUP_TAS/FP/PTM)
+    'tsn_ioctl_test'                   = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (tsn_ioctl_test.mak)
     'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
     'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
     'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE
@@ -766,6 +772,22 @@ $HilTestSafety = @{
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe'
+    'test_tas_activate --hold'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #369)
+    'test_tas_activate --pass'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #370)
+    'test_tas_activate --fault'        = 'Unsafe'     # TAS_ACTIVATE fault path plus CM_Disable_DevNode / CM_Enable_DevNode (#357)
+    'test_tas_activate --fault-versioned' = 'Unsafe'  # #482 F1/F2: versioned TAS_ACTIVATE fault path, owned CM_Disable_DevNode / CM_Enable_DevNode per case
+    'test_tas_activate --phc-hold-control' = 'Unsafe'  # #505: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD (Debug), PHC_OFFSET_ADJUST steps compensated to net 0, TAS_ACTIVATE with a zero metadata pair (refused before any write); this mode performs no NIC cycle, the class follows the shared source's NIC administration (HILGATE-009)
+    'test_tas_activate --failure-retrieval' = 'Unsafe' # #379: TAS_ACTIVATE fault path (Debug), TAS_QUERY_HW lookups on bound instances of every adapter, owned CM_Disable_DevNode / CM_Enable_DevNode
+    'test_tas_activate --metadata-events' = 'Unsafe'   # #357 L9/L10/F1: TAS_ACTIVATE, SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, QUERY_HW_SNAPSHOT v2, SET_HW_TIMESTAMPING, Debug-only WRITE_REGISTER of SYSTIML/H (HAL offsets, #503) and DEBUG_PHC_RESEED_HOLD (#505), owned CM_Disable_DevNode / CM_Enable_DevNode per case
+    'test_tas_query_clean'             = 'Unsafe'     # read-only TAS_QUERY_HW checks plus the owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#366)
+    'test_tas_query_clean --hw-verified' = 'Unsafe'   # TAS_ACTIVATE HOLD, TAS_QUERY_HW past BaseT, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#381)
+    'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
+    'test_tas_query_clean --invalid' = 'Unsafe'       # invalid 0x80C requests, the legacy function-71 request (can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
+    'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
+    'test_tas_query_clean --link-speed' = 'Unsafe'    # owned CM_Disable_DevNode / CM_Enable_DevNode cycle as setup, then TAS_QUERY_HW and GetIfEntry2 reads (#472)
+    'test_dev_lifecycle --init-retry-fault' = 'Unsafe'  # Debug-only initialization fault, owned CM_Disable_DevNode / CM_Enable_DevNode cycles, INIT_DEVICE retry (#412)
+    'test_dev_lifecycle --init-concurrent' = 'Unsafe'   # Debug-only HOLD (#412), owned CM_Disable_DevNode / CM_Enable_DevNode cycles, concurrent INIT_DEVICE (#313)
+    'test_dev_lifecycle --init-contract' = 'Init'     # INIT_DEVICE / OPEN_ADAPTER on READY adapters (#313 amendment, #404); a defective driver re-initializes and resets a healthy PHC: reported RED
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
@@ -806,8 +828,31 @@ $HilTestSafety = @{
 # ===========================
 # Resolve which tests to run
 # ===========================
+# A program named in -Tests without arguments that is no entry itself stands for all its registered modes of the suite, each
+# once (#473; the same rule as Run-Tests.ps1 Resolve-AvbRunnerEntry).  Every entry is dispatched once whichever selector supplied
+# it, in any order (PR #518): the first mention keeps its place, and a registered entry is passed on in its registered spelling.
+# An unregistered name is passed on unchanged and still fails closed at dispatch.
+function Expand-AvbBareProgram {
+    param([string[]]$Names, [string[]]$Registered, [string[]]$Classified)
+    $reg = @($Registered | ForEach-Object { $_ -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' } | Select-Object -Unique)
+    $out = @(); $seen = @()
+    foreach ($n in $Names) {
+        $b = $n.Trim(); if (-not $b.StartsWith('ps1:')) { $b = ($b -replace '\s+', ' ') -replace '^([^\s:]+?)\.exe(?=\s|$)', '$1' }
+        $modes = @(if ($b -notmatch '[\s:]' -and $reg -notcontains $b -and $Classified -notcontains $b) { $reg | Where-Object { ($_ -split '\s+', 2)[0] -eq $b } })
+        foreach ($k in $(if ($modes.Count -gt 0) { $modes } else { $b })) {
+            if ($seen -contains $k) { continue }
+            $seen += $k
+            $out += $(if ($reg -contains $k) { @($reg | Where-Object { $_ -eq $k })[0] } else { $n })
+        }
+    }
+    return $out
+}
 if ($Tests.Count -gt 0) {
-    $TestList = $Tests
+    $TestList = @(Expand-AvbBareProgram -Names $Tests -Classified @($HilTestSafety.Keys) -Registered $(switch ($Suite) {
+        'HardwareUnit'        { @($HardwareUnitTests) + @($HardwareUnitCoverageGaps.Keys) }
+        'HardwareIntegration' { @($HardwareIntegrationTests) + @($HardwareIntegrationCoverageGaps.Keys) + @($HardwareIntegrationAttendedOnly.Keys) }
+        default               { @($UnitTests) + @($IntegrationTests) }
+    }))
     # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list (the behavioral sentinel
     # test injects a custom list while exercising the hardware-suite control flow).
 } else {
@@ -849,6 +894,7 @@ $HilTestTimeoutSeconds = [ordered]@{
     'test_tas_isolated_arm --stall-probe 64' = 480
     'test_tas_isolated_arm --stall-probe 512' = 480
     'test_tas_isolated_arm --stall-probe 1400' = 480
+    # test_tas_activate: per adapter, see $HilTestTimeoutPerAdapter below.
     # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
     # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
     # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
@@ -874,6 +920,66 @@ $HilTestTimeoutSeconds = [ordered]@{
     # -> 180 s.  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095); a hung run is detected after
     # 180 s.  Separate from the trust-boundary timeout tracked in #476.
     'ps1:tests/unit/ci/test_ci_driver_deploy.ps1' = 180
+}
+# Per-adapter budget for an entry whose one process runs the adapters one after another (PR #397 R14).  Process timeout =
+# Seconds x the adapters the driver enumerated in the latest observed state (Get-AvbHilState, re-read after every test),
+# at least 1 and at most MaxAdapters, the entry's own adapter limit; MaxAdapters when no enumeration was observed.  No
+# device id or adapter count is assumed.  Like $HilTestTimeoutSeconds it never lowers the suite timeout.
+$HilTestTimeoutPerAdapter = [ordered]@{
+    # test_tas_activate, from its own bounds: 3.5 s baseline + 67.5 s send bound and drain (SEND_BOUND_MS 66 s covers the
+    # largest admitted BaseT lead, LEAD_MAX_NS 60 s, plus 4.5 cycles, PR #481; DRAIN_MS 1.5 s) + 120 s disable + 3 s + 60 s
+    # enable + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 444 s for one TAS
+    # adapter, plus its test-owned setup recovery when the pre-state is not proved clean (#369): 120 s disable + 3 s + 60 s
+    # enable + 60 s return + 60 s link + 5 s settle = 308 s, so 752 s. 980 s = 752 s + 30 % (977.6 s, rounded up), the margin
+    # used for test_tas_isolated_arm (the 3.5 s baseline is the first observer trial).  It runs every enumerated adapter that
+    # advertises INTEL_CAP_TSN_TAS (the others are SKIP_UNSUPPORTED without a wait), with no fixed inventory (#369 amendment:
+    # the identities are allocated from the driver's count), so the budget scales with the enumerated count, uncapped.  Inside
+    # each adapter run every other enumerated adapter may be tried as the wire observer (no fixed observer model, #463): one
+    # trial is a 3.5 s baseline window (an estimate: wire_start and the 2 s window) = 3.5 s + 30 % = 4.55 s, rounded up to 5 s
+    # per other adapter: n x 980 + n x (n - 1) x 5 s.
+    'test_tas_activate --hold'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    'test_tas_activate --pass'  = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    'test_tas_activate --fault' = @{ Seconds = 980; PerOtherAdapterSeconds = 5 }
+    # #482: F1 then F2 per adapter, each a complete run with the --fault bounds and its own observer trial per other adapter
+    'test_tas_activate --fault-versioned' = @{ Seconds = 1960; PerOtherAdapterSeconds = 10 }
+    # test_tas_query_clean, from its own bounds per TAS adapter: 7 s TX windows + 2 x 60 s socket bind + 120 s disable + 3 s +
+    # 60 s enable + 60 s return + 60 s link + 5 s settle + 3.5 s TX after the cycle = 438.5 s; 560 s = + 27 %.
+    # MaxAdapters = TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also caps the TAS adapters it runs.
+    'test_tas_query_clean'      = @{ Seconds = 560; MaxAdapters = 8 }
+    # --hw-verified (#381): per TAS adapter at most 1.5 s lead + 15 s past-BaseT bound + the same cleanup bounds (120 + 3 + 60 +
+    # 60 + 60 + 5 + 3.5 s and a 60 s socket bind) = about 390 s; the same 560 s budget and inventory.
+    'test_tas_query_clean --hw-verified' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --tiers-unbound (#367): a few read-only queries, then per TAS adapter the same cleanup bounds as above (at most 438.5 s
+    # without the TX windows); the same 560 s budget and inventory.
+    'test_tas_query_clean --tiers-unbound' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --invalid (#368 amendment, PR #479 review): its own work per adapter under test, from its bounds: a 60 s socket bind; 28 cases
+    # (26, plus META_ZERO and NO_ACCEPTANCE of the 2026-11-19 oracle amendment) of a few IOCTLs each, no waits (bounded at 30 s); 2 TX windows of 3.5 s = 7 s; the legacy phase with at most one recovery
+    # cycle (120 + 3 + 60 + 60 + 5 s = 248 s); the owned cleanup (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind =
+    # 371.5 s) = 716.5 s; 935 s = 716.5 s + 30 % (931.5 s, rounded up). Plus, for EVERY other enumerated adapter (no count
+    # limit): an observer trial (3.5 s baseline window), three queries if it is a TAS adapter (estimated 1 s each: open, bind and
+    # the query never wait) and, if a probe changed it, its owned recovery cycle (248 s) = 254.5 s; 335 s = 254.5 s + 30 %
+    # (330.9 s, rounded up). So for n enumerated adapters, all of them TAS adapters in the worst case:
+    # n x 935 + n x (n - 1) x 335 s. No inventory limit.
+    'test_tas_query_clean --invalid' = @{ Seconds = 935; PerOtherAdapterSeconds = 335 }
+    # --restore (#377): per TAS adapter a 60 s socket bind and a 3.5 s baseline window, one activation and query, then the same
+    # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) and one query = about 440 s; the same budget.
+    'test_tas_query_clean --restore' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --link-speed (#472): per TAS adapter four OS-bracketed observations of at most 5 tries (about 3 s each) and the final reads,
+    # the owned cycle (120 + 3 + 60 + 60 s), a 60 s wait for the pre-test link and the 10 s STEADY interval = about 330 s; the
+    # same 560 s per adapter. No inventory limit (#472 review r4619159471): the executable runs every TAS adapter, so the budget
+    # scales with the enumerated count, uncapped.
+    'test_tas_query_clean --link-speed' = @{ Seconds = 560 }
+    # test_dev_lifecycle --init-retry-fault (#412), from its own bounds per adapter: 60 s READY before + phase A (120 s disable +
+    # 60 s enable + 60 s return + 60 s READY) + phase B (120 + 60 + 60 s) + 60 s READY after the retry + cleanup (60 s READY, a
+    # 120 + 60 s cycle, 60 s READY) = 960 s; 1220 s = + 27 %. No MaxAdapters: the test runs every validated identity (no
+    # fixed inventory limit, PR #462 review), so the budget is 1220 s times the adapters enumerated in the latest observed
+    # state, uncapped; with no observed enumeration, one adapter's budget (a shorter budget ends in a recorded TIMEOUT).
+    'test_dev_lifecycle --init-retry-fault' = @{ Seconds = 1220 }
+    # test_dev_lifecycle --init-concurrent (#313), from its own bounds per adapter: 25 s stale drain + 60 s READY before + one
+    # cycle (120 s disable + 60 s enable) + 60 s return + 2 s HOLD visibility + B and A workers (70 s + 5 s each) + 25 s history
+    # + 60 s READY after + cleanup (25 s drain, 60 s READY, a 120 + 60 s cycle, 60 s READY) = 887 s; 1130 s = + 27 %. No
+    # MaxAdapters: it runs every validated identity, so the budget scales with the enumerated adapters, uncapped.
+    'test_dev_lifecycle --init-concurrent' = @{ Seconds = 1130 }
 }
 
 # ===========================
@@ -1858,18 +1964,36 @@ function Get-AvbHilMutatedState {
     return @()
 }
 
-# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] (never lowers it).  Sandbox:
+# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] or the $HilTestTimeoutPerAdapter
+# budget for -AdapterCount enumerated adapters (negative = not observed) (never lowers it).  Sandbox:
 # AVB_TEST_SANDBOX_TIMEOUTS ('bin=seconds;...').
 function Get-AvbTestTimeoutSeconds {
-    param([string]$Entry, [int]$SuiteSeconds)
+    param([string]$Entry, [int]$SuiteSeconds, [int]$AdapterCount = -1)
     $own = 0
     if ($script:IsSandbox) {
         $bin = Get-HilBinName $Entry
         foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_TIMEOUTS) -split ';')) {
             if ($pair -match '^\s*([^=]+?)\s*=\s*(\d+)\s*$' -and $Matches[1] -eq $bin) { $own = [int]$Matches[2] }
         }
+    } elseif ($HilTestTimeoutPerAdapter.Contains($Entry)) {
+        $p = $HilTestTimeoutPerAdapter[$Entry]
+        $n = if ($p.Contains('MaxAdapters')) {
+            if ($AdapterCount -lt 0) { [int]$p.MaxAdapters } else { [Math]::Min([Math]::Max(1, $AdapterCount), [int]$p.MaxAdapters) }
+        } else { [Math]::Max(1, $AdapterCount) }   # no inventory limit: the observed count, at least 1 (unknown = -1 -> 1)
+        $own = [int]$p.Seconds * $n
+        # Work per OTHER adapter inside each adapter run (test_tas_query_clean --invalid, PR #479 review): n x (n - 1) x that
+        if ($p.Contains('PerOtherAdapterSeconds')) { $own += [int]$p.PerOtherAdapterSeconds * $n * ($n - 1) }
     } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
     return [Math]::Max($SuiteSeconds, $own)
+}
+
+# The adapter count an item is budgeted with, reported to Run-Tests-Elevated.ps1 (AVB_ELEVATED_INVENTORY_FILE) so that its default
+# outer deadline covers this runner's own budget (#480, PR #518).  Nothing is reported without an observed enumeration.
+function Write-AvbObservedInventory {
+    param([string]$Path, [int]$AdapterCount)
+    if (-not $Path -or $AdapterCount -lt 0) { return }
+    try { [System.IO.File]::WriteAllText($Path, [string]$AdapterCount) }
+    catch { Write-Host "  [WARN] adapter count $AdapterCount not reported to the elevated wrapper ($($_.Exception.Message)): its deadline may be shorter than this runner's budget" -ForegroundColor Yellow }
 }
 
 # Incremental capture of one redirected stream (#458, PR #485 r4629829999), plain PowerShell (no compiled helper: a
@@ -2850,8 +2974,12 @@ foreach ($WorkItem in $WorkItems) {
     $errCap = New-AvbStreamCapture -Reader $proc.StandardError
 
     $timedOut  = $false
-    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds
+    # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
+    $enumeratedAdapters = if ($script:HilBaseline -and $script:HilBaseline.ClockOk) { @($script:HilBaseline.Clock).Count } else { -1 }
+    Write-AvbObservedInventory -Path $env:AVB_ELEVATED_INVENTORY_FILE -AdapterCount $enumeratedAdapters
+    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds -AdapterCount $enumeratedAdapters
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
+    if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }
     $timeoutMs = $itemTimeoutSeconds * 1000
     # Wait for exit while collecting output incrementally (bounded by the item timeout).
     $waitSw = [System.Diagnostics.Stopwatch]::StartNew(); $exited = $false

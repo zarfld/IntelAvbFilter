@@ -14,6 +14,7 @@
 #  008  IOCTL_AVB_ADJUST_FREQUENCY routes through the two logical device ops; ETW order + status mapping  (#343)
 #  009  observation IOCTLs cannot reach initialization; the lazy timestamp paths do not use TIMINCA        (#343)
 #  010  PTP_READY is established in one helper, only after a successful intel_init                          (#343)
+#       (#404 part 2: the bring-up body is AvbBringUpHardwareOwned; AvbBringUpHardware only owns and delegates)
 #  011  the HIL test oracle selects exactly the device IDs the driver maps to the I210 family              (#343)
 #  012  bring-up reports initialization failure instead of success                                          (#343)
 #  013  init() of I210/I219/I226 returns an init_ptp() failure (a swallowed failure would yield a false PTP_READY) (#343)
@@ -217,17 +218,34 @@ else { tc_fail 'TEST-TIMINCA-ARCH-009' ($viol -join '; ') }
 # 010 ---------------------------------------------------------------------------------------------
 # PTP_READY is established in ONE place (AvbMarkPtpReady), only after a successful intel_init, by the explicit
 # lifecycle operations (AvbBringUpHardware, AvbEnsureDeviceReady) - never on a failed initialization.
+# #404 part 2: the bring-up body is AvbBringUpHardwareOwned (run under the adapter's initialization ownership); the public
+# AvbBringUpHardware only takes that ownership (STATUS_DEVICE_BUSY when it is held), delegates and releases it. The body
+# checks below apply to AvbBringUpHardwareOwned unchanged, and the wrapper itself is checked to contain no bring-up.
 $mark   = $fnBodies['AvbMarkPtpReady']
-$bring  = $fnBodies['AvbBringUpHardware']
+$wrap   = $fnBodies['AvbBringUpHardware']
+$bring  = $fnBodies['AvbBringUpHardwareOwned']
 $ensure = $fnBodies['AvbEnsureDeviceReady']
 $bad = @()
 if (-not $mark -or $mark -notmatch 'AVB_SET_HW_STATE' -or $mark -notmatch 'AVB_HW_PTP_READY') { $bad += 'AvbMarkPtpReady missing or does not set PTP_READY' }
-if (-not $bring) { $bad += 'AvbBringUpHardware not found' }
+if (-not $wrap) { $bad += 'AvbBringUpHardware not found' }
+elseif ($wrap -notmatch 'AvbInitClaim\s*\(' -or $wrap -notmatch 'STATUS_DEVICE_BUSY' -or $wrap -notmatch 'AvbBringUpHardwareOwned\s*\(' -or
+        $wrap -notmatch 'AvbInitRelease\s*\(' -or $wrap -match 'intel_init\s*\(|AvbMarkPtpReady\s*\(|AVB_SET_HW_STATE') {
+    $bad += 'AvbBringUpHardware: must only take the initialization ownership (STATUS_DEVICE_BUSY when held), delegate to AvbBringUpHardwareOwned and release it, with no bring-up of its own'
+}
+# PR #469 review: the waiting variant used by FilterRestart is the same kind of wrapper (bounded wait for the ownership)
+$wrapW = $fnBodies['AvbBringUpHardwareWaitOwner']
+if (-not $wrapW) { $bad += 'AvbBringUpHardwareWaitOwner not found' }
+elseif ($wrapW -notmatch 'AvbInitClaim\s*\(' -or $wrapW -notmatch 'STATUS_DEVICE_BUSY' -or $wrapW -notmatch 'AVB_INIT_OWNER_WAIT_MS' -or
+        $wrapW -notmatch 'AvbBringUpHardwareOwned\s*\(' -or $wrapW -notmatch 'AvbInitRelease\s*\(' -or
+        $wrapW -match 'intel_init\s*\(|AvbMarkPtpReady\s*\(|AVB_SET_HW_STATE') {
+    $bad += 'AvbBringUpHardwareWaitOwner: must only wait (bounded) for the initialization ownership, delegate to AvbBringUpHardwareOwned and release it, with no bring-up of its own'
+}
+if (-not $bring) { $bad += 'AvbBringUpHardwareOwned not found' }
 else {
     $okBlock = Get-Braced $bring 'if\s*\(\s*init_result\s*==\s*0\s*\)\s*\{'
-    if (-not $okBlock -or $okBlock -notmatch 'AvbMarkPtpReady\s*\(') { $bad += 'AvbBringUpHardware: success branch does not call AvbMarkPtpReady' }
+    if (-not $okBlock -or $okBlock -notmatch 'AvbMarkPtpReady\s*\(') { $bad += 'AvbBringUpHardwareOwned: success branch does not call AvbMarkPtpReady' }
     $rest = if ($okBlock) { $bring.Replace($okBlock, ' ') } else { $bring }
-    if ($rest -match 'AvbMarkPtpReady\s*\(' -or $rest -match 'AVB_SET_HW_STATE\([^)]*AVB_HW_PTP_READY') { $bad += 'AvbBringUpHardware: PTP_READY reachable outside the intel_init success branch' }
+    if ($rest -match 'AvbMarkPtpReady\s*\(' -or $rest -match 'AVB_SET_HW_STATE\([^)]*AVB_HW_PTP_READY') { $bad += 'AvbBringUpHardwareOwned: PTP_READY reachable outside the intel_init success branch' }
 }
 if (-not $ensure) { $bad += 'AvbEnsureDeviceReady not found' }
 else {
@@ -240,9 +258,10 @@ if ($bad.Count -eq 0) { tc_pass 'TEST-TIMINCA-ARCH-010-PTP_READY-established-in-
 else { tc_fail 'TEST-TIMINCA-ARCH-010' ($bad -join '; ') }
 
 # 012 ---------------------------------------------------------------------------------------------
-# Initialization failures must be reported, not converted to success: AvbBringUpHardware returns the failing status when
-# the basic initialization fails and a failure status when intel_init fails.  Adapter ENUMERATION stays possible because its
-# callers (AvbInitializeDevice -> FilterAttach/IOCTL context creation, FilterRestart) deliberately discard that status.
+# Initialization failures must be reported, not converted to success: the bring-up body (AvbBringUpHardwareOwned since #404
+# part 2; AvbBringUpHardware returns its status unchanged) returns the failing status when the basic initialization fails and
+# a failure status when intel_init fails.  Adapter ENUMERATION stays possible because its callers (AvbInitializeDevice ->
+# FilterAttach/IOCTL context creation, FilterRestart) deliberately discard that status.
 $bringCode = if ($bring) { $bring } else { '' }
 $basicFail = Get-Braced $bringCode 'if\s*\(\s*!NT_SUCCESS\(\s*status\s*\)\s*\)\s*\{'
 $initElse  = [regex]::Match($bringCode, 'if\s*\(\s*init_result\s*==\s*0\s*\)\s*\{[\s\S]*?\}\s*else\s*\{')

@@ -919,6 +919,8 @@ static int i219_hil_register_offset(uint32_t reg_id, uint32_t *offset)
     case AVB_HWREG_TSYNCRXCTL: *offset = I219_TSYNCRXCTL; return 0;
     case AVB_HWREG_RAL0:       *offset = I219_RAL0; return 0;
     case AVB_HWREG_RAH0:       *offset = I219_RAH0; return 0;
+    case AVB_HWREG_SYSTIML:    *offset = I219_SYSTIML; return 0;   /* version 2 only (#503) */
+    case AVB_HWREG_SYSTIMH:    *offset = I219_SYSTIMH; return 0;
     default: return -1;
     }
 }

@@ -49,13 +49,13 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | Parameter | Notes |
 |---|---|
 | `-Suite HardwareUnit\|HardwareIntegration` | routes through `Run-Tests-CI.ps1 -LocalDiagnostic` with all gates: with `-TestName` that one entry, without it every registered entry of the suite |
-| `-TestName <entry>` | with `-Suite`: the runner entry; without: legacy single binary (`.exe` appended if missing) |
+| `-TestName <entry>` | with `-Suite`: the runner entry; without: the program through `Run-Tests.ps1` (`.exe` appended if missing). A program named without arguments runs all its registered modes, each once (#473) |
 | `-TestArgs <args>` | appended to the entry |
 | `-Configuration Debug\|Release` | default `Debug` |
 | `-ResultsJson <path>` | with `-Suite` only |
 | `-PriorResultsDir <dir>` | with `-Suite` only: earlier results documents of the same run, reported as evidence by the runner, never a veto (#458) |
 | `-CaptureDbgView` | DebugView kernel capture; the test does not run if the capture cannot be confirmed |
-| `-TimeoutSeconds <n>` | bound for the elevated child, default 1800; expiry = TIMEOUT |
+| `-TimeoutSeconds <n>` | bound for the elevated child; default 0 = the computed budget of what will run (entries x per-adapter budgets + overhead, #480); an explicit shorter value is announced; expiry = TIMEOUT |
 | `-LogFile <path>` | default `logs\<TestName>_<timestamp>.log` |
 | `-Full` | legacy `Run-Tests.ps1 -Full` (no HIL gates) |
 

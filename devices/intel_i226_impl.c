@@ -20,6 +20,9 @@ Abstract:
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
+#include "i226_tas_activate.h"                  // First TAS schedule, shared with its offline cases (#357)
+#include "i226_phc_seed.h"   /* PHC seed and its report (#352 R1 L10) */
+#include "i226_tas_query.h"                     // Read-only TAS hardware query, contract #365 (#350)
 
 // Application-specific constants
 #define I226_FREQOUT0_1MHZ      1000        // 1 µs half-cycle (1 MHz clock) - application value
@@ -41,7 +44,6 @@ Abstract:
 // TODO: Add these to i226.yaml and regenerate SSOT header
 #define I226_TQAVCTRL_TRANSMIT_MODE_TSN  0x00000001  // TSN transmit mode
 #define I226_TQAVCTRL_ENHANCED_QAV       0x00000008  // Enhanced QAV mode
-#define I226_TQAVCTRL_FUTSCDDIS          0x00800000  // Future Schedule Disable (I226 specific)
 
 // I226 Queue Control Bits
 // TODO: Add these to i226.yaml and regenerate SSOT header
@@ -62,6 +64,7 @@ extern const struct platform_ops ndis_platform_ops;
 
 // Forward declarations
 static int init_ptp(device_t *dev);
+static int init_ptp_reported(device_t *dev, int *invalidated);
 
 /**
  * @brief DPC routine for periodic TSICR polling (Task 7)
@@ -233,20 +236,9 @@ static VOID AvbTimerDpcRoutine(
     }
 }
 
-/**
- * @brief Initialize I226 device
- * @param dev Device handle
- * @return 0 on success, <0 on error
- */
-static int init(device_t *dev)
+/* The generic platform initialization (TSAUXC, TIMINCA); no PHC reset and no TAS register. 0 on success */
+static int init_platform(device_t *dev)
 {
-    DEBUGP(DL_TRACE, "==>i226_init\n");
-    
-    if (dev == NULL) {
-        return -1;
-    }
-    
-    // I226-specific initialization
     if (ndis_platform_ops.init) {
         NTSTATUS result = ndis_platform_ops.init(dev);
         if (!NT_SUCCESS(result)) {
@@ -254,20 +246,35 @@ static int init(device_t *dev)
             return -1;
         }
     }
-    
-    // Initialize PTP clock (required for GET_TIMESTAMP to work)
-    DEBUGP(DL_TRACE, "I226: Initializing PTP clock\n");
-    int ptp_result = init_ptp(dev);
-    if (ptp_result != 0) {
-        /* Report the failure: init() == 0 is what lets the generic layer establish AVB_HW_PTP_READY
-         * (AvbMarkPtpReady), so a failed PTP init must not look like success.  init_ptp() fails only
-         * when MMIO access fails (unmapped / out of range), which the generic MMIO sanity check also rejects. */
-        DEBUGP(DL_ERROR, "I226: PTP initialization failed: %d\n", ptp_result);
+    return 0;
+}
+
+/**
+ * @brief Initialize I226 device
+ * @param dev Device handle
+ * @return 0 on success, <0 on error
+ *
+ * Reports an init_ptp() failure: init() == 0 is what lets the generic layer establish AVB_HW_PTP_READY (AvbMarkPtpReady), so a failed
+ * PTP init must not look like success. init_ptp() fails only when MMIO access fails (unmapped / out of range), which the generic MMIO
+ * sanity check also rejects.
+ */
+static int init(device_t *dev)
+{
+    DEBUGP(DL_TRACE, "==>i226_init\n");
+    if (dev == NULL || init_platform(dev) != 0) {
         return -1;
     }
-    
-    DEBUGP(DL_TRACE, "<==i226_init: Success\n");
-    return 0;
+    return init_ptp(dev);   /* PTP clock: required for GET_TIMESTAMP to work */
+}
+
+/* The same initialization with the report of intel_device_ops_t.init_reported (#352 R1 L10): the PHC seed resets the clock */
+static int init_reported(device_t *dev, int *invalidated)
+{
+    DEBUGP(DL_TRACE, "==>i226_init (reported)\n");
+    if (dev == NULL || init_platform(dev) != 0) {
+        return -1;
+    }
+    return init_ptp_reported(dev, invalidated);
 }
 
 /**
@@ -319,58 +326,62 @@ static int get_info(device_t *dev, char *buffer, ULONG size)
     return 0;
 }
 
+static int phc_set_read(void *ctx, avb_u32 offset, avb_u32 *value)
+{
+    uint32_t read = 0;
+    int result = ndis_platform_ops.mmio_read((device_t *)ctx, offset, &read);
+
+    *value = read;
+    return result;
+}
+
+static int phc_set_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
 /**
- * @brief Set I226 system time (SYSTIM registers)
+ * @brief Set I226 system time (SYSTIM registers) with a report (intel_device_ops_t.set_systime_reported, #350)
  * @param dev Device handle
  * @param systime 64-bit time value in nanoseconds
+ * @param effect Out (may be NULL): AVB_PHC_EFFECT_*, what was issued (i226_phc_set)
  * @return 0 on success, <0 on error
  */
-static int set_systime(device_t *dev, uint64_t systime)
+static int set_systime_reported(device_t *dev, uint64_t systime, int *effect)
 {
     uint32_t sec, nsec;
-    uint32_t tsauxc_val = 0;
-    int result;
-    
+    int result, issued = AVB_PHC_EFFECT_NONE;
+
     DEBUGP(DL_TRACE, "==>i226_set_systime: 0x%llx\n", systime);
-    
+
+    if (effect != NULL) {
+        *effect = AVB_PHC_EFFECT_NONE;
+    }
     if (dev == NULL) {
         return -1;
     }
-    
+
     // I226/I225: split format -- SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
     // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) -- that is the I210 flat format
     sec  = (uint32_t)(systime / 1000000000ULL);
     nsec = (uint32_t)(systime % 1000000000ULL);
     
-    // Step 1: Disable SYSTIM counter for an atomic write sequence.
-    // TSAUXC (0xB640) bit 31 halts the SYSTIM increment logic.
-    // Note: The SSOT header labels this bit PLLLOCKED but the hardware spec defines it
-    // as "Disable systime" -- confirmed via IEEE 1588 I226 hardware manual.
-    ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val);
-    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val | (1UL << 31));
-    if (result != 0) {
-        DEBUGP(DL_WARN, "i226_set_systime: failed to disable SYSTIM via TSAUXC, proceeding\n");
+    /* TSAUXC, SYSTIML, SYSTIMH, TSAUXC: the sequence and what it reports are in i226_phc_set (i226_phc_seed.h) */
+    result = i226_phc_set(phc_set_read, phc_set_write, dev, sec, nsec, &issued);
+    if (effect != NULL) {
+        *effect = issued;
     }
-    
-    // Step 2: Write nanoseconds to SYSTIML
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIML, nsec);
     if (result != 0) {
-        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
+        DEBUGP(DL_WARN, "i226_set_systime: failed (%d), reported effect %d\n", result, issued);
         return result;
     }
-    
-    // Step 3: Write seconds to SYSTIMH
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, sec);
-    if (result != 0) {
-        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
-        return result;
-    }
-    
-    // Step 4: Re-enable SYSTIM counter
-    ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val & ~(1UL << 31));
-    
     DEBUGP(DL_TRACE, "<==i226_set_systime: sec=%u nsec=%u Success\n", sec, nsec);
     return 0;
+}
+
+static int set_systime(device_t *dev, uint64_t systime)
+{
+    return set_systime_reported(dev, systime, NULL);
 }
 
 /**
@@ -379,6 +390,41 @@ static int set_systime(device_t *dev, uint64_t systime)
  * @param systime Output 64-bit time value
  * @return 0 on success, <0 on error
  */
+/* SYSTIM read for the callers that hold the adapter's TAS register lock (#350): no logging, and coherent without any
+ * lock shared with other readers. The TAS query holds that lock in shared mode, so two queries' reads can overlap, and
+ * other SYSTIM readers (this driver's other paths, the miniport) do not take it at all. A SYSTIML read by any of them
+ * may re-trigger the SYSTIMH latch (the cross-CPU case confirmed on the I219, src/avb_hardware_access.c). Whichever read
+ * latched the SYSTIMH value returned here happened between L1 and L2, so when no seconds rollover happened between them
+ * (L2 >= L1, the pass being far shorter than one second at DISPATCH_LEVEL), that SYSTIMH is the seconds of L1. This
+ * does not rely on the I226 latch semantics, which are not established by evidence in this repository. A rollover is
+ * retried; one that persists returns failure (the caller reports the PHC value invalid). Nonblocking. */
+#define I226_SYSTIM_READ_TRIES 3
+
+static int read_systime(device_t *dev, uint64_t *systime)
+{
+    uint32_t ts_low = 0, ts_high = 0, ts_low2 = 0;
+    int result, tries;
+
+    if (dev == NULL || systime == NULL) {
+        return -1;
+    }
+    // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
+    for (tries = 0; tries < I226_SYSTIM_READ_TRIES; tries++) {
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low2);
+        if (result != 0) return result;
+        if (ts_low2 >= ts_low) {
+            // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
+            *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
+            return 0;
+        }
+    }
+    return -1;   /* a seconds rollover inside every attempt: no coherent value */
+}
+
 static int get_systime(device_t *dev, uint64_t *systime)
 {
     uint32_t ts_low, ts_high;
@@ -407,12 +453,18 @@ static int get_systime(device_t *dev, uint64_t *systime)
     return 0;
 }
 
+static int phc_seed_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
 /**
  * @brief Initialize I226 PTP functionality
  * @param dev Device handle
+ * @param invalidated Out (may be NULL): 1 once the PHC reset was performed (i226_phc_seed), also when a later step fails
  * @return 0 on success, <0 on error
  */
-static int init_ptp(device_t *dev)
+static int init_ptp_reported(device_t *dev, int *invalidated)
 {
     uint32_t tsauxc_val = 0;
     uint32_t systimh = 0, systiml = 0;
@@ -444,8 +496,7 @@ static int init_ptp(device_t *dev)
     }
     
     // Step 2: Initialize SYSTIM registers to 1 (writing 0 might not trigger clock start)
-    if (ndis_platform_ops.mmio_write(dev, I226_SYSTIML, 1) != 0 ||
-        ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, 0) != 0) {
+    if (i226_phc_seed(phc_seed_write, dev, invalidated) != 0) {
         DEBUGP(DL_TRACE, "I226: Failed to initialize SYSTIM\n");
         return -1;
     }
@@ -520,78 +571,129 @@ static int init_ptp(device_t *dev)
     return 0;
 }
 
+static int init_ptp(device_t *dev)
+{
+    return init_ptp_reported(dev, NULL);
+}
+
 /**
  * @brief Setup I226 Time Aware Shaper (TAS)
  * Implementation matches ChatGPT5 validation sequence
  * @param dev Device handle
  * @param config TAS configuration
+ * @param write_attempted Out (may be NULL): 0 until the first TAS register write is attempted, then 1 (#352 R1 L9)
  * @return 0 on success, <0 on error
  */
-static int setup_tas(device_t *dev, struct tsn_tas_config *config)
+static int setup_tas(device_t *dev, struct tsn_tas_config *config, int *write_attempted)
 {
     PAVB_DEVICE_CONTEXT context;
     uint32_t regValue;
     int result;
-    
-    DEBUGP(DL_TRACE, "==>i226_setup_tas (I226-specific implementation)\n");
-    
+    uint64_t systim_current;
+    uint32_t cycle_time_ns;
+
+    if (write_attempted != NULL) {
+        *write_attempted = 0;
+    }
+    /* Called with the adapter's TAS register lock held (IOCTL_AVB_SETUP_TAS, #350): no logging here. The caller logs the
+     * result and the configuration after the release; the step traces this function had were removed with that change */
     if (dev == NULL || config == NULL) {
-        DEBUGP(DL_TRACE, "i226_setup_tas: Invalid parameters\n");
         return -1;
     }
-    
+
     context = (PAVB_DEVICE_CONTEXT)dev->private_data;
     if (context == NULL) {
-        DEBUGP(DL_TRACE, "i226_setup_tas: No device context\n");
         return -1;
     }
-    
-    // Log device identification
-    DEBUGP(DL_TRACE, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
-           context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
-    
+
     // Verify PHC is running
-    uint64_t systim_current;
-    result = get_systime(dev, &systim_current);
+    result = read_systime(dev, &systim_current);
     if (result != 0 || systim_current == 0) {
-        DEBUGP(DL_TRACE, "I226 PHC not running - TAS requires active PTP clock\n");
-        return -1;
+        return -1;   /* I226 PHC not running - TAS requires active PTP clock */
     }
-    
-    DEBUGP(DL_TRACE, "? I226 PHC verified: SYSTIM=0x%llx\n", systim_current);
-    
+
     // Program TQAVCTRL register (I226-specific address)
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result != 0) return result;
-    
+
     // Set TSN mode and enhanced QAV
     regValue |= I226_TQAVCTRL_TRANSMIT_MODE_TSN | I226_TQAVCTRL_ENHANCED_QAV;
-    
+
+    if (write_attempted != NULL) {
+        *write_attempted = 1;   /* the first TAS register write is attempted now, whatever its result (#352 R1 L9) */
+    }
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
-    
-    DEBUGP(DL_TRACE, "? I226 TQAVCTRL programmed: 0x%08X\n", regValue);
-    
+
     // Program cycle time
-    uint32_t cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
+    cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
     if (cycle_time_ns == 0) {
         cycle_time_ns = 1000000;  // Default 1ms cycle
     }
-    
+
     result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
     if (result != 0) return result;
-    
-    DEBUGP(DL_TRACE, "? I226 cycle time programmed: %lu ns\n", cycle_time_ns);
-    
+
     // Final verification
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result == 0 && (regValue & I226_TQAVCTRL_TRANSMIT_MODE_TSN)) {
-        DEBUGP(DL_TRACE, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
         return 0;
-    } else {
-        DEBUGP(DL_TRACE, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
-        return -1;
     }
+    return -1;
+}
+
+static int activate_read(void *ctx, avb_u32 offset, avb_u32 *value)
+{
+    uint32_t read = 0;
+    int result = ndis_platform_ops.mmio_read((device_t *)ctx, offset, &read);
+
+    *value = read;
+    return result;
+}
+
+static int activate_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
+static int activate_phc(void *ctx, avb_u64 *ns)
+{
+    return read_systime((device_t *)ctx, ns);   /* under the TAS register lock: no logging (#350) */
+}
+
+/** First gate schedule on a clean adapter, HOLD, the versioned IOCTL_AVB_TAS_ACTIVATE (#357 producer). R7 steps 6-9, the D-8
+ * writes with the R8 PHC recheck, commit, read-back and rollback are in i226_tas_activate.h (i226_tas_op_hold). debug_fault
+ * arrives header-validated: the handler refuses a non-zero value on a Release driver (#365 13.3) */
+static void activate_tas_hold(device_t *dev, const struct AVB_TAS_SCHEDULE *schedule, uint32_t link_mbps, uint32_t flags,
+                              uint32_t debug_fault, uint64_t min_margin_ns, int armed, struct AVB_TAS_OP_OUTCOME *outcome)
+{
+    I226_TAS_IO io;
+
+    io.ctx = dev;
+    io.read = activate_read;
+    io.write = activate_write;
+    io.phc = activate_phc;
+    io.fault_injection = 0;   /* the former request's injection; the versioned one is debug_fault (i226_tas_op_hold) */
+    /* Called with the adapter's TAS register lock held: no logging here; IOCTL_AVB_TAS_ACTIVATE logs the outcome after
+     * the release (#350) */
+    i226_tas_op_hold(&io, schedule, link_mbps, flags, debug_fault, min_margin_ns, armed, outcome);
+}
+
+/** Read-only TAS hardware query (#350, contract #365). Reads only: the I/O carries no write function. Called at
+ * DISPATCH_LEVEL with the adapter's TAS register lock held in shared mode, or with contended set and no register access
+ * allowed; the caller logs the reply after releasing it */
+static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
+                     int op_in_progress, int contended, const struct AVB_TAS_RETAINED *retained, volatile long long *event_seq)
+{
+    I226_TAS_IO io;
+
+    io.ctx = dev;
+    io.read = activate_read;
+    io.write = NULL;
+    io.phc = activate_phc;
+    io.fault_injection = 0;
+    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, retained, event_seq, reply);
+    return 0;
 }
 
 /**
@@ -625,8 +727,8 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
 static int disable_tas(device_t *dev)
 {
     UNREFERENCED_PARAMETER(dev);
-    DEBUGP(DL_ERROR, "!!! [#328] i226_disable_tas: BLOCKED — no safe NDIS-compatible "
-           "TAS disable path without adapter reset (see P0.2 analysis)\n");
+    /* Called with the adapter's TAS register lock held: no logging here. IOCTL_AVB_DISARM_TAS logs this -ENOTSUP
+     * (no safe NDIS-compatible TAS disable path without adapter reset, P0.2) after the release (#350) */
     return -ENOTSUP;
 }
 
@@ -1577,6 +1679,8 @@ static int i226_hil_register_offset(uint32_t reg_id, uint32_t *offset)
     case AVB_HWREG_TRGTTIMH1:  *offset = I226_TRGTTIMH1; return 0;
     case AVB_HWREG_RAL0:       *offset = I226_RAL0; return 0;
     case AVB_HWREG_RAH0:       *offset = I226_RAH0; return 0;
+    case AVB_HWREG_SYSTIML:    *offset = I226_SYSTIML; return 0;   /* version 2 only (#503) */
+    case AVB_HWREG_SYSTIMH:    *offset = I226_SYSTIMH; return 0;
     default: return -1;
     }
 }
@@ -1609,11 +1713,13 @@ const intel_device_ops_t i226_ops = {
     
     // Basic operations - clean generic names
     .init = init,
+    .init_reported = init_reported,
     .cleanup = cleanup,
     .get_info = get_info,
     
     // PTP operations - clean generic names
     .set_systime = set_systime,
+    .set_systime_reported = set_systime_reported,
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
@@ -1637,6 +1743,8 @@ const intel_device_ops_t i226_ops = {
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
+    .activate_tas_hold = activate_tas_hold,
+    .query_tas = query_tas,
     .disable_tas = disable_tas,
 #if DBG
     .trace_tx_state = trace_tx_state,

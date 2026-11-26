@@ -35,7 +35,7 @@ Companion files in this directory:
 2. This contract.
 3. The executable contracts it names — they define *current* behaviour and the canonical vocabulary:
    - verdicts: [`docs/testing/test-verdict-contract.md`](../../../docs/testing/test-verdict-contract.md), `tests/common/avb_verdict.h`, `tools/lib/TestVerdict.ps1`, runner statuses `ConvertTo-AvbRunnerVerdict` and overall `Get-AvbRunOverall` in `tools/test/Run-Tests-CI.ps1`;
-   - suites, safety classes, coverage gaps, hazard holds: `$UnitTests` / `$Hardware*Tests`, `$HilTestSafety`, `$Hardware*CoverageGaps`, `$HilHazardHolds` in `tools/test/Run-Tests-CI.ps1`;
+   - suites, safety classes, coverage gaps: `$UnitTests` / `$Hardware*Tests`, `$HilTestSafety`, `$Hardware*CoverageGaps` in `tools/test/Run-Tests-CI.ps1` (no hazard-hold table: a hold blocks tests and hides the failure, Q 2026-11-22);
    - traceability syntax: current issue templates, CI validators and the `lifecycle-traceability` skill.
 4. Historical material (`reference.md`, dated analyses under `tools/test/*.md`, generated inventories) — never normative.
 

@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include "../../include/avb_ioctl.h"
+#include "../../common/avb_ntstatus.h"   /* raw NTSTATUS of the version-2 request (#503) */
 
 // Include SSOT register definitions
 #include "../../intel-ethernet-regs/gen/i210_regs.h"
@@ -527,6 +528,199 @@ static void validate_hw_snapshot_all_adapters(HANDLE hDevice)
     }
 }
 
+/**
+ * @brief Report one TC-HWSNAP-002 per-adapter verdict (reason NULL = pass)
+ */
+static void report_hw_snapshot_v2(UINT32 adapter, avb_u16 did, const char* reason)
+{
+    if (reason == NULL) {
+        printf("[PASS] TC-HWSNAP-002/adapter:%u did=0x%04X\n", adapter, did);
+        tests_passed++;
+    } else {
+        printf("[FAIL] TC-HWSNAP-002/adapter:%u did=0x%04X: %s\n", adapter, did, reason);
+        tests_failed++;
+    }
+}
+
+/**
+ * @brief Is the state of a PHC_TIME entry (ids 17/18) justified by what the same reply and the adapter report?
+ *
+ * VALID needs an offset taken from the reply. NO_MMIO and NO_HAL are adapter-level states: justified only when id 1 of
+ * the same reply reports the same state. NOT_IN_SSOT is not a valid answer for an adapter that advertises
+ * INTEL_CAP_BASIC_1588 (it has a PHC). The test holds no register offset and selects nothing by family.
+ */
+static const char* check_phc_time_entry(const AVB_HW_SNAPSHOT_REQUEST_V2* s, UINT32 idx, avb_u32 caps,
+                                        char* reason, size_t reasonSize)
+{
+    const AVB_HWREG_ENTRY* e = &s->entries[idx];
+
+    switch (e->state) {
+    case AVB_HWREG_STATE_VALID:
+        if (e->offset == 0u) {
+            sprintf_s(reason, reasonSize, "id %u VALID without an offset", e->id);
+            return reason;
+        }
+        return NULL;
+    case AVB_HWREG_STATE_NO_MMIO:
+    case AVB_HWREG_STATE_NO_HAL:
+        if (s->entries[0].state != e->state) {
+            sprintf_s(reason, reasonSize, "id %u state %u, but id 1 of the same reply reports state %u", e->id, e->state,
+                      s->entries[0].state);
+            return reason;
+        }
+        return NULL;
+    case AVB_HWREG_STATE_NOT_IN_SSOT:
+        if (caps & INTEL_CAP_BASIC_1588) {
+            sprintf_s(reason, reasonSize, "id %u NOT_IN_SSOT although the adapter advertises INTEL_CAP_BASIC_1588 (caps 0x%08X)",
+                      e->id, caps);
+            return reason;
+        }
+        return NULL;
+    default:
+        sprintf_s(reason, reasonSize, "id %u state %u (READ_FAILED or undefined)", e->id, e->state);
+        return reason;
+    }
+}
+
+/**
+ * @brief Bind a handle to one adapter; validate the version-2 snapshot and the unchanged version 1 on the same handle
+ * @return NULL on success, otherwise the first failure reason (version 2 before version 1)
+ */
+static const char* check_hw_snapshot_v2(HANDLE hBound, const AVB_ADAPTER_IDENTITY_REQUEST* id, char* reason, size_t reasonSize)
+{
+    AVB_OPEN_BY_LUID_REQUEST bind = {0};
+    AVB_HW_SNAPSHOT_REQUEST_V2 snap2;
+    union { AVB_HW_SNAPSHOT_REQUEST v1; AVB_HW_SNAPSHOT_REQUEST_V2 room; } buf1;
+    char v1Reason[192] = {0};
+    DWORD bytesReturned = 0, info2 = 0, info1 = 0;
+    LONG st2, st1;
+    UINT32 i;
+
+    reason[0] = '\0';
+    bind.version = AVB_OPEN_BY_LUID_VERSION;
+    bind.net_luid = id->net_luid;
+    if (!DeviceIoControl(hBound, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &bind, sizeof(bind), &bind, sizeof(bind), &bytesReturned, NULL)) {
+        sprintf_s(reason, reasonSize, "OPEN_ADAPTER_BY_LUID failed (Win32 %lu)", GetLastError());
+        return reason;
+    }
+
+    /* Version 2: the complete 312-byte request in and out */
+    ZeroMemory(&snap2, sizeof(snap2));
+    snap2.version = AVB_HW_SNAPSHOT_VERSION_2;
+    st2 = avb_ioctl_ntstatus(hBound, IOCTL_AVB_QUERY_HW_SNAPSHOT, &snap2, sizeof(snap2), &snap2, sizeof(snap2), &info2);
+    printf("    [EVIDENCE] version 2: %u bytes in/out -> ntstatus=0x%08lX information=%lu\n", (unsigned)sizeof(snap2),
+           (unsigned long)st2, (unsigned long)info2);
+    if (st2 != 0) {
+        sprintf_s(reason, reasonSize, "version-2 request completed 0x%08lX with %lu bytes, expected STATUS_SUCCESS and %u bytes",
+                  (unsigned long)st2, (unsigned long)info2, (unsigned)sizeof(snap2));
+    } else if (info2 != sizeof(snap2)) {
+        sprintf_s(reason, reasonSize, "version 2 returned %lu bytes, expected %u", (unsigned long)info2, (unsigned)sizeof(snap2));
+    } else if (snap2.status != 0u || snap2.count != AVB_HWREG_COUNT_V2) {
+        sprintf_s(reason, reasonSize, "version 2: status 0x%08X count %u, expected 0 and %u", snap2.status, snap2.count,
+                  AVB_HWREG_COUNT_V2);
+    } else if (snap2.vendor_id != id->vendor_id || snap2.device_id != id->device_id || snap2.net_luid != id->net_luid) {
+        sprintf_s(reason, reasonSize, "version 2 is of another adapter: vid=0x%04X did=0x%04X luid=0x%016llX", snap2.vendor_id,
+                  snap2.device_id, snap2.net_luid);
+    } else {
+        for (i = 0; i < AVB_HWREG_COUNT_V2; i++) {
+            const AVB_HWREG_ENTRY* e = &snap2.entries[i];
+            printf("    v2 id=%-2u offset=0x%05X value=0x%08X state=%u\n", e->id, e->offset, e->value, e->state);
+            if (reason[0] == '\0' && e->id != i + 1u) {
+                sprintf_s(reason, reasonSize, "version 2 entry %u has id %u", i, e->id);
+            } else if (reason[0] == '\0' && e->state == AVB_HWREG_STATE_READ_FAILED) {
+                sprintf_s(reason, reasonSize, "version 2 register id %u read failed", e->id);
+            }
+        }
+        if (reason[0] == '\0') {
+            (void)check_phc_time_entry(&snap2, AVB_HWREG_SYSTIML - 1u, id->capabilities, reason, reasonSize);
+        }
+        if (reason[0] == '\0') {
+            (void)check_phc_time_entry(&snap2, AVB_HWREG_SYSTIMH - 1u, id->capabilities, reason, reasonSize);
+        }
+    }
+
+    /* Version 1 on the same handle, in a buffer with room for version 2: exactly 280 bytes back, unchanged */
+    ZeroMemory(&buf1, sizeof(buf1));
+    buf1.v1.version = AVB_HW_SNAPSHOT_VERSION;
+    st1 = avb_ioctl_ntstatus(hBound, IOCTL_AVB_QUERY_HW_SNAPSHOT, &buf1, sizeof(buf1), &buf1, sizeof(buf1), &info1);
+    printf("    [EVIDENCE] version 1: %u bytes in/out -> ntstatus=0x%08lX information=%lu count=%u did=0x%04X luid=0x%016llX\n",
+           (unsigned)sizeof(buf1), (unsigned long)st1, (unsigned long)info1, buf1.v1.count, buf1.v1.device_id, buf1.v1.net_luid);
+    if (st1 != 0) {
+        sprintf_s(v1Reason, sizeof(v1Reason), "version-1 request completed 0x%08lX", (unsigned long)st1);
+    } else if (info1 != sizeof(AVB_HW_SNAPSHOT_REQUEST)) {
+        sprintf_s(v1Reason, sizeof(v1Reason), "version 1 returned %lu bytes, expected exactly %u", (unsigned long)info1,
+                  (unsigned)sizeof(AVB_HW_SNAPSHOT_REQUEST));
+    } else if (buf1.v1.status != 0u || buf1.v1.count != AVB_HWREG_COUNT) {
+        sprintf_s(v1Reason, sizeof(v1Reason), "version 1: status 0x%08X count %u, expected 0 and %u", buf1.v1.status,
+                  buf1.v1.count, AVB_HWREG_COUNT);
+    } else if (buf1.v1.vendor_id != id->vendor_id || buf1.v1.device_id != id->device_id || buf1.v1.net_luid != id->net_luid) {
+        sprintf_s(v1Reason, sizeof(v1Reason), "version 1 is of another adapter: did=0x%04X luid=0x%016llX", buf1.v1.device_id,
+                  buf1.v1.net_luid);
+    }
+
+    if (reason[0] != '\0') {
+        if (v1Reason[0] != '\0') {
+            printf("    [EVIDENCE] version 1 also failed: %s\n", v1Reason);
+        }
+        return reason;
+    }
+    if (v1Reason[0] != '\0') {
+        sprintf_s(reason, reasonSize, "%s", v1Reason);
+        return reason;
+    }
+    return NULL;
+}
+
+/**
+ * @brief TC-HWSNAP-002: QUERY_HW_SNAPSHOT version 2 (SYSTIML/SYSTIMH, ids 17/18) on a handle bound to each adapter;
+ * version 1 unchanged on the same handle
+ *
+ * Read-only: GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID (per-handle binding), QUERY_HW_SNAPSHOT. Offsets come from the
+ * reply only.
+ *
+ * Verifies: #503
+ */
+static void validate_hw_snapshot_v2_all_adapters(HANDLE hDevice)
+{
+    UINT32 index, count = 1;
+
+    for (index = 0; index < count; index++) {
+        AVB_ADAPTER_IDENTITY_REQUEST id = {0};
+        DWORD bytesReturned;
+        char reason[192];
+        HANDLE hBound;
+
+        id.version = AVB_ADAPTER_IDENTITY_VERSION;
+        id.index = index;
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_ADAPTER_IDENTITY, &id, sizeof(id), &id, sizeof(id), &bytesReturned, NULL)) {
+            sprintf_s(reason, sizeof(reason), "GET_ADAPTER_IDENTITY failed (Win32 %lu)", GetLastError());
+            report_hw_snapshot_v2(index, 0, reason);
+            return;
+        }
+        count = id.count;
+        if (id.status != 0u) {
+            sprintf_s(reason, sizeof(reason), "GET_ADAPTER_IDENTITY status 0x%08X", id.status);
+            report_hw_snapshot_v2(index, id.device_id, reason);
+            continue;
+        }
+        printf("  adapter:%u vid=0x%04X did=0x%04X luid=0x%016llX caps=0x%08X\n", index, id.vendor_id, id.device_id,
+               id.net_luid, id.capabilities);
+
+        hBound = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBound == INVALID_HANDLE_VALUE) {
+            sprintf_s(reason, sizeof(reason), "open failed (Win32 %lu)", GetLastError());
+            report_hw_snapshot_v2(index, id.device_id, reason);
+            continue;
+        }
+        report_hw_snapshot_v2(index, id.device_id, check_hw_snapshot_v2(hBound, &id, reason, sizeof(reason)));
+        CloseHandle(hBound);
+    }
+    if (count == 0u) {
+        report_hw_snapshot_v2(0, 0, "no adapter enumerated");
+    }
+}
+
 int main(void)
 {
     HANDLE hDevice;
@@ -622,6 +816,10 @@ int main(void)
     // Phase 4: Register snapshot on a handle bound to each adapter (#456)
     printf("\n=== Phase 4: QUERY_HW_SNAPSHOT On Every Adapter ===\n");
     validate_hw_snapshot_all_adapters(hDevice);
+
+    // Phase 5: Snapshot version 2 (SYSTIML/SYSTIMH) and unchanged version 1 on each adapter (#503)
+    printf("\n=== Phase 5: QUERY_HW_SNAPSHOT Version 2 On Every Adapter ===\n");
+    validate_hw_snapshot_v2_all_adapters(hDevice);
 
     // Summary
     printf("\n=== Test Summary ===\n");

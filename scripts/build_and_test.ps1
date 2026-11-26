@@ -19,7 +19,7 @@
 .NOTES
   Gated since 2026-10-29 (TEST-HILPATH-012): builds through tools\build\Build-Driver.ps1 / Build-Tests.ps1 (machine
   build exclusion + test build manifest), tests through tools\test\Run-Tests-CI.ps1 (provenance, HIL safety gate,
-  #328 hazard hold, adapter state check).  The four avb_test_um.c commands run as the entries
+  adapter state check).  The four avb_test_um.c commands run as the entries
   'avb_test_project <command>'; they are not classified per command yet, so the dispatcher BLOCKs them (visible,
   non-passing) until each command is classified from source evidence.  x64 only (the test runner directory).
 .PARAMETER SkipDriver

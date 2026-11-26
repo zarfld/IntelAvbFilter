@@ -1145,8 +1145,8 @@ int main(int argc, char **argv)
         }
     }
     if (!have_target || capture == 0 || !bind_luid(h, target.net_luid) || !find_devinst(target.net_luid, &inst) ||
-        !find_addressing(target.net_luid, &ipv4, &other_link) || !other_link || !read_armed(h, &armed) || armed != 0) {
-        printf(TAG " not run: needs a bound TAS-capable I226 with link, an I210, a separate management link and tasArmed=0\n");
+        !find_addressing(target.net_luid, &ipv4, &other_link) || !read_armed(h, &armed) || armed != 0) {
+        printf(TAG " not run: needs a bound TAS-capable I226 with link, an I210 and tasArmed=0\n");
         CloseHandle(h);
         return 3;
     }

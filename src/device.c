@@ -533,8 +533,23 @@ IntelAvbFilterDispatch(
     switch (IrpStack->MajorFunction)
     {
         case IRP_MJ_CREATE:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE - Device opened by user-mode application\n");
+        {
+            /* #404 (P2 step 3): the per-open-instance context, one per file object, allocated here and freed at
+             * IRP_MJ_CLOSE only. Without it the open fails: no instance exists whose INIT_DEVICE state could be kept */
+            PAVB_OPEN_INSTANCE inst = (PAVB_OPEN_INSTANCE)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(AVB_OPEN_INSTANCE),
+                                                                          AVB_OPEN_INSTANCE_TAG);
+            if (IrpStack->FileObject == NULL || inst == NULL) {
+                if (inst != NULL) { ExFreePoolWithTag(inst, AVB_OPEN_INSTANCE_TAG); }
+                DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE: no open-instance context (FileObject=%p, allocation %s): "
+                       "STATUS_INSUFFICIENT_RESOURCES\n", IrpStack->FileObject, inst == NULL ? "failed" : "ok");
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            IrpStack->FileObject->FsContext2 = inst;   /* ExAllocatePool2 zeroes it: init_succeeded = 0 */
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE - Device opened by user-mode application, FileObject=%p instance=%p\n",
+                   IrpStack->FileObject, inst);
             break;
+        }
 
         case IRP_MJ_CLEANUP:
         {
@@ -589,8 +604,18 @@ IntelAvbFilterDispatch(
         }
 
         case IRP_MJ_CLOSE:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE\n");
+        {
+            /* #404 (P2 step 3): the last reference to the file object is gone and no IRP of this instance is outstanding,
+             * so its per-open-instance context is freed here (never at IRP_MJ_CLEANUP) */
+            PFILE_OBJECT closeFo = IrpStack->FileObject;
+            PAVB_OPEN_INSTANCE inst = closeFo ? (PAVB_OPEN_INSTANCE)closeFo->FsContext2 : NULL;
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE FileObject=%p instance=%p\n", closeFo, inst);
+            if (inst != NULL) {
+                closeFo->FsContext2 = NULL;
+                ExFreePoolWithTag(inst, AVB_OPEN_INSTANCE_TAG);
+            }
             break;
+        }
 
         default:
             DEBUGP(DL_ERROR, "!!! Unknown MajorFunction=%u\n", IrpStack->MajorFunction);
@@ -724,6 +749,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_TIMESTAMP:
         case IOCTL_AVB_SET_TIMESTAMP:
         case IOCTL_AVB_SETUP_TAS:
+        case IOCTL_AVB_TAS_ACTIVATE:      // Implements #357: the versioned 0x80C request; function 71 is withdrawn (not routed)
         case IOCTL_AVB_SETUP_FP:
         case IOCTL_AVB_SETUP_PTM:
         case IOCTL_AVB_SETUP_QAV:         // Implements #8 (REQ-F-QAV-001: Credit-Based Shaper Configuration)
@@ -763,6 +789,10 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_TAS_STATE:             // Fix #328: test-state-restoration readback (code 65)
         case IOCTL_AVB_DISARM_TAS:                // Fix #328: test-state-restoration disarm (code 66)
         case IOCTL_AVB_QUERY_HW_SNAPSHOT:         // HIL restoration verification (code 70); bound handles only, see gate
+        case IOCTL_AVB_TAS_QUERY_HW:              // Implements #350 (read-only TAS hardware query, 0x80B); bound handles only, see gate
+#ifndef NDEBUG
+        case IOCTL_AVB_DEBUG_PHC_RESEED_HOLD:     // #505 Debug-only PHC reseed hold control (0x8F1); bound handles only, see gate
+#endif
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
@@ -784,6 +814,25 @@ IntelAvbFilterDeviceIoControl(
                     Status = STATUS_INVALID_DEVICE_STATE;
                     break;
                 }
+                /* The TAS query is exact-target only (#365 12.1 row 1, #353, #367): an unbound handle is refused here,
+                 * before the fallback adapter search, lazy initialization, context use or MMIO */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_TAS_QUERY_HW) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+                /* The activation needs a bound open instance (#365 13.3: NOT_BOUND, STATUS_INVALID_DEVICE_STATE, before the
+                 * length checks): refused here, before the fallback adapter search, lazy initialization or any MMIO */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_TAS_ACTIVATE) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+#ifndef NDEBUG
+                /* #505: the Debug PHC reseed hold control is bound-only; an unbound handle changes no control state */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_DEBUG_PHC_RESEED_HOLD) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+#endif
                 // Fall back to searching for any Intel filter (single-adapter mode)
                 DEBUGP(DL_WARN, "DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();
@@ -818,7 +867,7 @@ IntelAvbFilterDeviceIoControl(
                                        &cand->MiniportFriendlyName, ven, dev);
                                 
 
-                                NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                                NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_IOCTL);
                                 if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
                                 {
                                     DEBUGP(DL_INFO, "? Successfully initialized AVB context for %wZ\n", 
@@ -947,7 +996,7 @@ IntelAvbFilterDeviceIoControl(
                         if (cand->AvbContext == NULL)
                         {
                             DEBUGP(DL_INFO, "ENUM_ADAPTERS: Initializing AVB context for requested adapter #%lu\n", adapterCount);
-                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_ENUM);
                             if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
                             {
                                 DEBUGP(DL_INFO, "ENUM_ADAPTERS: Successfully initialized AVB context for requested adapter #%lu\n", 
@@ -1150,7 +1199,7 @@ IntelAvbFilterDeviceIoControl(
                 Status = STATUS_NO_SUCH_DEVICE;
             } else {
                 if (targetFilter->AvbContext == NULL) {
-                    AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext);
+                    AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_OPEN);
                 }
                 
                 if (targetFilter->AvbContext != NULL) {
@@ -1231,6 +1280,16 @@ IntelAvbFilterDeviceIoControl(
          * change the adapter it observes).  0 matches -> STATUS_NO_SUCH_DEVICE, >1 -> STATUS_INVALID_DEVICE_STATE;
          * in both cases the handle's previous binding is left unchanged.  Later IOCTLs on the handle re-validate
          * that the bound context is still live (detached / re-enumerated adapter -> STATUS_DEVICE_NOT_READY). */
+#if DBG
+        /* #412 (Debug only): arm/disarm/clear of the initialization fault mechanism, performed by the driver under the same
+         * lock that admits an initialization attempt, so a disarm cannot be undone by an attempt in flight. Release: not
+         * handled (default: STATUS_INVALID_DEVICE_REQUEST) */
+        case IOCTL_AVB_DBG_INITFAULT_CONTROL:
+            Status = AvbInitFaultControl(Irp->AssociatedIrp.SystemBuffer, IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+                                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength, &InfoLength);
+            break;
+#endif
+
         case IOCTL_AVB_OPEN_ADAPTER_BY_LUID:
         {
             InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;

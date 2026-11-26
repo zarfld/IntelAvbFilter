@@ -89,6 +89,14 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_GET_TIMESTAMP,
         IOCTL_AVB_SET_TIMESTAMP,
         IOCTL_AVB_SETUP_TAS,
+        IOCTL_AVB_TAS_ACTIVATE,               /* 0x80C; IOCTL_AVB_TAS_ACTIVATE_80C is the same code (TC-ABI-028) */
+        IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,   /* function 71, withdrawn (TC-ABI-024) */
+#ifndef NDEBUG
+        IOCTL_AVB_DEBUG_PHC_RESEED_HOLD,      /* 0x8F1, Debug-only (#505, TC-ABI-037) */
+#endif
+        IOCTL_AVB_TAS_QUERY_HW,
+        IOCTL_AVB_TARGET_TIME_V2_QUERY,       /* 0x80D (#515, TC-ABI-034) */
+        IOCTL_AVB_TARGET_TIME_V2_ARM,         /* 0x80E (#515, TC-ABI-034) */
         IOCTL_AVB_SETUP_FP,
         IOCTL_AVB_SETUP_PTM,
         IOCTL_AVB_MDIO_READ,
@@ -150,8 +158,9 @@ static void test_abi_version(void)
                 "AVB_IOCTL_ABI_VERSION is non-zero");
     TEST_ASSERT((AVB_IOCTL_ABI_VERSION & 0xFFFF0000u) != 0u,
                 "AVB_IOCTL_ABI_VERSION major field (high 16 bits) is non-zero");
-    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020000u,
-                "AVB_IOCTL_ABI_VERSION == 0x00020000 (v2.0 - stats struct extended to 192 bytes)");
+    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020002u,
+                "AVB_IOCTL_ABI_VERSION == 0x00020002 (v2.2 - IOCTL_AVB_TAS_ACTIVATE served on 0x80C, function 71 withdrawn, #357; "
+                "v2.1 IOCTL_AVB_TAS_QUERY_HW served, #350; v2.0 stats struct 192 bytes)");
 }
 
 /* ---------------------------------------------------------------------------
@@ -318,10 +327,343 @@ static void test_struct_sizes(void)
     TEST_ASSERT(sizeof(AVB_HWREG_ENTRY) == 16, "sizeof(AVB_HWREG_ENTRY) == 16");
     TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST) == 24 + 16 * AVB_HWREG_COUNT, "sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280");
     TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST, entries) == 24, "offsetof(entries) == 24");
+    TEST_CASE("TC-ABI-033: QUERY_HW_SNAPSHOT version 2 (#503): 312 bytes, ids 17/18, count 18; version 1 unchanged (280, 16)");
+    TEST_ASSERT(AVB_HW_SNAPSHOT_VERSION == 1u, "AVB_HW_SNAPSHOT_VERSION == 1 (unchanged)");
+    TEST_ASSERT(AVB_HWREG_COUNT == 16u, "AVB_HWREG_COUNT == 16 (version 1, unchanged)");
+    TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280, "sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280 (unchanged)");
+    TEST_ASSERT(AVB_HW_SNAPSHOT_VERSION_2 == 2u, "AVB_HW_SNAPSHOT_VERSION_2 == 2");
+    TEST_ASSERT(AVB_HWREG_SYSTIML == 17u && AVB_HWREG_SYSTIMH == 18u, "AVB_HWREG_SYSTIML == 17, AVB_HWREG_SYSTIMH == 18");
+    TEST_ASSERT(AVB_HWREG_COUNT_V2 == 18u, "AVB_HWREG_COUNT_V2 == 18");
+    TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST_V2) == 312, "sizeof(AVB_HW_SNAPSHOT_REQUEST_V2) == 312");
+    TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, entries) == 24, "version 2 offsetof(entries) == 24");
+    TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, count) == offsetof(AVB_HW_SNAPSHOT_REQUEST, count) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, net_luid) == offsetof(AVB_HW_SNAPSHOT_REQUEST, net_luid) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, vendor_id) == offsetof(AVB_HW_SNAPSHOT_REQUEST, vendor_id) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, device_id) == offsetof(AVB_HW_SNAPSHOT_REQUEST, device_id) &&
+                offsetof(AVB_HW_SNAPSHOT_REQUEST_V2, status) == offsetof(AVB_HW_SNAPSHOT_REQUEST, status),
+                "version 2 header fields at the version-1 offsets");
+#ifndef NDEBUG
+    TEST_CASE("TC-ABI-037: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD (#505, Debug-only): 0x0017A3C4, 144-byte request, field offsets");
+    TEST_ASSERT(IOCTL_AVB_DEBUG_PHC_RESEED_HOLD == 0x0017A3C4u, "IOCTL_AVB_DEBUG_PHC_RESEED_HOLD == 0x0017A3C4 (function 0x8F1, FILE_WRITE_ACCESS)");
+    TEST_ASSERT(sizeof(AVB_DEBUG_PHC_HOLD_REQUEST) == 144, "sizeof(AVB_DEBUG_PHC_HOLD_REQUEST) == 144");
+    TEST_ASSERT(offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, reserved_in) == 16 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, arm_id) == 24 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, net_luid) == 40 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, state) == 48 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, armed_seq) == 64 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, activate_op_id) == 120 &&
+                offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, hold_elapsed_us) == 128 && offsetof(AVB_DEBUG_PHC_HOLD_REQUEST, status) == 136,
+                "field offsets reserved_in 16, arm_id 24, net_luid 40, state 48, armed_seq 64, activate_op_id 120, hold_elapsed_us 128, status 136");
+    TEST_ASSERT(AVB_DEBUG_PHC_HOLD_MAX_HOLD_MS == 2000u && AVB_DEBUG_PHC_HOLD_MAX_ARM_TIMEOUT_MS == 10000u &&
+                AVB_DEBUG_PHC_HOLD_MIN_HOLD_MS == 1u && AVB_DEBUG_PHC_HOLD_MIN_ARM_TIMEOUT_MS == 1u, "ARM bounds 1..2000 ms, 1..10000 ms");
+#else
+#ifdef IOCTL_AVB_DEBUG_PHC_RESEED_HOLD
+#error "#505: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD must not be declared in a Release (NDEBUG) build"
+#endif
+    TEST_CASE("TC-ABI-037: IOCTL_AVB_DEBUG_PHC_RESEED_HOLD absent in Release (#505)");
+    TEST_ASSERT(1, "not declared under NDEBUG (compile-time check above)");
+#endif
     TEST_CASE("TC-ABI-023: HIL state IOCTL function numbers 68/69/70");
     TEST_ASSERT(IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110u, "IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110");
     TEST_ASSERT(IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114u, "IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114");
     TEST_ASSERT(IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118u, "IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118");
+    /* Since the #357 atomic cutover function 71 is WITHDRAWN (never served alongside 0x80C, #365 13.1). Its code and 80-byte
+     * request stay declared, under IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71, only so tests can probe the withdrawal; unchanged values */
+    TEST_CASE("TC-ABI-024: IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 function 71 (withdrawn), write access, sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 == 0x0017811Cu, "IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 == 0x0017811C");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 requires FILE_WRITE_ACCESS");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 2) & 0xFFFu) == 71u && (IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 71, device type unchanged");
+    TEST_ASSERT(((IOCTL_AVB_SETUP_TAS >> 14) & 3u) == FILE_ANY_ACCESS, "IOCTL_AVB_SETUP_TAS keeps FILE_ANY_ACCESS: existing codes unchanged");
+    TEST_ASSERT(sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80, "sizeof(AVB_TAS_ACTIVATE_REQUEST) == 80");
+    TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, base_time_ns) == 8, "offsetof(base_time_ns) == 8");
+    TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, phc_at_commit_ns) == 64, "offsetof(phc_at_commit_ns) == 64");
+    TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, result) == 72, "offsetof(result) == 72");
+    /* Verifies: #350 (REQ-F-TAS-STATE-001). The read-only TAS hardware query, allocated by #362 (ADR-TSN-002, accepted)
+     * decision 1: CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS) = 0x0017602C, in the
+     * vendor range 0x800-0xFFF. FILE_READ_ACCESS (not FILE_ANY_ACCESS) states the read-only contract in the code: the
+     * I/O manager serves it only on a handle holding read access. Only the code is pinned here; the request layout is
+     * provisional until DES-C-TAS-010 (#365) is accepted (#362 decision 1). */
+    TEST_CASE("TC-ABI-025: IOCTL_AVB_TAS_QUERY_HW function 0x80B, read access, buffered (#350, #362)");
+    TEST_ASSERT(IOCTL_AVB_TAS_QUERY_HW == 0x0017602Cu, "IOCTL_AVB_TAS_QUERY_HW == 0x0017602C");
+    TEST_ASSERT(((IOCTL_AVB_TAS_QUERY_HW >> 14) & 3u) == FILE_READ_ACCESS, "IOCTL_AVB_TAS_QUERY_HW requires FILE_READ_ACCESS");
+    TEST_ASSERT((IOCTL_AVB_TAS_QUERY_HW & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_QUERY_HW is METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TAS_QUERY_HW >> 2) & 0xFFFu) == 0x80Bu && (IOCTL_AVB_TAS_QUERY_HW >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 0x80B (vendor range), device type unchanged");
+
+    /* Verifies: #350 (REQ-F-TAS-STATE-001). The v1 query wire layout published in #365 ("Query v1 contract", 12.2):
+     * 536 bytes, explicit padding only, identical on x86 and x64. Provisional per #362 decision 1 until #365 is accepted:
+     * a change here is a version change (AVB_TAS_QUERY_VERSION), never a silent re-layout. #365 Amendment 1 (12.10)
+     * raised the version to 2 for a semantic change of hw_read PARTIAL; layout, size and enum values are unchanged.
+     * Offline layout only; it proves nothing about the driver's behaviour. */
+    TEST_CASE("TC-ABI-026: AVB_TAS_QUERY_HW_REQUEST v1 layout, 536 bytes (#350, #365 12.2)");
+    TEST_ASSERT(AVB_TAS_QUERY_VERSION == 2u, "AVB_TAS_QUERY_VERSION == 2 (#365 Amendment 1)");
+    TEST_ASSERT(sizeof(AVB_TAS_QUEUE_WINDOW) == 16, "sizeof(AVB_TAS_QUEUE_WINDOW) == 16");
+    TEST_ASSERT(sizeof(AVB_TAS_SCHEDULE) == 80, "sizeof(AVB_TAS_SCHEDULE) == 80");
+    TEST_ASSERT(sizeof(AVB_TAS_REGS) == 80, "sizeof(AVB_TAS_REGS) == 80");
+    TEST_ASSERT(sizeof(AVB_TAS_LIMITS) == 48, "sizeof(AVB_TAS_LIMITS) == 48");
+    TEST_ASSERT(sizeof(AVB_TAS_OP_RECORD) == 72, "sizeof(AVB_TAS_OP_RECORD) == 72");
+    TEST_ASSERT(sizeof(AVB_TAS_COMMIT_INFO) == 24, "sizeof(AVB_TAS_COMMIT_INFO) == 24");
+    TEST_ASSERT(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, version),             0, "version" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, size),                4, "size" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup_client_op_id), 8, "lookup_client_op_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, net_luid),           16, "net_luid" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, vendor_id),          24, "vendor_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, device_id),          26, "device_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, revision_id),        28, "revision_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, revision_state),     30, "revision_state" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, hw_read),            32, "hw_read" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, hw_mode),            36, "hw_mode" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, origin),             40, "origin" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, gate_policy),        44, "gate_policy" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_status),     48, "current_status" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_reasons),    52, "current_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_status),        56, "next_status" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_reasons),       60, "next_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, snapshot_reasons),   64, "snapshot_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, restoration),        68, "restoration" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, flags),              72, "flags" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup_result),      76, "lookup_result" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, link_speed_mbps),    80, "link_speed_mbps" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, legacy_conflicts),   84, "legacy_conflicts" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, context_epoch),      88, "context_epoch" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, generation),         96, "generation" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, phc_before_ns),     104, "phc_before_ns" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, phc_after_ns),      112, "phc_after_ns" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, dtx_max_frame_bytes), 120, "dtx_max_frame_bytes" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, dtx_max_frame_state), 124, "dtx_max_frame_state" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, limits),            128, "limits" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current),           176, "current" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next),              256, "next" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, regs),              336, "regs" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup),            416, "lookup" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_commit),    488, "current_commit" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_commit),       512, "next_commit" },
+            { offsetof(AVB_TAS_SCHEDULE, base_time_ns),                0, "SCHEDULE.base_time_ns (retained target)" },
+            { offsetof(AVB_TAS_SCHEDULE, cycle_ns),                    8, "SCHEDULE.cycle_ns" },
+            { offsetof(AVB_TAS_SCHEDULE, queue),                      16, "SCHEDULE.queue" },
+            { offsetof(AVB_TAS_REGS, stqt),                           20, "REGS.stqt" },
+            { offsetof(AVB_TAS_REGS, endqt),                          36, "REGS.endqt" },
+            { offsetof(AVB_TAS_REGS, txqctl),                         52, "REGS.txqctl" },
+            { offsetof(AVB_TAS_REGS, dtxmxpktsz),                     68, "REGS.dtxmxpktsz" },
+            { offsetof(AVB_TAS_REGS, read_failed),                    72, "REGS.read_failed" },
+            { offsetof(AVB_TAS_REGS, consistency),                    76, "REGS.consistency" },
+            { offsetof(AVB_TAS_LIMITS, min_margin_ns),                16, "LIMITS.min_margin_ns" },
+            { offsetof(AVB_TAS_LIMITS, min_margin_state),             24, "LIMITS.min_margin_state" },
+            { offsetof(AVB_TAS_LIMITS, tier_per_queue),               44, "LIMITS.tier_per_queue" },
+            { offsetof(AVB_TAS_OP_RECORD, operation),                 48, "OP_RECORD.operation" },
+            { offsetof(AVB_TAS_OP_RECORD, op_flags),                  68, "OP_RECORD.op_flags" },
+            { offsetof(AVB_TAS_COMMIT_INFO, state),                   16, "COMMIT_INFO.state" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            (void)snprintf(msg, sizeof(msg), "offsetof(%s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+
+    /* Verifies: #350. The published values of #365 12.2 / 12.5. 0 is never a state of an enumerated field (U1); where 0 is
+     * a meaningful count, "not reported" is 0xFFFFFFFF. HARDWARE_VERIFIED is defined, but no v1 path may return it (#381). */
+    TEST_CASE("TC-ABI-027: TAS query v1 published values (#350, #365 12.2, 12.5)");
+    TEST_ASSERT(AVB_TAS_HWREAD_READ == 1u && AVB_TAS_HWREAD_NOT_RUNNING == 2u && AVB_TAS_HWREAD_PARTIAL == 3u &&
+                AVB_TAS_HWREAD_NO_MMIO == 4u, "hw_read READ 1, NOT_RUNNING 2, PARTIAL 3, NO_MMIO 4");
+    TEST_ASSERT(AVB_TAS_HWMODE_OFF == 1u && AVB_TAS_HWMODE_TSN == 2u && AVB_TAS_HWMODE_UNREADABLE == 3u,
+                "hw_mode OFF 1, TSN 2, UNREADABLE 3");
+    TEST_ASSERT(AVB_TAS_ORIGIN_NONE == 1u && AVB_TAS_ORIGIN_SETUP_TAS == 2u && AVB_TAS_ORIGIN_CONTRACT == 3u &&
+                AVB_TAS_ORIGIN_FOUND_AT_ATTACH == 4u, "origin NONE 1, SETUP_TAS 2, CONTRACT 3, FOUND_AT_ATTACH 4");
+    TEST_ASSERT(AVB_TAS_GATE_NONE == 1u && AVB_TAS_GATE_SCHEDULED == 2u && AVB_TAS_GATE_OPEN_ALL == 3u,
+                "gate_policy NONE 1, SCHEDULED 2, OPEN_ALL 3");
+    TEST_ASSERT(AVB_TAS_ST_NONE == 1u && AVB_TAS_ST_PROGRAMMED == 2u && AVB_TAS_ST_PENDING == 3u &&
+                AVB_TAS_ST_INFERRED_ACTIVE == 4u && AVB_TAS_ST_HARDWARE_VERIFIED == 5u && AVB_TAS_ST_INCONSISTENT == 6u &&
+                AVB_TAS_ST_UNKNOWN == 7u, "status NONE 1 .. UNKNOWN 7, HARDWARE_VERIFIED 5");
+    TEST_ASSERT(AVB_TAS_RESTORE_COMPLETE == 1u && AVB_TAS_RESTORE_PARTIAL_OPEN_ALL == 2u && AVB_TAS_RESTORE_PARTIAL_RESIDUE == 3u &&
+                AVB_TAS_RESTORE_NONE == 4u && AVB_TAS_RESTORE_UNKNOWN == 5u && AVB_TAS_RESTORE_NO_SSOT_BASELINE == 6u,
+                "restoration COMPLETE 1 .. NO_SSOT_BASELINE 6 (advisory)");
+    TEST_ASSERT(AVB_TAS_FLAG_OP_IN_PROGRESS == 0x1u && AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE == 0x2u &&
+                AVB_TAS_FLAG_PHC_RESET_SEEN == 0x4u, "flags OP_IN_PROGRESS 0x1, UNVERIFIED_CONFIG_ACTIVE 0x2, PHC_RESET_SEEN 0x4");
+    TEST_ASSERT(AVB_TAS_LOOKUP_NOT_REQUESTED == 1u && AVB_TAS_LOOKUP_FOUND == 2u && AVB_TAS_LOOKUP_NOT_FOUND == 3u &&
+                AVB_TAS_LOOKUP_NOT_IMPLEMENTED == 4u, "lookup_result NOT_REQUESTED 1, FOUND 2, NOT_FOUND 3, NOT_IMPLEMENTED 4");
+    TEST_ASSERT(AVB_TAS_DTX_DECODED == 1u && AVB_TAS_DTX_READ_FAILED == 2u && AVB_TAS_DTX_NO_SSOT_SCALE == 3u &&
+                AVB_TAS_DTX_NOT_READ == 4u, "dtx_max_frame_state DECODED 1, READ_FAILED 2, NO_SSOT_SCALE 3, NOT_READ 4");
+    TEST_ASSERT(AVB_TAS_REV_VALID == 1u, "revision_state VALID 1");
+    TEST_ASSERT(AVB_TAS_CONS_BASET_TORN == 0x1u, "consistency BASET_TORN 0x1");
+    TEST_ASSERT(AVB_TAS_NOT_REPORTED_U32 == 0xFFFFFFFFu, "not-reported counter 0xFFFFFFFF");
+    TEST_ASSERT(AVB_TAS_TIER_HW_UNSUPPORTED == 1u && AVB_TAS_TIER_NOT_IMPLEMENTED == 2u &&
+                AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED == 3u && AVB_TAS_TIER_IMPLEMENTED_VERIFIED == 4u, "tiers 1..4");
+    TEST_ASSERT(AVB_TAS_COMMIT_NONE == 1u && AVB_TAS_COMMIT_RETAINED == 2u && AVB_TAS_COMMIT_PHC_DISCONTINUOUS == 3u &&
+                AVB_TAS_COMMIT_HW_MISMATCH == 4u && AVB_TAS_COMMIT_LOST == 5u, "commit state NONE 1 .. LOST 5");
+    TEST_ASSERT(AVB_TAS_LIMIT_NOT_ESTABLISHED == 1u && AVB_TAS_LIMIT_ESTABLISHED == 2u, "limit state NOT_ESTABLISHED 1, ESTABLISHED 2");
+    TEST_ASSERT(AVB_TAS_SNAP_RSN_NOT_RUNNING == 0x001u && AVB_TAS_SNAP_RSN_RESERVED_02 == 0x002u &&
+                AVB_TAS_SNAP_RSN_READ_FAILED == 0x004u && AVB_TAS_SNAP_RSN_READ_INCONSISTENT == 0x008u &&
+                AVB_TAS_SNAP_RSN_PHC_DISCONTINUITY == 0x010u && AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED == 0x020u &&
+                AVB_TAS_SNAP_RSN_NO_MMIO == 0x040u && AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID == 0x080u &&
+                AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID == 0x100u && AVB_TAS_SNAP_RSN_REG_UNMAPPED == 0x200u,
+                "snapshot reasons 0x001 .. 0x200");
+    TEST_ASSERT(AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD == 0x0001u && AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF == 0x0002u &&
+                AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD == 0x0004u && AVB_TAS_SLOT_RSN_WINDOW_MISMATCH == 0x0008u &&
+                AVB_TAS_SLOT_RSN_CYCLE_MISMATCH == 0x0010u && AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH == 0x0020u &&
+                AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED == 0x0040u && AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT == 0x0080u &&
+                AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS == 0x0100u && AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST == 0x0200u &&
+                AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT == 0x0400u && AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED == 0x0800u &&
+                AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED == 0x1000u, "slot reasons 0x0001 .. 0x1000");
+
+    /* Verifies: #357 (REQ-F-TAS-ACTIVATE-001). The versioned activation code of #362 decision 1 and #365 13.1:
+     * CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0017A030. The #357 atomic cutover
+     * moved the canonical name IOCTL_AVB_TAS_ACTIVATE to this code and withdrew function 71 (TC-ABI-024); the transitional
+     * name IOCTL_AVB_TAS_ACTIVATE_80C (declaration step, 2026-11-18) names the same code. Static values only: what the driver
+     * serves is the hardware tests' evidence */
+    TEST_CASE("TC-ABI-028: IOCTL_AVB_TAS_ACTIVATE function 0x80C, write access, buffered; function 71 withdrawn (#357, #362, #365 13.1)");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE == 0x0017A030u, "IOCTL_AVB_TAS_ACTIVATE == 0x0017A030");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE requires FILE_WRITE_ACCESS");
+    TEST_ASSERT((IOCTL_AVB_TAS_ACTIVATE & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_ACTIVATE is METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE >> 2) & 0xFFFu) == 0x80Cu && (IOCTL_AVB_TAS_ACTIVATE >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 0x80C (vendor range), device type unchanged");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_80C == IOCTL_AVB_TAS_ACTIVATE, "the transitional name IOCTL_AVB_TAS_ACTIVATE_80C is the same code");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 != IOCTL_AVB_TAS_ACTIVATE,
+                "the withdrawn function 71 (0x0017811C) is a different code: the canonical name no longer names it");
+
+    /* Verifies: #357, declaration only. The AVB_TAS_OP_REQUEST layout published in #365 13.2: one 144-byte METHOD_BUFFERED
+     * structure, inputs at 0-135, success-only outputs at 136-143, the 80-byte AVB_TAS_SCHEDULE shared with the query at 56.
+     * Version 1 finalized by #365 R4 (2026-11-19): a later change is a version change (AVB_TAS_OP_VERSION), never a silent
+     * re-layout. Static layout only: it establishes ABI compatibility, not handler or hardware behaviour. */
+    TEST_CASE("TC-ABI-029: AVB_TAS_OP_REQUEST layout, 144 bytes (#357, #365 13.2)");
+    TEST_ASSERT(sizeof(AVB_TAS_OP_REQUEST) == 144, "sizeof(AVB_TAS_OP_REQUEST) == 144");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_OP_REQUEST, version),               0, "version" },
+            { offsetof(AVB_TAS_OP_REQUEST, size),                  4, "size" },
+            { offsetof(AVB_TAS_OP_REQUEST, net_luid),              8, "net_luid" },
+            { offsetof(AVB_TAS_OP_REQUEST, client_op_id),         16, "client_op_id" },
+            { offsetof(AVB_TAS_OP_REQUEST, expected_generation),  24, "expected_generation" },
+            { offsetof(AVB_TAS_OP_REQUEST, context_epoch),        32, "context_epoch" },
+            { offsetof(AVB_TAS_OP_REQUEST, flags),                40, "flags" },
+            { offsetof(AVB_TAS_OP_REQUEST, pre_activation),       44, "pre_activation" },
+            { offsetof(AVB_TAS_OP_REQUEST, debug_fault),          48, "debug_fault" },
+            { offsetof(AVB_TAS_OP_REQUEST, reserved0),            52, "reserved0" },
+            { offsetof(AVB_TAS_OP_REQUEST, schedule),             56, "schedule" },
+            { offsetof(AVB_TAS_OP_REQUEST, out_flags),           136, "out_flags" },
+            { offsetof(AVB_TAS_OP_REQUEST, reserved1),           140, "reserved1" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(AVB_TAS_OP_REQUEST, %s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+    TEST_ASSERT(sizeof(((AVB_TAS_OP_REQUEST *)0)->schedule) == sizeof(AVB_TAS_SCHEDULE) && sizeof(AVB_TAS_SCHEDULE) == 80,
+                "schedule is the shared 80-byte AVB_TAS_SCHEDULE");
+    /* The shared schedule's members as published in DES-C-TAS-010 3.5 (referenced by #365 13.2). The request carries them
+     * on the wire, so a reordered member (e.g. start_ns and end_ns swapped) is a layout change at an unchanged size. */
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_SCHEDULE, reserved),              12, "AVB_TAS_SCHEDULE, reserved" },
+            { offsetof(AVB_TAS_SCHEDULE, queue[1]),              32, "AVB_TAS_SCHEDULE, queue[1]" },
+            { offsetof(AVB_TAS_SCHEDULE, queue[3]),              64, "AVB_TAS_SCHEDULE, queue[3]" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, start_ns),           0, "AVB_TAS_QUEUE_WINDOW, start_ns" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, end_ns),             4, "AVB_TAS_QUEUE_WINDOW, end_ns" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, max_frame_bytes),    8, "AVB_TAS_QUEUE_WINDOW, max_frame_bytes" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, flags),             12, "AVB_TAS_QUEUE_WINDOW, flags" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(%s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+
+    /* Verifies: #357, declaration only. The values #365 13.2/13.3 and DES-C-TAS-010 3.5 publish for the request. The
+     * out_flags bit UNVERIFIED_CONFIG_ACTIVE (13.4) is pinned separately in TC-ABI-031 (#365 R4, 2026-11-19). */
+    TEST_CASE("TC-ABI-030: AVB_TAS_OP_REQUEST published values (#357, #365 13.2, 13.3)");
+    TEST_ASSERT(AVB_TAS_OP_VERSION == 1u, "AVB_TAS_OP_VERSION == 1");
+    TEST_ASSERT(AVB_TAS_F_ACCEPT_UNVERIFIED == 0x00000001u && AVB_TAS_F_OPEN_ALL == 0x00000002u,
+                "flags: bit 0 AVB_TAS_F_ACCEPT_UNVERIFIED, bit 1 AVB_TAS_F_OPEN_ALL");
+    TEST_ASSERT(AVB_TAS_PRE_HOLD == 1u && AVB_TAS_PRE_PASS == 2u, "pre_activation: AVB_TAS_PRE_HOLD 1, AVB_TAS_PRE_PASS 2");
+    TEST_ASSERT(AVB_TAS_DEBUG_FAULT_WRITE_MASK == 0x000000FFu && AVB_TAS_DEBUG_FAULT_RESTORE == 0x00000100u &&
+                AVB_TAS_DEBUG_FAULT_RESERVED == 0xFFFFFE00u,
+                "debug_fault: bits 0-7 write number N, bit 8 also fail the first restore write, bits 9-31 zero");
+    TEST_ASSERT((AVB_TAS_DEBUG_FAULT_WRITE_MASK | AVB_TAS_DEBUG_FAULT_RESTORE | AVB_TAS_DEBUG_FAULT_RESERVED) == 0xFFFFFFFFu &&
+                (AVB_TAS_DEBUG_FAULT_WRITE_MASK & AVB_TAS_DEBUG_FAULT_RESTORE) == 0u &&
+                (AVB_TAS_DEBUG_FAULT_RESERVED & (AVB_TAS_DEBUG_FAULT_WRITE_MASK | AVB_TAS_DEBUG_FAULT_RESTORE)) == 0u,
+                "debug_fault fields partition the 32 bits");
+    TEST_ASSERT(AVB_TAS_Q_STRICT_END == 0x00000001u && AVB_TAS_Q_STRICT_CYCLE == 0x00000002u,
+                "queue flags: AVB_TAS_Q_STRICT_END 0x1, AVB_TAS_Q_STRICT_CYCLE 0x2");
+
+    /* Verifies: #357, declaration only. #365's coordinated 2026-11-19 resolution R4 assigns the operation out_flags bit
+     * UNVERIFIED_CONFIG_ACTIVE to bit 0 (0x00000001) under its own symbol; all other out_flags bits stay 0. It is a different
+     * namespace from the query flag AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE (0x2, TC-ABI-027), whose published meaning is not
+     * reinterpreted. AVB_TAS_OP_VERSION and the 144-byte layout are unchanged (TC-ABI-029, TC-ABI-030). Static value only:
+     * when a driver sets the bit is producer behaviour, not established here. */
+    TEST_CASE("TC-ABI-031: AVB_TAS_OP_REQUEST out_flags UNVERIFIED_CONFIG_ACTIVE bit 0, separate from the query flag (#357, #365 R4)");
+    TEST_ASSERT(AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE == 0x00000001u, "out_flags: bit 0 AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE (0x1)");
+    TEST_ASSERT(AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE == 0x00000002u,
+                "query flags.UNVERIFIED_CONFIG_ACTIVE keeps 0x2: a separate namespace, not reinterpreted by the operation bit");
+
+    /* Verifies: #357. The result values of #365 13.4 (also the AVB_TAS_OP_RECORD result of 12.2), declared with the producer:
+     * 0-7 kept, 8-13 and 15-16 added, 14 unassigned. Static values only */
+    TEST_CASE("TC-ABI-032: AVB_TAS_ACT_* result values 0-16 as published in #365 13.4 (#357)");
+    TEST_ASSERT(AVB_TAS_ACT_COMMITTED == 0u && AVB_TAS_ACT_INVALID == 1u && AVB_TAS_ACT_NOT_CLEAN == 2u &&
+                AVB_TAS_ACT_FAILED_RESTORED == 3u && AVB_TAS_ACT_FAILED_NOT_RESTORED == 4u && AVB_TAS_ACT_BASE_PASSED == 5u &&
+                AVB_TAS_ACT_COMMITTED_UNTIMED == 6u && AVB_TAS_ACT_BUSY == 7u, "results 0-7 unchanged");
+    TEST_ASSERT(AVB_TAS_ACT_READ_FAILED == 8u && AVB_TAS_ACT_NOT_HARDWARE_VERIFIED == 9u && AVB_TAS_ACT_NOT_SUPPORTED == 10u &&
+                AVB_TAS_ACT_NOT_IMPLEMENTED == 11u && AVB_TAS_ACT_STATE_CONFLICT == 12u && AVB_TAS_ACT_NOT_READY == 13u &&
+                AVB_TAS_ACT_NOT_BOUND == 15u && AVB_TAS_ACT_ADAPTER_MISMATCH == 16u, "results 8-13, 15, 16 as published");
+
+    /* Verifies: #515, declaration only. Decision D-1 on #515 (2026-11-24): QUERY = CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80D,
+     * METHOD_BUFFERED, FILE_READ_ACCESS) = 0x00176034; ARM = CTL_CODE(..., 0x80E, METHOD_BUFFERED, FILE_WRITE_ACCESS) =
+     * 0x0017A038. Static values only: what a driver serves is TC-TARGET-V2-001's hardware evidence */
+    TEST_CASE("TC-ABI-034: IOCTL_AVB_TARGET_TIME_V2_QUERY 0x80D read access, _ARM 0x80E write access, buffered (#515 D-1)");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_QUERY == 0x00176034u, "IOCTL_AVB_TARGET_TIME_V2_QUERY == 0x00176034");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_ARM == 0x0017A038u, "IOCTL_AVB_TARGET_TIME_V2_ARM == 0x0017A038");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 14) & 3u) == FILE_READ_ACCESS, "QUERY requires FILE_READ_ACCESS only");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_ARM >> 14) & 3u) == FILE_WRITE_ACCESS, "ARM requires FILE_WRITE_ACCESS only");
+    TEST_ASSERT((IOCTL_AVB_TARGET_TIME_V2_QUERY & 3u) == METHOD_BUFFERED && (IOCTL_AVB_TARGET_TIME_V2_ARM & 3u) == METHOD_BUFFERED,
+                "both codes are METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 2) & 0xFFFu) == 0x80Du && ((IOCTL_AVB_TARGET_TIME_V2_ARM >> 2) & 0xFFFu) == 0x80Eu,
+                "functions 0x80D and 0x80E (vendor range)");
+    TEST_ASSERT((IOCTL_AVB_TARGET_TIME_V2_QUERY >> 16) == FILE_DEVICE_PHYSICAL_NETCARD &&
+                (IOCTL_AVB_TARGET_TIME_V2_ARM >> 16) == FILE_DEVICE_PHYSICAL_NETCARD, "device type unchanged");
+    TEST_ASSERT(IOCTL_AVB_TARGET_TIME_V2_QUERY != IOCTL_AVB_SET_TARGET_TIME && IOCTL_AVB_TARGET_TIME_V2_ARM != IOCTL_AVB_SET_TARGET_TIME &&
+                IOCTL_AVB_TARGET_TIME_V2_QUERY != IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71 && IOCTL_AVB_TARGET_TIME_V2_ARM != IOCTL_AVB_TAS_ACTIVATE_LEGACY_FN71,
+                "neither code reuses the legacy SET_TARGET_TIME (47) or the withdrawn function 71");
+
+    /* Verifies: #515, declaration only. The layout accepted on #515 (D-1 "Layout and output rules", D-7): 48 bytes, 8-byte
+     * aligned, every offset pinned. Static layout only: ABI compatibility, not handler or hardware behaviour */
+    TEST_CASE("TC-ABI-035: AVB_TARGET_TIME_V2_REQUEST layout, 48 bytes, 8-byte aligned (#515)");
+    TEST_ASSERT(sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48, "sizeof(AVB_TARGET_TIME_V2_REQUEST) == 48");
+    TEST_ASSERT(__alignof(AVB_TARGET_TIME_V2_REQUEST) == 8, "__alignof(AVB_TARGET_TIME_V2_REQUEST) == 8");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, version),           0, "version" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, size),              4, "size" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, operation),         8, "operation" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, timer_index),      12, "timer_index" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, flags),            16, "flags" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, reserved0),        20, "reserved0" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, target_time_ns),   24, "target_time_ns" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, result_target_ns), 32, "result_target_ns" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, result_state),     40, "result_state" },
+            { offsetof(AVB_TARGET_TIME_V2_REQUEST, reserved1),        44, "reserved1" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(AVB_TARGET_TIME_V2_REQUEST, %s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+    TEST_ASSERT(sizeof(((AVB_TARGET_TIME_V2_REQUEST *)0)->target_time_ns) == 8 &&
+                sizeof(((AVB_TARGET_TIME_V2_REQUEST *)0)->result_target_ns) == 8, "target_time_ns and result_target_ns are 64-bit");
+
+    /* Verifies: #515, declaration only. Published values: version 2, size 48; QUERY 1, ARM 2; VALID 1, UNDECODABLE 2,
+     * INCOHERENT 3 (D-1), COHERENCE_UNVERIFIED 4 (D-7) */
+    TEST_CASE("TC-ABI-036: AVB_TARGET_TIME_V2_REQUEST published values (#515 D-1, D-7)");
+    TEST_ASSERT(AVB_TARGET_TIME_V2_VERSION == 2u, "AVB_TARGET_TIME_V2_VERSION == 2");
+    TEST_ASSERT(AVB_TT_V2_OP_QUERY == 1u && AVB_TT_V2_OP_ARM == 2u, "operation: QUERY 1, ARM 2");
+    TEST_ASSERT(AVB_TT_V2_STATE_VALID == 1u && AVB_TT_V2_STATE_UNDECODABLE == 2u && AVB_TT_V2_STATE_INCOHERENT == 3u &&
+                AVB_TT_V2_STATE_COHERENCE_UNVERIFIED == 4u, "result_state: VALID 1, UNDECODABLE 2, INCOHERENT 3, COHERENCE_UNVERIFIED 4");
 }
 
 int main(void)

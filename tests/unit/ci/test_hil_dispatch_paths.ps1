@@ -566,6 +566,88 @@ if ($feText -notmatch 'PARTIAL / SMOKE') { $feBad += '-Quick not labelled as a p
 if ($feText -match 'Read-Host') { $feBad += 'interactive prompt still present' }
 tc_check 'TEST-HILPATH-019-run-tests-frontend-resolves-registered-entries-fails-closed-and-runs-every-suite' ($feBad.Count -eq 0) ($feBad -join '; ')
 
+# 025 (#473): a program selected without arguments stands for all its registered modes, each once, in every local route
+#      (Run-Tests.ps1 -TestExecutable and Run-Tests-CI.ps1 -Tests, the target of Run-Tests-Elevated.ps1 with and without -Suite);
+#      an explicit argument selects that mode only, an exact bare entry is run once, anything else fails closed.  The real
+#      functions and dispatch statements are taken from the syntax trees; the runner calls are recorded, nothing is executed.
+$mdBad = @()
+$ciTree = [System.Management.Automation.Language.Parser]::ParseFile($runCi, [ref]$null, [ref]$null)
+$mdGroups = { param($r) if ($r.ContainsKey('Groups')) { @(foreach ($s in $r.Groups.Keys) { "$s=$(@($r.Groups[$s]) -join '|')" }) -join ';' } elseif ($r.Suite) { "$($r.Suite)=$($r.Entry)" } else { '' } }
+if ($feBad.Count -eq 0) {
+    $want = @($feReg['HardwareIntegration'] | Where-Object { ($_ -split '\s+', 2)[0] -eq 'test_tas_activate' })
+    if ($want.Count -lt 5 -or $want -contains 'test_tas_activate') { $mdBad += "unexpected registered modes [$($want -join '|')]" }
+    foreach ($nm in 'test_tas_activate', 'test_tas_activate.exe') {
+        $got = & $mdGroups (Resolve-AvbRunnerEntry -Name $nm -Arguments '' -Registry $feReg)
+        if ($got -ne "HardwareIntegration=$($want -join '|')") { $mdBad += "$nm -> '$got', expected every registered mode [$($want -join '|')]" }
+    }
+    foreach ($m in $want) { $a = ($m -split '\s+', 2)[1]; $got = & $mdGroups (Resolve-AvbRunnerEntry -Name 'test_tas_activate' -Arguments $a -Registry $feReg); if ($got -ne "HardwareIntegration=$m") { $mdBad += "explicit $a -> '$got'" } }
+    foreach ($x in 'test_tas_query_clean', 'test_tas_isolated_arm') { $got = & $mdGroups (Resolve-AvbRunnerEntry -Name $x -Arguments '' -Registry $feReg); if ($got -ne "HardwareIntegration=$x") { $mdBad += "exact bare entry $x -> '$got'" } }
+    $syn = [ordered]@{ HardwareUnit = @('foo --a'); HardwareIntegration = @('foo --a', 'foo --b x', 'foo_extra --c', 'bar', 'bar --z'); Unit = @(); Integration = @() }
+    $synCases = [ordered]@{ 'foo' = 'HardwareUnit=foo --a;HardwareIntegration=foo --b x'; 'foo_extra' = 'HardwareIntegration=foo_extra --c'; 'foo_ext' = ''; 'fo' = ''; 'bar' = 'HardwareIntegration=bar'; 'nothing' = '' }
+    foreach ($k in $synCases.Keys) { $got = & $mdGroups (Resolve-AvbRunnerEntry -Name $k -Arguments '' -Registry $syn); if ($got -ne $synCases[$k]) { $mdBad += "synthetic $k -> '$got', expected '$($synCases[$k])'" } }
+    $got = & $mdGroups (Resolve-AvbRunnerEntry -Name 'foo' -Arguments '--c' -Registry $syn); if ($got -ne '') { $mdBad += "unregistered explicit mode -> '$got'" }
+    # the front end's own dispatch statement
+    $disp = $feAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestExecutable' -and $x.Extent.Text -match 'Invoke-AvbDispatch' }, $true) | Select-Object -First 1
+    if (-not $disp) { $mdBad += 'Run-Tests.ps1: no dispatch statement' }
+    else {
+        $run = [scriptblock]::Create('param($TestExecutable, $TestArgs, $runnerRegistry, $ReportDir) $rec = New-Object System.Collections.ArrayList' + "`n" +
+            'function Invoke-AvbDispatch { param([string]$Label, [string]$Suite, [string[]]$Entries = @(), [string]$ReportDir) [void]$rec.Add("$Suite=$($Entries -join ''|'')") }' + "`n" +
+            'function Add-AvbUnregistered([string]$Entry) { [void]$rec.Add("UNREGISTERED=$Entry") }' + "`n" + 'function Write-Step { }; function Write-Info { }' + "`n" +
+            'if ($TestExecutable) ' + $disp.Clauses[0].Item2.Extent.Text + "`n" + '$rec')
+        $o = @(& $run 'test_tas_activate.exe' '' $feReg 'C:\r') -join ';'
+        if ($o -ne "HardwareIntegration=$($want -join '|')") { $mdBad += "front-end dispatch of the bare program: '$o'" }
+        $o = @(& $run 'test_tas_activate.exe' '--hold' $feReg 'C:\r') -join ';'
+        if ($o -ne 'HardwareIntegration=test_tas_activate --hold') { $mdBad += "front-end dispatch of --hold: '$o'" }
+        $o = @(& $run 'not_a_registered_program.exe' '' $feReg 'C:\r') -join ';'
+        if ($o -ne 'UNREGISTERED=not_a_registered_program') { $mdBad += "front-end dispatch of an unregistered program: '$o'" }
+    }
+    # Run-Tests-CI.ps1 -Suite S -Tests <program>: its own list resolution with its own tables
+    $tl = $ciTree.FindAll({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$Tests.Count -gt 0' -and $x.Extent.Text -match '\$TestList' }, $true) | Select-Object -First 1
+    $tables = @(foreach ($n in 'UnitTests', 'IntegrationTests', 'HardwareUnitTests', 'HardwareIntegrationTests', 'HardwareIntegrationAttendedOnly', 'HardwareUnitCoverageGaps', 'HardwareIntegrationCoverageGaps', 'HilTestSafety') {
+        $a = $ciTree.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq "`$$n" }, $true) | Select-Object -First 1
+        if ($a) { $a.Extent.Text } else { $mdBad += "Run-Tests-CI.ps1: table $n missing" } })
+    $fnText = @($ciTree.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Expand-AvbBareProgram' }, $true) | ForEach-Object { $_.Extent.Text })
+    if (-not $tl) { $mdBad += 'Run-Tests-CI.ps1: no -Tests resolution statement' }
+    else {
+        $ciRun = [scriptblock]::Create('param($Suite, [string[]]$Tests)' + "`n" + (($tables + $fnText + $tl.Extent.Text) -join "`n") + "`n" + '@($TestList)')
+        $ciCases = @(
+            @('HardwareIntegration', @('test_tas_activate'), ($want -join '|')),
+            @('HardwareIntegration', @('test_tas_activate.exe'), ($want -join '|')),
+            @('HardwareIntegration', @('test_tas_activate --hold'), 'test_tas_activate --hold'),
+            @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate'), ((@('test_tas_activate --hold') + @($want | Where-Object { $_ -ne 'test_tas_activate --hold' })) -join '|')),
+            @('HardwareIntegration', @('test_tas_query_clean'), 'test_tas_query_clean'),
+            @('HardwareIntegration', @('not_a_registered_program'), 'not_a_registered_program'),
+            @('Unit', @('test_tas_activate'), 'test_tas_activate'),
+            @('Unit', @('ps1:tests/unit/ci/test_local_suites.ps1'), 'ps1:tests/unit/ci/test_local_suites.ps1'))
+        foreach ($c in $ciCases) { $o = @(& $ciRun $c[0] $c[1]); if ((@($o | Sort-Object) -join '|') -ne (@($c[2] -split '\|' | Sort-Object) -join '|')) { $mdBad += "Run-Tests-CI -Suite $($c[0]) -Tests $($c[1] -join ',') -> [$($o -join '|')], expected [$($c[2])]" } }
+        # PR #518 review: an entry is dispatched once whichever selector supplied it, in both orders; the first mention keeps its place.
+        $onceCases = [ordered]@{
+            'program, then mode'            = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate --hold'), ($want -join '|'))
+            'mode, then program'            = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate'), ($want -join '|'))
+            'program twice'                 = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate.exe'), ($want -join '|'))
+            'mode between two programs'     = @('HardwareIntegration', @('test_tas_activate', 'test_tas_activate --hold', 'test_tas_activate'), ($want -join '|'))
+            'mode twice, one with .exe'     = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate.exe --hold'), 'test_tas_activate --hold')
+            'mode with other spacing'       = @('HardwareIntegration', @('test_tas_activate', ' test_tas_activate   --hold '), ($want -join '|'))
+            'script entry twice'            = @('Unit', @('ps1:tests/unit/ci/test_local_suites.ps1', 'ps1:tests/unit/ci/test_local_suites.ps1'), 'ps1:tests/unit/ci/test_local_suites.ps1')
+            'different modes stay'          = @('HardwareIntegration', @('test_tas_activate --hold', 'test_tas_activate --pass'), 'test_tas_activate --hold|test_tas_activate --pass') }
+        foreach ($k in $onceCases.Keys) { $c = $onceCases[$k]; $o = @(& $ciRun $c[0] $c[1]); if ((@($o | Sort-Object) -join '|') -ne (@($c[2] -split '\|' | Sort-Object) -join '|')) { $mdBad += "once per mode, ${k}: [$($o -join '|')], expected [$($c[2])]" } }
+        $o = @(& $ciRun 'HardwareIntegration' @('test_tas_activate --pass', 'test_tas_activate')); if ($o[0] -ne 'test_tas_activate --pass') { $mdBad += "the first mention does not keep its place: [$($o -join '|')]" }
+        if (@(& $ciRun 'HardwareUnit' @()).Count -lt 10) { $mdBad += 'an empty -Tests no longer selects the suite list' }
+    }
+}
+tc_check 'TEST-HILPATH-025-a-program-without-arguments-runs-all-its-registered-modes-once' ($mdBad.Count -eq 0) ($mdBad -join '; ')
+
+# 026 STATIC (#487/#473): the cases contained in test_tas_activate.exe (tests/ioctl/tas_activate_cases.h) and its registered runner
+#      entries are the same set - a mode cannot be added to only one of them.  That the program runs them is TC-MOCK-064 and
+#      the hardware run, not this check.
+$ccBad = @()
+$caseHdr = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\tas_activate_cases.h'))
+$caseTable = [regex]::Match($caseHdr, '(?s)g_tas_act_cases\[\]\s*=\s*\{(.*?)\r?\n\};')
+$caseArgs = @([regex]::Matches($caseTable.Groups[1].Value, '\{\s*"(--[a-z-]+)"\s*,') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+$regArgs = @(@(if ($feBad.Count -eq 0) { $feReg['HardwareIntegration'] | Where-Object { $_ -match '^test_tas_activate\s' } | ForEach-Object { ($_ -split '\s+', 2)[1] } }) | Sort-Object)
+if ($caseArgs.Count -eq 0 -or ($caseArgs -join '|') -ne ($regArgs -join '|')) { $ccBad += "contained [$($caseArgs -join '|')], registered [$($regArgs -join '|')]" }
+tc_check 'TEST-HILPATH-026-STATIC-contained-cases-of-test-tas-activate-equal-its-registered-entries' ($ccBad.Count -eq 0) ($ccBad -join '; ')
+
 # --- #458 (comment 7008463710, Q 2026-11-19): earlier failures never stop later independent tests at any layer ---------
 # Maintainer decision #458 comment 7010425296 (2026-11-19) narrows 7008463710 into two rules, both covered here:
 #   (1) admission/promotion unchanged: a failed required Unit or Integration job prevents deploy-staging, and automated HIL

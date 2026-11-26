@@ -20,7 +20,9 @@
 
 /* API version (manually set when API changes) */
 #define AVB_VERSION_MAJOR 1
-#define AVB_VERSION_MINOR 0
+#define AVB_VERSION_MINOR 2   /* 1.1: IOCTL_AVB_TAS_QUERY_HW served (#350, #64, DES-C-TAS-010 3.3).
+                                 1.2: IOCTL_AVB_TAS_ACTIVATE served as the versioned 0x80C request, function 71 withdrawn
+                                 (#357 atomic cutover; #365 R4: the service version changes when the operation is served) */
 
 /* Build number (should be set by CI/CD or build script) */
 #ifndef AVB_VERSION_BUILD

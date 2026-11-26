@@ -149,8 +149,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($RunCIPath, [re
 $gateFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilGateDecision' }, $false)
 if ($null -eq $gateFn) { tc_fail 'TEST-HILSUITE-000-gate-decision-available' 'Get-AvbHilGateDecision not found'; exit 1 }
 . ([scriptblock]::Create($gateFn.Extent.Text))
-# The #328 hazard annotations ($HilHazardHolds) are no longer read at dispatch (Q 2026-11-03), so they are not part of
-# "gate-runnable".
+# There is no #328 hazard-hold table (annotation-only since Q 2026-11-03, removed Q 2026-11-22), so "gate-runnable" is
+# the gate decision alone.
 function Test-Runnable([string]$Entry, [string]$Class) {
     $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt ''
     return ($d.Action -eq 'Run')

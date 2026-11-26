@@ -988,10 +988,11 @@ $AllTests = @(
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_dev_lifecycle.c"
         Output = "test_dev_lifecycle.exe"
+        Libs = "cfgmgr32.lib iphlpapi.lib advapi32.lib"   # --init-retry-fault, --init-concurrent: owned NIC cycle, gateway diagnostic, fault arm (#412, #463, #313)
         Enabled = $true
         Priority = "P0"
-        Description = "Device Lifecycle Management Tests (Issue #313)"
-        Issue = "#313"
+        Description = "Device Lifecycle Management Tests (Issue #313); --init-contract: INIT_DEVICE / OPEN_ADAPTER on READY adapters per the #12/#313 amendment 2026-11-12 (#404); --init-retry-fault: UT-DEV-LIFECYCLE-002 with the Debug-only initialization fault mechanism, owned NIC cycles (#412); --init-concurrent: UT-DEV-INIT-CONCURRENT, concurrent INIT_DEVICE during an initialization held by the #412 HOLD (#313)"
+        Issue = "#313, #404, #412"
         TestCases = 19
         IOCTLs = "20, 21, 31, 32, 37"
         Requirement = "#12"
@@ -1924,6 +1925,32 @@ $AllTests = @(
         Description = "Isolated SETUP_TAS: schedule state, per-queue TX health, NIC-cycle restoration"
         Issue = "#328"
         TestCases = 3
+    },
+    @{
+        Name = "test_tas_activate"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_activate.c"
+        Output = "test_tas_activate.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "TAS_ACTIVATE (#357): HOLD #369, PASS #370, Debug-only rollback fault; wire, state, refusal, NIC-cycle cleanup"
+        Issue = "#357"
+        TestCases = 3
+    },
+    @{
+        Name = "test_tas_query_clean"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_query_clean.c"
+        Output = "test_tas_query_clean.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "TAS_QUERY_HW: clean adapter (#366, TC-TASAPI-001); --hw-verified HARDWARE_VERIFIED never returned past BaseT (#381, TC-TASAPI-016); --tiers-unbound unbound/capability/tiers (#367, TC-TASAPI-002); --invalid invalid versioned TAS_ACTIVATE requests on 0x80C refused, state and TX unchanged, legacy function-71 phase (#368, TC-TASAPI-003); --restore reported restoration and PHC across the NIC cycle (#377, TC-TASAPI-012); --link-speed driver link speed against the OS observation after the owned NIC cycle (#472, TC-TASAPI-021); owned NIC-cycle cleanup"
+        Issue = "#366, #381, #367, #368, #377, #472"
+        TestCases = 6
     },
 
     @{
