@@ -188,6 +188,15 @@
  *              NO_REWRITE   one deviation write; a further change of the same record is refused (its accesses are counters); ENDQT3 raw twice.
  *              ABORT_SETTLED  the abort's thread ended, nothing is open; otherwise INCONCLUSIVE_RESTORATION, and CLEANUP and RESTORE cannot PASS.
  *            Not shown: an abort before or during the write (TC-MOCK-077 only), the delivery of a console signal, the end of a process.
+ *            TC-TASACT-META-007, a seventh complete run (#350, #362; the MDIO restart approved 2026-11-26 for this case, see run_meta_link): a
+ *            link change without a detach under a retained schedule. COMMIT (HOLD, BaseT 40 s ahead) and GUARD (this commit PENDING, the link
+ *            connected and stable, #472's PHY checks on a handle proven bound, PHC at least 35 s before BaseT); then one BMCR restart.
+ *              CONTROL_BEFORE  PENDING 3/0x0, next NONE, snapshot 0, before the write.
+ *              LINK_EVENT, CONTEXT  the OS saw the link down and up after the write; one epoch and generation, no attach, detach, pause or
+ *                          restart, no PHC reset. Otherwise INCONCLUSIVE and the status lines judge nothing.
+ *              BEFORE_BASET, PAST_BASET  every reply after the link is back, and two past BaseT: S1 UNKNOWN with EVENT_UNRECONCILED, slot
+ *                          reasons 0 (#362, #365 12.4/12.10). The transition itself is printed, not judged.
+ *              LINK_RESTORE  link, rates and PHY as before (CLEANUP_FAILED / INCONCLUSIVE_RESTORATION); the owned NIC cycle follows anyway.
  *            The trigger is sent when no send is outstanding, waited for within bounds, never withheld because of it. It only schedules the
  *            restart: until the END of the restart was observed it counts as an open operation, so CLEANUP and RESTORE cannot PASS before
  *            (TC-MOCK-068, TC-MOCK-070).
@@ -326,7 +335,8 @@
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
  * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
  * WRITE_REGISTER, except --metadata-events SETUP_NOWRITE (SYSTIML/SYSTIMH through the Debug-only WRITE_REGISTER) and META-005, -006 (the
- * approved exception there, per run: nine READ_REGISTER, ENDQT3 written and restored); that mode also
+ * approved exception there, per run: nine READ_REGISTER, ENDQT3 written and restored); META-007 writes one BMCR auto-negotiation
+ * restart through IOCTL_AVB_MDIO_WRITE (approved 2026-11-26); that mode also
  * sends SET_TIMESTAMP, PHC_OFFSET_ADJUST, SETUP_TAS, DISARM_TAS, SET_HW_TIMESTAMPING, INIT_DEVICE and one filter restart. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
@@ -355,9 +365,12 @@
 #include "../ioctl/owned_mutation.h"       /* META-005: the deviation and its restoration against an abort (#369, PR #524; TC-MOCK-077) */
 #include "../ioctl/tas_activate_cases.h"   /* contained cases, selection, exit status (#487) */
 #include "../ioctl/tas_lifecycle_eval.h"   /* instance lookup and lifecycle outcome of #364 (META-004) */
+#include "../ioctl/tas_link_event_eval.h"   /* META-007: OS readings around a link change (#472, unchanged) */
+#include "../ioctl/tas_link_status_eval.h"  /* META-007: the query after a link change, checked offline by TC-MOCK-078 */
 typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of filteruser.h that this test does not use (as in #364) */
 #include "../../src/filteruser.h"          /* IOCTL_FILTER_RESTART_ONE_INSTANCE, IOCTL_FILTER_ENUERATE_ALL_INSTANCES */
 #include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
+#include "../ioctl/link_phy_restart.h"     /* META-007: the guarded auto-negotiation restart (copy of #472's helpers) */
 #include "tas_wire_observer.h"
 
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
@@ -397,7 +410,7 @@ typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of fil
 static RUN_MODE g_mode;
 #define META_BACK_NS          (5 * NS_PER_SEC)        /* META-003: the held reseed steps the PHC back by this much */
 #define META_STATUS_STEP_NS   (100LL * NS_PER_MS)     /* STATUS_OFFSET: a step that can be measured against wall time (META-003: back) */
-static int g_meta_case;                              /* --metadata-events: 1 to 6 = META-001 to -006 (the run_adapter call in progress) */
+static int g_meta_case;                              /* --metadata-events: 1 to 7 = META-001 to -007 (the run_adapter call in progress) */
 static int g_fault_case;                             /* --fault-versioned: 1 = F1, 2 = F2 (the run_adapter call in progress) */
 static const char *g_case;
 static int g_failed, g_blocked, g_ran;   /* g_ran: case executions (run_adapter calls); --fault-versioned runs F1 and F2 per adapter */
@@ -634,8 +647,24 @@ static void m5_end(void)
     m5_abort();
 }
 
-static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; m5_end(); report_abort(); return FALSE; }
-static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; m5_end(); report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
+/* META-007: from before the MDIO restart until LINK_RESTORE has reported */
+static volatile LONG g_m7_adapter = -1;
+static volatile LONG g_m7_did;
+
+static void m7_report_abort(void)
+{
+    LONG adapter = InterlockedExchange(&g_m7_adapter, -1);
+
+    if (adapter >= 0) {
+        printf("[INCONCLUSIVE_RESTORATION] %s-LINK_RESTORE/adapter:%ld did=0x%04lX: aborted after the auto-negotiation restart; link and PHY were not "
+               "checked afterwards and the owned NIC cycle did not run. Operator: check the link state and speed, NIC cycle this adapter\n",
+               g_case, adapter, g_m7_did);
+        fflush(stdout);
+    }
+}
+
+static BOOL WINAPI on_console_ctrl(DWORD type) { (void)type; m5_end(); m7_report_abort(); report_abort(); return FALSE; }
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *info) { (void)info; m5_end(); m7_report_abort(); report_abort(); return EXCEPTION_CONTINUE_SEARCH; }
 
 /* One verdict line. Nonpassing tags count as failures, BLOCKED separately */
 static void verdict(const char *tag, const char *check, UINT32 adapter, avb_u16 did, const char *reason)
@@ -1875,6 +1904,9 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
 static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch);
 static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
+#ifndef NDEBUG
+static void run_meta_link(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
+#endif
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
@@ -2025,6 +2057,21 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         old_epoch = run_meta_restart(h, h2, index, id, frame);
         (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         meta_new_context(index, id, old_epoch);
+        return;
+    }
+
+    if (g_mode == MODE_META && g_meta_case == 7) {
+        /* TC-TASACT-META-007: h queries and judges; the MDIO restart has its own read/write handle bound to the same NET_LUID */
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        CloseHandle(h2);
+#ifndef NDEBUG
+        run_meta_link(h, index, id, frame);
+#else
+        verdict("INCONCLUSIVE", "COMMIT", index, id->device_id, "built with NDEBUG: META-007 is not compiled (never PASS)");
+        m5_not_run("INCONCLUSIVE", index, id->device_id, "built with NDEBUG: not exercised");
+#endif
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         return;
     }
 
@@ -4477,10 +4524,13 @@ static const char *const m5_lines[] = { "REG_RESTORE", "HANDLE", "DEVIATION", "G
                                         "ORACLE_RESTORED_SLOT", "ORACLE_RESTORED_NEXT" };
 static const char *const m6_lines[] = { "REG_RESTORE", "HANDLE", "DEVIATION", "ABORT_ORDER", "ABORT_ONE", "NO_REWRITE", "ABORT_SETTLED", "GENERATION_RESTORED", "CONTROL" };
 
+static const char *const m7_lines[] = { "CONTROL_BEFORE", "LINK_EVENT", "CONTEXT", "BEFORE_BASET", "PAST_BASET", "LINK_RESTORE" };
+
 static void m5_not_run(const char *tag, UINT32 index, avb_u16 did, const char *reason)
 {
-    const char *const *lines = g_meta_case == 6 ? m6_lines : m5_lines;
-    unsigned k, n = g_meta_case == 6 ? (unsigned)(sizeof(m6_lines) / sizeof(m6_lines[0])) : (unsigned)(sizeof(m5_lines) / sizeof(m5_lines[0]));
+    const char *const *lines = g_meta_case == 7 ? m7_lines : (g_meta_case == 6 ? m6_lines : m5_lines);
+    unsigned k, n = g_meta_case == 7 ? (unsigned)(sizeof(m7_lines) / sizeof(m7_lines[0])) :
+                    (g_meta_case == 6 ? (unsigned)(sizeof(m6_lines) / sizeof(m6_lines[0])) : (unsigned)(sizeof(m5_lines) / sizeof(m5_lines[0])));
 
     for (k = 0; k < n; k++) {
         verdict(tag, lines[k], index, did, reason);
@@ -4577,6 +4627,376 @@ static void m6_judge(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST 
               "(under the deviation 0x%08X)%s", qd.q.current_status, qd.q.current_reasons, qd.q.next_status, qd.q.next_reasons, qd.q.current_commit.state,
               qd.q.regs.endqt[3], qj->q.regs.endqt[3], control ? "" : "; the restored state before BaseT is not established");
     verdict(!control ? "INCONCLUSIVE" : (r1 ? "PASS" : "FAIL"), "CONTROL", index, id->device_id, why);
+}
+#endif
+
+#ifndef NDEBUG
+/* ---- --metadata-events, TC-TASACT-META-007 (#350, #362): a link change without a detach under a retained schedule ----
+ * The MDIO auto-negotiation restart was approved by Q on 2026-11-26 for this case: one write per execution (BMCR | restart), with #472's PHY
+ * identification, binding proof, guards and restoration rules; no PHY reset, no power-down, no other register write, no driver change.
+ * Requirement (#362 ADR-TSN-002, lifecycle table: link change, "report unknown until re-established"; #365 12.4 S1, 12.10): after an attributed
+ * link change both slots are UNKNOWN with EVENT_UNRECONCILED, before and after BaseT. PENDING before BaseT, or only LINK_EVENTS_UNOBSERVED past it,
+ * is the predicted defect. Nothing is judged without an attributed event (the transition seen by the OS, one context, no PHC reset). */
+#define M7_LEAD_NS        (40LL * NS_PER_SEC)     /* BaseT ahead of the commit: the change and the samples after it fit before BaseT */
+#define M7_MARGIN_NS      (35LL * NS_PER_SEC)     /* PHC before BaseT immediately before the MDIO write, measured */
+#define M7_PERIOD_MS      20
+#define M7_BASELINE_MS    500
+#define M7_DOWN_BOUND_MS  15000                   /* from the write: the OS must report the link down */
+#define M7_UP_BOUND_MS    60000                   /* from the link-down: the OS must report it up */
+#define M7_STABLE_MS      3000                    /* unchanged OS state after the link is back */
+#define M7_PAST_BOUND_MS  70000                   /* wait for the PHC one cycle past BaseT */
+#define M7_MAX_SAMPLES    6000
+C_ASSERT(EV_IF_CONNECTED == MediaConnectStateConnected && EV_IF_DISCONNECTED == MediaConnectStateDisconnected);
+
+typedef struct {
+    EV_SAMPLE os;                  /* OS reading, query, OS reading */
+    BOOL valid;                    /* a complete reply for this adapter */
+    BOOL regs_same;                /* the compared schedule registers as in the guard's reply */
+    AVB_TAS_QUERY_HW_REQUEST q;
+} M7_SAMPLE;
+
+static M7_SAMPLE g_m7[M7_MAX_SAMPLES + 2];
+
+static double m7_ms(void)
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+static DWORD m7_if(avb_u64 luid, MIB_IF_ROW2 *row)
+{
+    ZeroMemory(row, sizeof(*row));
+    row->InterfaceLuid.Value = luid;
+    return GetIfEntry2(row);
+}
+
+static void m7_sample(HANDLE h, const AVB_ADAPTER_IDENTITY_REQUEST *id, const QUERY_READ *qg, M7_SAMPLE *s)
+{
+    MIB_IF_ROW2 a, b;
+    QUERY_READ q;
+
+    ZeroMemory(s, sizeof(*s));
+    s->os.t0 = m7_ms();
+    s->os.e1 = m7_if(id->net_luid, &a);
+    s->os.t1 = m7_ms();
+    query(h, &q);
+    s->os.t2 = m7_ms();
+    s->os.e2 = m7_if(id->net_luid, &b);
+    s->os.t3 = m7_ms();
+    s->os.s1 = (int)a.MediaConnectState;
+    s->os.s2 = (int)b.MediaConnectState;
+    s->os.tx1 = a.TransmitLinkSpeed;
+    s->os.tx2 = b.TransmitLinkSpeed;
+    s->os.qstatus = q.status;
+    s->os.qgot = q.got;
+    s->valid = query_readable(&q) && q.q.net_luid == id->net_luid && q.q.device_id == id->device_id;
+    s->os.qok = s->valid;
+    if (s->valid) {
+        s->q = q.q;
+        s->os.mbps = q.q.link_speed_mbps;
+        s->os.epoch = q.q.context_epoch;
+        s->os.generation = q.q.generation;
+        s->regs_same = m5_others_equal(&q.q.regs, &qg->q.regs) && q.q.regs.endqt[3] == qg->q.regs.endqt[3] && q.q.hw_mode == qg->q.hw_mode;
+    }
+}
+
+/** Every sample, as runs of the same OS state and the same answer, with times after the write and PHC relative to BaseT */
+static void m7_print(unsigned from, unsigned to, double tw, long long base)
+{
+    unsigned i, j;
+
+    for (i = from; i < to; i = j) {
+        const M7_SAMPLE *a = &g_m7[i];
+        for (j = i + 1; j < to; j++) {
+            const M7_SAMPLE *b = &g_m7[j];
+            if (b->os.s1 != a->os.s1 || b->os.s2 != a->os.s2 || b->valid != a->valid || b->regs_same != a->regs_same ||
+                (a->valid && (b->q.current_status != a->q.current_status || b->q.current_reasons != a->q.current_reasons ||
+                              b->q.next_status != a->q.next_status || b->q.next_reasons != a->q.next_reasons ||
+                              b->q.snapshot_reasons != a->q.snapshot_reasons || b->q.current_commit.state != a->q.current_commit.state))) {
+                break;
+            }
+        }
+        printf("    [EVIDENCE] META-007 %+.1f .. %+.1f ms (%u): OS %d/%d tx=%llu | ", a->os.t0 - tw, g_m7[j - 1].os.t3 - tw, j - i, a->os.s1, a->os.s2,
+               a->os.tx1);
+        if (a->valid) {
+            printf("current %u/0x%X next %u/0x%X snapshot 0x%X commit %u (%s), link %u, registers %s, PHC %+.1f ms to BaseT\n", a->q.current_status,
+                   a->q.current_reasons, a->q.next_status, a->q.next_reasons, a->q.snapshot_reasons, a->q.current_commit.state, tas_ev_class(&a->q),
+                   a->q.link_speed_mbps, a->regs_same ? "as committed" : "CHANGED", ((double)(long long)a->q.phc_after_ns - (double)base) / 1e6);
+        } else {
+            printf("no complete reply (ntstatus=0x%08lX information=%lu)\n", (unsigned long)a->os.qstatus, a->os.qgot);
+        }
+    }
+    fflush(stdout);
+}
+
+static void run_meta_link(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame)
+{
+    AVB_TAS_OP_REQUEST op, sent;
+    AVB_TAS_STATE s0, s;
+    AVB_DRIVER_STATISTICS st0, st1;
+    QUERY_READ q0, qg, qb;
+    MIB_IF_ROW2 pre, fin;
+    DWORD pre_err, fin_err, information = 0, t0;
+    LP_PHY before, after;
+    EV_TRACK track;
+    TAS_EV_COUNT cb, cp;
+    LP_COMPARE cmp = LP_UNTRUSTED;
+    HANDLE hw = INVALID_HANDLE_VALUE;
+    avb_u16 bmcr = 0, value;
+    long long phc = 0, phc_write = 0, phc_now = 0, base, last_phc = 0;
+    double tw = 0, t_change = 0, t_down = 0;
+    unsigned n = 0, iw, i, i_past, n_past = 0, after_up = 0, past_base_in_up = 0, changed = 0, cls[4] = {0, 0, 0, 0};
+    LONG st;
+    BOOL committed, armed, control, guard, write_ok = FALSE, stats0 = FALSE, stats1, one_context, no_reset, attributed, link_event, stable, full;
+    BOOL snap_ok = FALSE, link_ok;
+    int last_os = -1;
+    unsigned long long last_tx = 0, pre_mbps = 0, e;
+    const char *missing = NULL;
+    char why[900], phy_why[300];
+    TAS_EV_OUT out;
+
+    ZeroMemory(&before, sizeof(before));
+    ZeroMemory(&after, sizeof(after));
+    ZeroMemory(&s, sizeof(s));
+    ZeroMemory(&st0, sizeof(st0));
+    ZeroMemory(&st1, sizeof(st1));
+    ZeroMemory(&cb, sizeof(cb));
+    ZeroMemory(&cp, sizeof(cp));
+    phy_why[0] = '\0';
+    printf("\n  --- META-007: a link change without a detach under a retained schedule ---\n");
+    query(h, &q0);
+    if (!read_state(h, &s0) || s0.armed != AVB_TAS_STATE_CLEAN || !query_clean(&q0) || q0.q.net_luid != id->net_luid || q0.q.generation == 0 ||
+        q0.q.context_epoch == 0 || !read_phc(h, &phc)) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id, "no clean pre-state with a reported pair on the bound adapter, or no PHC: nothing is committed");
+        verdict("BLOCKED", "GUARD", index, id->device_id, "nothing was committed (see COMMIT): nothing is written");
+        m5_not_run("BLOCKED", index, id->device_id, "nothing was committed (see COMMIT): nothing was written");
+        return;
+    }
+    base = (phc + M7_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+    build_op(&op, id->net_luid, &q0.q, base, frame);
+    op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+    sent = op;
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &op, sizeof(op), &op, sizeof(op), &information);
+    committed = st == 0 && information == (DWORD)sizeof(op) && op.client_op_id == sent.client_op_id && op.net_luid == sent.net_luid &&
+                op.context_epoch == sent.context_epoch && op.expected_generation == sent.expected_generation &&
+                memcmp(&op.schedule, &sent.schedule, sizeof(op.schedule)) == 0;
+    op = sent;
+    armed = read_state(h, &s) && state_matches(&s, base);
+    query(h, &qg);
+    control = committed && m5_mine(&qg, &op, id) && m5_record(&qg, &qg, &op) && qg.q.hw_mode == AVB_TAS_HWMODE_TSN;
+
+    /* The guard: everything measured before the one write, the first missing condition is the reason */
+    pre_err = m7_if(id->net_luid, &pre);
+    if (!committed) {
+        missing = "this case's commit (one complete STATUS_SUCCESS reply)";
+    } else if (!armed) {
+        missing = "the driver record ARMED with the committed gate list";
+    } else if (!control || tas_ev_control(TRUE, &qg.q) != TAS_EV_PASS) {
+        missing = "the positive control: this commit's pair, PENDING without reasons, next NONE, snapshot 0, RETAINED, TSN mode, before BaseT";
+    } else if ((id->capabilities & INTEL_CAP_MDIO) == 0) {
+        missing = "INTEL_CAP_MDIO: no owned link-change mechanism";
+    } else if (pre_err != NO_ERROR || pre.MediaConnectState != MediaConnectStateConnected || pre.TransmitLinkSpeed == 0 ||
+               pre.TransmitLinkSpeed == ~0ULL || pre.TransmitLinkSpeed % EV_BPS_PER_MBIT != 0) {
+        missing = "an OS-connected link with a known whole-Mbit/s rate";
+    } else {
+        pre_mbps = pre.TransmitLinkSpeed / EV_BPS_PER_MBIT;
+        hw = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
+        if (hw != INVALID_HANDLE_VALUE) {
+            query(hw, &qb);
+        }
+        if (hw == INVALID_HANDLE_VALUE || !query_valid(&qb) || qb.q.net_luid != id->net_luid) {
+            missing = "a read/write handle proven to be bound to this NET_LUID (an unbound MDIO request would reach another adapter)";
+        } else if (!lp_phy_snap(hw, "before", TRUE, &before, phy_why, sizeof(phy_why)) || !lp_phy_allows_restart(&before, phy_why, sizeof(phy_why))) {
+            missing = phy_why;
+        } else {
+            stats0 = read_stats(h, &st0);
+            if (!stats0) {
+                missing = "the driver statistics before the event";
+            }
+        }
+    }
+    if (missing == NULL) {   /* the state before the write, sampled the same way, and once more immediately before it */
+        double ts = m7_ms();
+        while (m7_ms() - ts < M7_BASELINE_MS && n < M7_MAX_SAMPLES) {
+            m7_sample(h, id, &qg, &g_m7[n++]);
+            Sleep(M7_PERIOD_MS);
+        }
+        if (!lp_mdio(hw, FALSE, LP_REG_BMCR, &bmcr, "before the write") || bmcr != before.bmcr) {
+            missing = "BMCR read again equal to the guard's value";
+        } else {
+            m7_sample(h, id, &qg, &g_m7[n++]);
+            for (i = 0; i < n && missing == NULL; i++) {
+                if (!g_m7[i].valid || !ev_expected(&g_m7[i].os, &e) || e != pre_mbps || tas_ev_control(TRUE, &g_m7[i].q) != TAS_EV_PASS) {
+                    missing = "the link and the PENDING answer stable in every sample before the write, the last one immediately before it";
+                }
+            }
+        }
+        if (missing == NULL && (!read_phc(h, &phc_write) || phc_write >= base || base - phc_write < M7_MARGIN_NS)) {
+            missing = "the PHC at least 35 s before BaseT immediately before the write";
+        }
+    }
+    guard = missing == NULL;
+
+    sprintf_s(why, sizeof(why), "ACTIVATE op=0x%016llX base=%lld (PHC %lld) ntstatus=0x%08lX information=%lu, pair epoch %llu generation %llu -> %llu, record %d",
+              op.client_op_id, base, phc, (unsigned long)st, information, op.context_epoch, op.expected_generation, qg.q.generation, (int)s.armed);
+    verdict(committed ? "PASS" : "FAIL", "COMMIT", index, id->device_id, why);
+    print_status("guard (positive control)", &qg);
+    sprintf_s(why, sizeof(why), "missing: %s", guard ? "" : missing);
+    if (guard) {
+        sprintf_s(why, sizeof(why), "every precondition measured: PHY 0x%04X 0x%04X at address %u, BMCR 0x%04X, BMSR 0x%04X, OS connected at %llu Mbit/s, "
+                  "PHC %.3f s before BaseT", before.id1, before.id2, LP_PHY_ADDR, before.bmcr, before.bmsr, pre_mbps, (double)(base - phc_write) / 1e9);
+    }
+    verdict(guard ? "PASS" : "INCONCLUSIVE", "GUARD", index, id->device_id, why);
+    out = committed && m5_mine(&qg, &op, id) ? tas_ev_control(TRUE, &qg.q) : TAS_EV_INCONCLUSIVE;
+    sprintf_s(why, sizeof(why), "required PENDING 3/0x0, next 1/0x0, snapshot 0, commit RETAINED 2; observed %u/0x%X next %u/0x%X snapshot 0x%X commit %u",
+              qg.q.current_status, qg.q.current_reasons, qg.q.next_status, qg.q.next_reasons, qg.q.snapshot_reasons, qg.q.current_commit.state);
+    verdict(out == TAS_EV_PASS ? "PASS" : (out == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "CONTROL_BEFORE", index, id->device_id, why);
+    if (!guard) {
+        for (i = 1; i < sizeof(m7_lines) / sizeof(m7_lines[0]); i++) {
+            verdict("INCONCLUSIVE", m7_lines[i], index, id->device_id, "the guard did not hold (see GUARD): nothing was written");
+        }
+        if (n != 0) {
+            m7_print(0, n, m7_ms(), base);
+        }
+        if (hw != INVALID_HANDLE_VALUE) {
+            CloseHandle(hw);
+        }
+        return;
+    }
+
+    /* The one write: the value read plus the restart command, nothing else */
+    iw = n;
+    value = (avb_u16)(before.bmcr | LP_BMCR_ANRESTART);
+    g_m7_did = id->device_id;
+    InterlockedExchange(&g_m7_adapter, (LONG)index);
+    tw = m7_ms();
+    write_ok = lp_mdio(hw, TRUE, LP_REG_BMCR, &value, "restart auto-negotiation (META-007)");
+    t_change = tw;
+    ev_track_start(&track, &g_m7[iw - 1].os);
+    while (n < M7_MAX_SAMPLES) {
+        M7_SAMPLE *p = &g_m7[n++];
+        BOOL had_down = track.saw_down;
+        int os;
+        double now;
+
+        m7_sample(h, id, &qg, p);
+        ev_track(&track, &p->os);
+        os = ev_os(&p->os);
+        now = p->os.t3;
+        if (os != last_os || (os == 2 && p->os.tx1 != last_tx)) {
+            t_change = now;
+            last_os = os;
+            last_tx = p->os.tx1;
+        }
+        if (track.saw_down && !had_down) {
+            t_down = now;
+        }
+        if ((!track.saw_down && now - tw > M7_DOWN_BOUND_MS) || (track.phase == EV_PHASE_DOWN && now - t_down > M7_UP_BOUND_MS) ||
+            (track.phase == EV_PHASE_UP && now - t_change >= M7_STABLE_MS) || now - tw > M7_DOWN_BOUND_MS + M7_UP_BOUND_MS + M7_STABLE_MS) {
+            break;
+        }
+        Sleep(M7_PERIOD_MS);
+    }
+    full = n == M7_MAX_SAMPLES;
+    stable = last_os == 2 && g_m7[n - 1].os.t3 - t_change >= M7_STABLE_MS;
+
+    /* Past BaseT: the PHC one cycle beyond it, then two samples */
+    t0 = GetTickCount();
+    while (GetTickCount() - t0 < M7_PAST_BOUND_MS && (!read_phc(h, &phc_now) || phc_now < base + CYCLE_NS)) {
+        Sleep(200);
+    }
+    i_past = n;
+    if (phc_now >= base + CYCLE_NS) {
+        m7_sample(h, id, &qg, &g_m7[n++]);
+        m7_sample(h, id, &qg, &g_m7[n++]);
+        n_past = 2;
+    }
+    stats1 = read_stats(h, &st1);
+    m7_print(0, n, tw, base);
+
+    /* Attribution: the transition seen by the OS after the write, one context throughout, no PHC reset */
+    link_event = write_ok && track.saw_down && track.saw_up;
+    one_context = stats0 && stats1 && st0.FilterAttachCount == st1.FilterAttachCount && st0.FilterDetachCount == st1.FilterDetachCount &&
+                  st0.FilterPauseCount == st1.FilterPauseCount && st0.FilterRestartCount == st1.FilterRestartCount;
+    no_reset = TRUE;
+    for (i = 0; i < n; i++) {
+        const M7_SAMPLE *p = &g_m7[i];
+        if (!p->valid) {
+            continue;
+        }
+        one_context = one_context && p->q.context_epoch == op.context_epoch && p->q.generation == op.expected_generation + 1;
+        no_reset = no_reset && p->q.current_commit.state != AVB_TAS_COMMIT_PHC_DISCONTINUOUS && (long long)p->q.phc_before_ns >= last_phc &&
+                   p->q.phc_after_ns >= p->q.phc_before_ns;
+        last_phc = (long long)p->q.phc_before_ns;
+        changed += i >= iw && !p->regs_same;
+    }
+    attributed = link_event && one_context && no_reset && !full;
+    sprintf_s(why, sizeof(why), "write %s; after it the OS reported the link %s%s; %u samples%s", write_ok ? "accepted" : "NOT accepted (it may still have reached "
+              "the PHY)", track.saw_down ? "disconnected" : "never disconnected", track.saw_down ? (track.saw_up ? " and connected again" : " and not "
+              "connected again") : "", n - iw, full ? " (sample capacity reached)" : "");
+    verdict(link_event ? "PASS" : "INCONCLUSIVE", "LINK_EVENT", index, id->device_id, why);
+    sprintf_s(why, sizeof(why), "epoch %llu and generation %llu in every reply: %s; attach %llu/%llu detach %llu/%llu pause %llu/%llu restart %llu/%llu; PHC "
+              "monotonic and commit never PHC_DISCONTINUOUS: %s", op.context_epoch, op.expected_generation + 1, one_context ? "yes" : "NO",
+              st0.FilterAttachCount, st1.FilterAttachCount, st0.FilterDetachCount, st1.FilterDetachCount, st0.FilterPauseCount, st1.FilterPauseCount,
+              st0.FilterRestartCount, st1.FilterRestartCount, no_reset ? "yes" : "NO");
+    verdict(one_context && no_reset ? "PASS" : "INCONCLUSIVE", "CONTEXT", index, id->device_id, one_context && no_reset ? why :
+            "not attributable to the link change alone; no verdict on the status");
+    if (!(one_context && no_reset)) {
+        printf("    [EVIDENCE] META-007 CONTEXT: %s\n", why);
+    }
+    printf("    [EVIDENCE] META-007 schedule registers after the write: %u sample(s) differ from the committed ones (reported, not judged; EG-12)\n", changed);
+
+    /* Before BaseT: every reply after the link is back; the transition itself is evidence only */
+    ev_track_start(&track, &g_m7[iw - 1].os);
+    for (i = iw; i < i_past; i++) {
+        const M7_SAMPLE *p = &g_m7[i];
+        ev_track(&track, &p->os);
+        if (track.phase != EV_PHASE_UP) {
+            if (!p->valid) { cls[3]++; } else if (strcmp(tas_ev_class(&p->q), "PENDING") == 0) { cls[0]++; }
+            else if (strcmp(tas_ev_class(&p->q), "EVENT_UNRECONCILED") == 0) { cls[1]++; } else { cls[2]++; }
+            continue;
+        }
+        if (p->valid && (long long)p->q.phc_after_ns >= base) {
+            past_base_in_up++;
+            continue;
+        }
+        after_up++;
+        tas_ev_count(&cb, tas_ev_unreconciled(p->valid, &p->q));
+    }
+    printf("    [EVIDENCE] META-007 during the transition (evidence only, the order of NDIS indication and OS table is unknown): PENDING %u, "
+           "EVENT_UNRECONCILED %u, other %u, no complete reply %u\n", cls[0], cls[1], cls[2], cls[3]);
+    out = tas_ev_phase(&cb, attributed);
+    sprintf_s(why, sizeof(why), "after the link was back, before BaseT: %u replies, %u as required (S1 UNKNOWN, EVENT_UNRECONCILED, slot reasons 0), %u not, %u "
+              "incomplete%s; %u replies were already past BaseT%s", after_up, cb.pass, cb.fail, cb.missing, after_up == 0 ? " (none: not measured)" : "",
+              past_base_in_up, attributed ? "" : "; the event is not attributed (LINK_EVENT, CONTEXT)");
+    verdict(out == TAS_EV_PASS ? "PASS" : (out == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "BEFORE_BASET", index, id->device_id, why);
+    for (i = i_past; i < i_past + n_past; i++) {
+        tas_ev_count(&cp, tas_ev_unreconciled(g_m7[i].valid && (long long)g_m7[i].q.phc_before_ns > base, &g_m7[i].q));
+    }
+    out = tas_ev_phase(&cp, attributed);
+    sprintf_s(why, sizeof(why), "past BaseT: %u replies, %u as required, %u not (observed %u/0x%X next %u/0x%X snapshot 0x%X), %u incomplete%s", n_past, cp.pass, cp.fail,
+              n_past ? g_m7[i_past].q.current_status : 0u, n_past ? g_m7[i_past].q.current_reasons : 0u, n_past ? g_m7[i_past].q.next_status : 0u,
+              n_past ? g_m7[i_past].q.next_reasons : 0u, n_past ? g_m7[i_past].q.snapshot_reasons : 0u, cp.missing,
+              n_past == 0 ? "; the PHC did not pass BaseT within the bound: not measured" : "");
+    verdict(out == TAS_EV_PASS ? "PASS" : (out == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "PAST_BASET", index, id->device_id, why);
+
+    /* LINK_RESTORE: the link as before and stable, the PHY by #472's rules. The owned NIC-cycle cleanup follows in every case */
+    fin_err = m7_if(id->net_luid, &fin);
+    snap_ok = lp_phy_snap(hw, "after", FALSE, &after, phy_why, sizeof(phy_why));
+    if (snap_ok) {
+        cmp = lp_compare_phy(&before, &after, phy_why, sizeof(phy_why));
+    }
+    link_ok = fin_err == NO_ERROR && fin.MediaConnectState == pre.MediaConnectState && fin.TransmitLinkSpeed == pre.TransmitLinkSpeed &&
+              fin.ReceiveLinkSpeed == pre.ReceiveLinkSpeed;
+    sprintf_s(why, sizeof(why), "OS before %d tx=%llu rx=%llu, after err=%lu %d tx=%llu rx=%llu, %s; PHY: %s%s", (int)pre.MediaConnectState, pre.TransmitLinkSpeed,
+              pre.ReceiveLinkSpeed, fin_err, (int)fin.MediaConnectState, fin.TransmitLinkSpeed, fin.ReceiveLinkSpeed, stable ? "stable" : "NOT stable",
+              !snap_ok ? "not read: " : (cmp == LP_SAME ? "identity and compared configuration as before" : (cmp == LP_VIOLATION ? "" : "")), phy_why);
+    verdict(fin_err == NO_ERROR && (!link_ok || !stable || (snap_ok && cmp == LP_VIOLATION)) ? "CLEANUP_FAILED" :
+            (fin_err != NO_ERROR || !snap_ok || cmp == LP_UNTRUSTED ? "INCONCLUSIVE_RESTORATION" : "PASS"), "LINK_RESTORE", index, id->device_id, why);
+    InterlockedExchange(&g_m7_adapter, -1);
+    CloseHandle(hw);
 }
 #endif
 
@@ -4898,6 +5318,9 @@ static int run_case(void)
             run_adapter(ids[i].index, &ids[i]);
             g_meta_case = 6;
             g_case = "TC-TASACT-META-006";
+            run_adapter(ids[i].index, &ids[i]);
+            g_meta_case = 7;
+            g_case = "TC-TASACT-META-007";
             run_adapter(ids[i].index, &ids[i]);
             g_case = "TC-TASACT-META-001";
         } else {

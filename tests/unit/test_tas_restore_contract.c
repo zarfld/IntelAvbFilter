@@ -48,6 +48,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 #include "../ioctl/tas_link_event_eval.h"   /* TC-MOCK-076: TC-TASAPI-021 EVENT samples (#472), test logic only */
+#include "../ioctl/tas_link_status_eval.h"  /* TC-MOCK-078: TC-TASACT-META-007 status after a link change (#350), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -4639,6 +4640,67 @@ static void test_76_link_event(void)
     g_ev76_n = 0;
 }
 
+/* TC-MOCK-078: the query's answer after a link change under a retained schedule (TC-TASACT-META-007, #350, #362; test logic only) */
+static void m78_q(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 cur, avb_u32 cur_rsn, avb_u32 next, avb_u32 next_rsn, avb_u32 snap)
+{
+    ZeroMemory(q, sizeof(*q));
+    q->current_status = cur;
+    q->current_reasons = cur_rsn;
+    q->next_status = next;
+    q->next_reasons = next_rsn;
+    q->snapshot_reasons = snap;
+    q->current_commit.state = AVB_TAS_COMMIT_RETAINED;
+}
+
+static void test_78_link_status(void)
+{
+    const avb_u32 U = AVB_TAS_ST_UNKNOWN, P = AVB_TAS_ST_PENDING, N = AVB_TAS_ST_NONE, I = AVB_TAS_ST_INCONSISTENT;
+    const avb_u32 EV = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED, LEU = AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED;
+    AVB_TAS_QUERY_HW_REQUEST q;
+    TAS_EV_COUNT c;
+
+    printf("\n[TC-MOCK-078] #350 the answer after a link change under a retained schedule (test logic only)\n");
+    m78_q(&q, P, 0, N, 0, 0);
+    EXPECT_EQ("control: PENDING, next NONE, no snapshot reason", tas_ev_control(TRUE, &q), TAS_EV_PASS);
+    EXPECT_EQ("after the event: PENDING is wrong (the predicted defect)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, N, 0, 0);
+    EXPECT_EQ("after the event: only LINK_EVENTS_UNOBSERVED is wrong (S3, the predicted defect past BaseT)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    EXPECT_EQ("... and no control either", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, EV);
+    EXPECT_EQ("S1 UNKNOWN with EVENT_UNRECONCILED, reasons 0: as required", tas_ev_unreconciled(TRUE, &q), TAS_EV_PASS);
+    EXPECT_EQ("... never a control", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, EV | AVB_TAS_SNAP_RSN_READ_INCONSISTENT);
+    EXPECT_EQ("further S1 inputs beside it: still as required", tas_ev_unreconciled(TRUE, &q), TAS_EV_PASS);
+    m78_q(&q, P, 0, N, 0, EV);
+    EXPECT_EQ("the bit with a PENDING slot is wrong (S1 first)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, I, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH, U, AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED, EV);
+    EXPECT_EQ("the bit with an INCONSISTENT slot is wrong (S1 before S2)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, U, 0, EV);
+    EXPECT_EQ("the bit with slot reasons is wrong (12.10: S1 carries none)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, AVB_TAS_SNAP_RSN_READ_INCONSISTENT);
+    EXPECT_EQ("UNKNOWN for another S1 cause is not the event's answer", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    EXPECT_EQ("no complete reply: missing, never agreement", tas_ev_unreconciled(FALSE, &q), TAS_EV_INCONCLUSIVE);
+    EXPECT_EQ("... also for the control", tas_ev_control(FALSE, &q), TAS_EV_INCONCLUSIVE);
+    m78_q(&q, P, 0, N, 0, 0);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("a control without a retained commit fails", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+
+    ZeroMemory(&c, sizeof(c));
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_FAIL);
+    EXPECT_EQ("one wrong reply fails the phase", tas_ev_phase(&c, TRUE), TAS_EV_FAIL);
+    EXPECT_EQ("not attributed: nothing is judged, also not a wrong reply", tas_ev_phase(&c, FALSE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    EXPECT_EQ("no reply: not measured", tas_ev_phase(&c, TRUE), TAS_EV_INCONCLUSIVE);
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_INCONCLUSIVE);
+    EXPECT_EQ("a missing reply beside correct ones: not established", tas_ev_phase(&c, TRUE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_PASS);
+    EXPECT_EQ("every reply as required: PASS", tas_ev_phase(&c, TRUE), TAS_EV_PASS);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -4705,6 +4767,7 @@ int main(void) {
     test_74_phc_set();
     test_75_query_record();
     test_76_link_event();
+    test_78_link_status();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
