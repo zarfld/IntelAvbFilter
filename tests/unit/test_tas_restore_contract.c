@@ -2346,6 +2346,10 @@ typedef struct {
     LONG result;
     DWORD abort_ms;
     volatile LONG aborted;               /* OWNED_ABORT + 1 when the abort thread returned */
+    BOOL access;                         /* every access signals the object behind the change's handle */
+    volatile LONG accesses, refused;     /* accesses made, and those the handle refused */
+    HANDLE restore_reached, restore_go;  /* the restoration is between its two accesses / may go on; NULL: no wait there */
+    DWORD run_ms;                        /* how long the writer waits for a restoration elsewhere */
 } MUT77;
 
 #define MUT77_RAW   0x17D78400L
@@ -2358,6 +2362,15 @@ static void mut77_hold(MUT77 *f)
     (void)WaitForSingleObject(f->go, MUT77_WAIT);
 }
 
+/** One access of the change: a register request in the hardware test, here a signal to the object behind the handle */
+static void mut77_access(MUT77 *f)
+{
+    if (f->access) {
+        InterlockedIncrement(&f->accesses);
+        if (!SetEvent(f->m.handle)) { InterlockedIncrement(&f->refused); }
+    }
+}
+
 static void mut77_write(void *ctx)
 {
     MUT77 *f = (MUT77 *)ctx;
@@ -2365,6 +2378,7 @@ static void mut77_write(void *ctx)
     InterlockedExchange(&f->in_write, 1);
     InterlockedIncrement(&f->writes);
     if (f->hold_write) { mut77_hold(f); }   /* sent, its effect still to come */
+    mut77_access(f);
     InterlockedExchange(&f->reg, MUT77_DEV);
     if (f->abort_in_write) { f->own_abort = owned_mutation_abort(&f->m, f->abort_ms); }
     InterlockedExchange(&f->in_write, 0);
@@ -2377,11 +2391,17 @@ static LONG mut77_restore(void *ctx)
     InterlockedIncrement(&f->restores);
     if (InterlockedCompareExchange(&f->in_write, 0, 0) != 0) { InterlockedIncrement(&f->restores_in_write); }
     if (f->hold_restore) { mut77_hold(f); }
+    mut77_access(f);   /* the write back */
+    if (f->restore_go != NULL) {
+        SetEvent(f->restore_reached);
+        (void)WaitForSingleObject(f->restore_go, MUT77_WAIT);
+    }
+    mut77_access(f);   /* the read */
     InterlockedExchange(&f->reg, MUT77_RAW);
     return f->restore_result;
 }
 
-static void mut77_observe(void *ctx) { (void)ctx; }
+static void mut77_observe(void *ctx) { mut77_access((MUT77 *)ctx); }
 
 static void mut77_at(void *ctx, OWNED_MUT_POINT point)
 {
@@ -2394,7 +2414,7 @@ static DWORD WINAPI mut77_writer(LPVOID p)
 {
     MUT77 *f = (MUT77 *)p;
 
-    f->result = owned_mutation_run(&f->m, MUT77_WAIT, &f->issued);
+    f->result = owned_mutation_run(&f->m, f->run_ms, &f->issued);
     return 0;
 }
 
@@ -2413,6 +2433,7 @@ static void mut77_init(MUT77 *f, int hold_at)
     f->restore_result = 1;
     f->hold_at = hold_at;
     f->abort_ms = MUT77_WAIT;
+    f->run_ms = MUT77_WAIT;
     f->reached = CreateEventA(NULL, TRUE, FALSE, NULL);
     f->go = CreateEventA(NULL, TRUE, FALSE, NULL);
     f->m.write = mut77_write;
@@ -2444,6 +2465,191 @@ static BOOL mut77_join(HANDLE t)
     BOOL ok = t != NULL && WaitForSingleObject(t, MUT77_WAIT) == WAIT_OBJECT_0;
     CloseHandle(t);
     return ok;
+}
+
+/* The bound object of the caller, its own view of it, and objects that take the caller's handle value over after it was closed */
+#define MUT77_OTHERS 512u
+typedef struct { HANDLE device, view, other[MUT77_OTHERS]; unsigned others; BOOL reused; } MUT77_DEVICE;
+
+static BOOL mut77_device(MUT77_DEVICE *d, MUT77 *f)
+{
+    ZeroMemory(d, sizeof(*d));
+    d->device = CreateEventA(NULL, TRUE, FALSE, NULL);
+    f->access = TRUE;
+    return d->device != NULL && DuplicateHandle(GetCurrentProcess(), d->device, GetCurrentProcess(), &d->view, 0, FALSE, DUPLICATE_SAME_ACCESS);
+}
+
+/** What the caller's cleanup does: it closes its handle. Afterwards other objects are opened until one has the same handle value */
+static void mut77_caller_cleanup(MUT77_DEVICE *d)
+{
+    HANDLE old = d->device;
+
+    CloseHandle(d->device);
+    d->device = NULL;
+    while (d->others < MUT77_OTHERS && !d->reused) {
+        d->other[d->others] = CreateEventA(NULL, TRUE, FALSE, NULL);
+        d->reused = d->other[d->others] == old;
+        d->others++;
+    }
+    ResetEvent(d->view);
+}
+
+/** TRUE: no object that was opened later was reached by an access, and each of them is still open */
+static BOOL mut77_others_untouched(const MUT77_DEVICE *d)
+{
+    unsigned k;
+
+    for (k = 0; k < d->others; k++) {
+        if (WaitForSingleObject(d->other[k], 0) != WAIT_TIMEOUT) { return FALSE; }
+    }
+    return TRUE;
+}
+
+static void mut77_device_free(MUT77_DEVICE *d)
+{
+    while (d->others != 0) { CloseHandle(d->other[--d->others]); }
+    CloseHandle(d->view);
+    if (d->device != NULL) { CloseHandle(d->device); }
+}
+
+/* TC-MOCK-077, the handle (#369, PR #524 re-review; test logic only). The caller closes its handle while the change may still use it */
+static void test_77_owned_handle(void)
+{
+    MUT77 f;
+    MUT77_DEVICE d;
+    TAS_ACT_RESTORE_EVIDENCE e;
+    HANDLE w, a, gone;
+    DWORD flags = 0;
+    BOOL t;
+
+    printf("\n[TC-MOCK-077] #369 the bound handle of a temporary change (test logic only)\n");
+
+    /* The reviewed schedule: the abort's restoration outlives the writer's wait, the caller cleans up, then the restoration goes on */
+    mut77_init(&f, OWNED_MUT_AT_ENDED);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device);
+    EXPECT_TRUE("the change takes a handle of its own", t);
+    f.run_ms = 100;
+    f.restore_reached = CreateEventA(NULL, TRUE, FALSE, NULL);
+    f.restore_go = CreateEventA(NULL, TRUE, FALSE, NULL);
+    a = mut77_held(&f, &w);
+    (void)WaitForSingleObject(f.restore_reached, MUT77_WAIT);   /* written back, the read still to come */
+    SetEvent(f.go);
+    t = mut77_join(w) && f.result == OWNED_MUT_UNCONFIRMED;
+    EXPECT_TRUE("the restoration outlives the writer's wait: unconfirmed", t);
+    ZeroMemory(&e, sizeof(e));
+    e.cycle_completed = TRUE; e.adapter_returned = TRUE; e.driver_clean = TRUE; e.regs_measured = TRUE;
+    e.tsn_mode_off = TRUE; e.tx_probed = TRUE; e.tx_on_wire = TRUE;
+    e.operations_pending = owned_mutation_open(&f.m);
+    EXPECT_EQ("... CLEANUP does not pass", tas_act_cycle(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    EXPECT_EQ("... RESTORE does not pass", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    mut77_caller_cleanup(&d);
+    printf("    the closed handle value is %s\n", d.reused ? "in use again for another object" : "not in use again");
+    EXPECT_EQ("the caller's cleanup closes nothing of the change", f.m.closed, 0);
+    SetEvent(f.restore_go);
+    t = mut77_join(a);
+    EXPECT_TRUE("... the restoration goes on and ends", t);
+    EXPECT_TRUE("... its next access reaches the object it is bound to", WaitForSingleObject(d.view, 0) == WAIT_OBJECT_0);
+    EXPECT_TRUE("... and no other object", mut77_others_untouched(&d));
+    EXPECT_EQ("... no access was refused", f.refused, 0);
+    EXPECT_TRUE("... restored once, with its result", f.restores == 1 && f.reg == MUT77_RAW && f.m.restored == 1);
+    EXPECT_FALSE("... nothing is open", owned_mutation_open(&f.m));
+    EXPECT_TRUE("... the handle was closed, once, after the end", f.m.closed == 1 && f.m.handle == NULL);
+    owned_mutation_drop(&f.m);
+    owned_mutation_leave(&f.m);
+    EXPECT_TRUE("... and never again", f.m.closed == 1 && mut77_others_untouched(&d));
+    CloseHandle(f.restore_reached);
+    CloseHandle(f.restore_go);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    /* The write itself outlives the abort's wait, the caller cleans up, then the write goes on and the writer restores */
+    mut77_init(&f, -1);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device);
+    f.hold_write = TRUE;
+    f.abort_ms = 100;
+    a = mut77_held(&f, &w);
+    t = t && mut77_join(a) && f.aborted - 1 == OWNED_ABORT_UNCONFIRMED;
+    EXPECT_TRUE("the write outlives the abort's wait: unconfirmed", t);
+    mut77_caller_cleanup(&d);
+    EXPECT_EQ("... the handle is kept", f.m.closed, 0);
+    SetEvent(f.go);
+    t = mut77_join(w) && f.refused == 0 && f.accesses == 4 && mut77_others_untouched(&d) && WaitForSingleObject(d.view, 0) == WAIT_OBJECT_0;
+    EXPECT_TRUE("... the late write, the observation and the restoration reach their object only", t);
+    EXPECT_TRUE("... closed once", f.m.closed == 1 && f.m.handle == NULL);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    /* The restoration ends while the writer still observes: the handle stays until the writer has left */
+    mut77_init(&f, OWNED_MUT_AT_ENDED);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device);
+    a = mut77_held(&f, &w);
+    t = t && mut77_join(a) && f.restores == 1 && !owned_mutation_open(&f.m);
+    EXPECT_TRUE("the abort restored, the writer has not left", t);
+    EXPECT_TRUE("... the handle is kept for it", f.m.closed == 0 && f.m.handle != NULL);
+    mut77_caller_cleanup(&d);
+    SetEvent(f.go);
+    t = mut77_join(w) && f.refused == 0 && mut77_others_untouched(&d) && WaitForSingleObject(d.view, 0) == WAIT_OBJECT_0;
+    EXPECT_TRUE("... its observation reaches its object only", t);
+    EXPECT_TRUE("... closed once when it left", f.m.closed == 1 && f.m.handle == NULL);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    /* No abort; prevented; refused before; stopped: closed once when the writer left */
+    mut77_init(&f, -1);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device);
+    (void)mut77_writer(&f);
+    t = t && f.accesses == 4 && f.refused == 0 && f.m.closed == 1 && f.m.handle == NULL;
+    EXPECT_TRUE("no abort: four accesses, closed once", t);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    mut77_init(&f, OWNED_MUT_AT_PUBLISHED);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device);
+    a = mut77_held(&f, &w);
+    t = t && mut77_join(a) && f.aborted - 1 == OWNED_ABORT_PREVENTED && f.m.closed == 0;
+    EXPECT_TRUE("prevented: the abort closes nothing", t);
+    SetEvent(f.go);
+    t = mut77_join(w) && f.accesses == 0 && f.m.closed == 1;
+    EXPECT_TRUE("... closed once when the writer left, without an access", t);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    mut77_init(&f, -1);
+    t = mut77_device(&d, &f) && owned_mutation_own(&f.m, d.device) && owned_mutation_abort(&f.m, 0) == OWNED_ABORT_NOTHING;
+    (void)mut77_writer(&f);
+    t = t && !f.issued && f.accesses == 0 && f.m.closed == 1;
+    EXPECT_TRUE("refused after an abort: closed once", t);
+    mut77_device_free(&d);
+    mut77_free(&f);
+
+    /* Taking the handle */
+    mut77_init(&f, -1);
+    t = mut77_device(&d, &f);
+    EXPECT_TRUE("no handle and no pseudo handle is taken", t && !owned_mutation_own(&f.m, NULL) && !owned_mutation_own(&f.m, INVALID_HANDLE_VALUE) &&
+                f.m.handle == NULL);
+    gone = CreateEventA(NULL, TRUE, FALSE, NULL);
+    CloseHandle(gone);
+    t = owned_mutation_own(&f.m, gone);
+    EXPECT_TRUE("a closed handle is not taken", !t && f.m.handle == NULL);
+    t = owned_mutation_own(&f.m, d.device);
+    EXPECT_TRUE("... a failed attempt does not prevent a valid one", t && f.m.handle != NULL && f.m.handle != d.device);
+    t = owned_mutation_own(&f.m, d.device);
+    EXPECT_FALSE("a change takes one handle only", t);
+    owned_mutation_leave(&f.m);   /* given up before it was run */
+    EXPECT_TRUE("given up before it was run: closed once", f.m.closed == 1 && f.m.handle == NULL);
+    t = owned_mutation_own(&f.m, d.device);
+    EXPECT_FALSE("... and none is taken any more", t);
+    EXPECT_TRUE("the caller's handle stays the caller's", GetHandleInformation(d.device, &flags));
+    mut77_device_free(&d);
+    owned_mutation_unprepare(&f.m);
+    EXPECT_TRUE("what was prepared is released", f.m.write_ended == NULL && f.m.restore_ended == NULL);
+    (void)owned_mutation_prepare(&f.m);
+    CloseHandle(f.m.restore_ended);
+    f.m.restore_ended = NULL;
+    owned_mutation_unprepare(&f.m);
+    EXPECT_TRUE("... also in part", f.m.write_ended == NULL && f.m.restore_ended == NULL);
+    (void)owned_mutation_prepare(&f.m);
+    mut77_free(&f);
 }
 
 static void test_77_owned_mutation(void)
@@ -4340,6 +4546,7 @@ int main(void) {
     test_66_race_order();
     test_67_pending_operations();
     test_77_owned_mutation();
+    test_77_owned_handle();
     test_14_instance_find();
     test_15_lifecycle_outcome();
     test_68_restart();

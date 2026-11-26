@@ -7,7 +7,10 @@
  *   - prevents a write that was not issued: it is never issued afterwards;
  *   - waits, up to a bound the caller defines, for the observed end of an issued one and only then restores;
  *   - otherwise reports the end as unconfirmed. The write stays owned and its writer restores once it has ended.
- * Exactly one thread restores; the other one waits for that result. Shared by tests/hardware/test_tas_activate.c (TC-TASACT-META-005, -006) and
+ * Exactly one thread restores; the other one waits for that result.
+ * The accesses of write, observe and restore use a handle the change owns itself: a duplicate of the caller's, so the same file object and the
+ * same binding, never a newly opened one. It is closed once, when the writer has left AND nothing is open any more, by whichever of the two is
+ * the last. The caller may close its own handle at any time; neither a timeout nor a failed cleanup closes this one. Shared by tests/hardware/test_tas_activate.c (TC-TASACT-META-005, -006) and
  * its offline case TC-MOCK-077 in test_tas_restore_contract.c (TC-TASACT-META-006 calls the abort on hardware, after the write ended). Passing that case says nothing about hardware.
  *
  * Verifies: #369
@@ -43,6 +46,10 @@ typedef struct {
     void (*at)(void *ctx, OWNED_MUT_POINT point);    /* only the offline case: a point of the writer; NULL otherwise */
     void *ctx;
     volatile LONG *stop;      /* not NULL and set: the process is ending, nothing is issued any more */
+    HANDLE volatile handle;   /* the change's own handle, NULL: none taken or closed. Read by write, observe and restore only */
+    volatile LONG taken;      /* a handle was taken: once per change */
+    volatile LONG left;       /* the writer has left run (or the owner gave the change up): it uses the handle no more */
+    volatile LONG closed;     /* how often the handle was closed */
 } OWNED_MUTATION;
 
 typedef enum {
@@ -78,6 +85,58 @@ static __inline BOOL owned_mutation_prepare(OWNED_MUTATION *m)
     return m->write_ended != NULL && m->restore_ended != NULL;
 }
 
+/* A change that was never run: what prepare created, also in part */
+static __inline void owned_mutation_unprepare(OWNED_MUTATION *m)
+{
+    if (m->write_ended != NULL) { CloseHandle(m->write_ended); }
+    if (m->restore_ended != NULL) { CloseHandle(m->restore_ended); }
+    m->write_ended = NULL;
+    m->restore_ended = NULL;
+}
+
+/* BEGIN handle lifetime */
+/* Takes a duplicate of the caller's handle, before run. FALSE: none is owned, nothing may be written. INVALID_HANDLE_VALUE is refused because
+ * as a pseudo handle it would duplicate the process */
+static __inline BOOL owned_mutation_own(OWNED_MUTATION *m, HANDLE h)
+{
+    HANDLE dup = NULL;
+
+    if (h == NULL || h == INVALID_HANDLE_VALUE || InterlockedCompareExchange(&m->left, 0, 0) != 0 ||
+        InterlockedCompareExchange(&m->taken, 1, 0) != 0) {
+        return FALSE;
+    }
+    if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        InterlockedExchange(&m->taken, 0);
+        return FALSE;
+    }
+    InterlockedExchangePointer((PVOID volatile *)&m->handle, dup);
+    return TRUE;
+}
+
+/* Closes the handle when nobody can use it any more. Called by the writer after left was set and by a restorer after SETTLED was set: with
+ * these orders the last one closes, and only one takes it out */
+static __inline void owned_mutation_drop(OWNED_MUTATION *m)
+{
+    HANDLE h;
+
+    if (InterlockedCompareExchange(&m->left, 0, 0) == 0 || owned_mutation_open(m)) {
+        return;
+    }
+    h = (HANDLE)InterlockedExchangePointer((PVOID volatile *)&m->handle, NULL);
+    if (h != NULL) {
+        CloseHandle(h);
+        InterlockedIncrement(&m->closed);
+    }
+}
+/* END handle lifetime */
+
+/* The writer has left its run, or the owner gives a change up that was never run */
+static __inline void owned_mutation_leave(OWNED_MUTATION *m)
+{
+    InterlockedExchange(&m->left, 1);
+    owned_mutation_drop(m);
+}
+
 /* What is left of the bound that started at t0 */
 static __inline DWORD owned_mutation_left(DWORD t0, DWORD ms)
 {
@@ -111,6 +170,7 @@ static __inline BOOL owned_mutation_restore_here(OWNED_MUTATION *m)
     InterlockedExchange(&m->restored, r);
     SetEvent(m->restore_ended);   /* before SETTLED: a next change resets it only after SETTLED was seen */
     InterlockedExchange(&m->state, OWNED_MUT_SETTLED);
+    owned_mutation_drop(m);
     return TRUE;
 }
 
@@ -146,11 +206,13 @@ static __inline LONG owned_mutation_run(OWNED_MUTATION *m, DWORD ms, volatile BO
 
     *issued = FALSE;
     if (m->write_ended == NULL || m->restore_ended == NULL) {
+        owned_mutation_leave(m);
         return OWNED_MUT_NONE;
     }
     ResetEvent(m->write_ended);
     ResetEvent(m->restore_ended);
     if (!owned_mutation_cas(m, OWNED_MUT_IDLE, OWNED_MUT_OWED) && !owned_mutation_cas(m, OWNED_MUT_SETTLED, OWNED_MUT_OWED)) {
+        owned_mutation_leave(m);
         return OWNED_MUT_NONE;   /* an abort came before */
     }
     __try {
@@ -169,6 +231,7 @@ static __inline LONG owned_mutation_run(OWNED_MUTATION *m, DWORD ms, volatile BO
         }
     } __finally {
         r = owned_mutation_finish(m, ms);
+        owned_mutation_leave(m);
     }
     return r;
 }

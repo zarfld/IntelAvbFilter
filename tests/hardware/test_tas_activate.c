@@ -171,7 +171,8 @@
  *                          missing: INCONCLUSIVE and nothing is written.
  *              DEVIATION   ENDQT3.END_TIME 400 -> 450 ms, read back, present in the reference query and in the judged one, nothing else
  *                          changed. REG_RESTORE: the exact raw value back and read; otherwise CLEANUP_FAILED or
- *                          INCONCLUSIVE_RESTORATION, whatever the NIC cycle recovers later.
+ *                          INCONCLUSIVE_RESTORATION, whatever the NIC cycle recovers later. HANDLE (also META-006): the accesses' own duplicate of
+ *                          the bound handle closed once, after they ended; still open: INCONCLUSIVE_RESTORATION.
  *              GENERATION, GENERATION_RESTORED   +0, measured.
  *              R2          the driver: 6/0x8, next 7/0x1000, commit 4, record kept, in both queries.
  *              ORACLE_SLOT, ORACLE_NEXT   the oracle on these replies: a correct R2 answer is no positive control and no failure.
@@ -473,6 +474,8 @@ static void report_abort(void)
  * An abort runs on another thread: it prevents a write that was not issued, or waits M5_ABORT_MS for the end of an issued one and restores only
  * then (owned_mutation.h). An end that was not seen stays INCONCLUSIVE_RESTORATION; the case itself still restores as long as it runs.
  * M5_ABORT_MS bounds the wait for the end of the write, not the restoration: that request is synchronous and has no bound of its own.
+ * The accesses use a duplicate of the case's bound handle (the same file object and binding) that the change owns until all of them have ended:
+ * the cleanup closes the case's own handle only. A duplicate still open then is named, and nothing is closed early to let the cycle pass.
  */
 #define M5_LEAD_NS        (3 * NS_PER_SEC)        /* BaseT at least this far ahead of the commit */
 #define M5_MARGIN_NS      (1500LL * NS_PER_MS)    /* PHC before BaseT immediately before the write: measured, never assumed from a duration */
@@ -484,7 +487,7 @@ static void report_abort(void)
 typedef struct M5_RUN {
     OWNED_MUTATION m;
     const char *case_id;
-    HANDLE h;
+    HANDLE own;              /* value of the change's own handle, for the evidence only: the accesses read m.handle */
     avb_u64 luid;
     avb_u32 offset, raw, deviated, back, value;
     LONG wst, bst, write_st, read_st;
@@ -504,6 +507,7 @@ static M5_RUN *m5_new(avb_u64 luid)
     M5_RUN *r = (M5_RUN *)calloc(1, sizeof(*r));
 
     if (r == NULL || !owned_mutation_prepare(&r->m)) {
+        if (r != NULL) { owned_mutation_unprepare(&r->m); }
         free(r);
         return NULL;
     }
@@ -528,6 +532,19 @@ static BOOL m5_pending(avb_u64 luid)
         }
     }
     return FALSE;
+}
+
+/** Evidence of the cleanup: what is still open on this adapter, and that its handle is kept */
+static void m5_report_open(avb_u64 luid, const char *when)
+{
+    M5_RUN *r;
+
+    for (r = g_m5_runs; r != NULL; r = r->next) {
+        if (r->luid == luid && owned_mutation_open(&r->m)) {
+            printf("    [EVIDENCE] %s, %s: the ENDQT3 deviation or its restoration is open (state %ld); the change's own handle is kept until it has "
+                   "ended. The results of this cycle are as printed, nothing is closed for it\n", r->case_id, when, owned_mutation_state(&r->m));
+        }
+    }
 }
 
 #ifndef NDEBUG
@@ -557,7 +574,7 @@ static void m5_write(void *ctx)
 
     InterlockedIncrement(&r->writes);
     r->write_tid = GetCurrentThreadId();
-    r->wst = m5_access(r->h, IOCTL_AVB_WRITE_REGISTER, r->offset, &v);
+    r->wst = m5_access(r->m.handle, IOCTL_AVB_WRITE_REGISTER, r->offset, &v);
     r->write_end = InterlockedIncrement(&r->seq);
 }
 
@@ -570,9 +587,9 @@ static LONG m5_restore(void *ctx)
     InterlockedIncrement(&r->restores);
     r->restore_tid = GetCurrentThreadId();
     r->restore_begin = InterlockedIncrement(&r->seq);
-    r->write_st = m5_access(r->h, IOCTL_AVB_WRITE_REGISTER, r->offset, &value);
+    r->write_st = m5_access(r->m.handle, IOCTL_AVB_WRITE_REGISTER, r->offset, &value);
     value = 0;
-    r->read_st = m5_access(r->h, IOCTL_AVB_READ_REGISTER, r->offset, &value);
+    r->read_st = m5_access(r->m.handle, IOCTL_AVB_READ_REGISTER, r->offset, &value);
     r->value = value;
     r->restore_end = InterlockedIncrement(&r->seq);
     return r->read_st != 0 ? M5_RESTORE_UNREAD : (value == r->raw ? M5_RESTORE_VERIFIED : M5_RESTORE_DIFFERS);
@@ -1240,6 +1257,7 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     if (e.operations_pending) {
         printf("    [EVIDENCE] an operation of this test on this adapter has not been observed to end: whatever is measured below is not final\n");
     }
+    m5_report_open(id->net_luid, "before the NIC cycle");
     if (find_devinst(id->net_luid, &inst)) {
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
         h = INVALID_HANDLE_VALUE;
@@ -1256,6 +1274,7 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
     }
     fresh = e.cycle_completed ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
     e.adapter_returned = (fresh != INVALID_HANDLE_VALUE);
+    m5_report_open(id->net_luid, "after the NIC cycle");
     InterlockedExchange(&g_pending_adapter, -1);
     switch (tas_act_cycle(&e)) {
     case TAS_ACT_RESTORE_COMPLETE:
@@ -4415,9 +4434,9 @@ static void m5_observe(void *ctx)
 {
     M5_RUN *r = (M5_RUN *)ctx;
 
-    r->bst = m5_access(r->h, IOCTL_AVB_READ_REGISTER, r->offset, &r->back);
-    query(r->h, &g_m5_qr);   /* the deviation is there before it */
-    query(r->h, &g_m5_qj);
+    r->bst = m5_access(r->m.handle, IOCTL_AVB_READ_REGISTER, r->offset, &r->back);
+    query(r->m.handle, &g_m5_qr);   /* the deviation is there before it */
+    query(r->m.handle, &g_m5_qj);
 }
 
 static DWORD WINAPI m6_abort_worker(LPVOID p)
@@ -4454,9 +4473,9 @@ static void m6_count_write(void *ctx) { (void)ctx; InterlockedIncrement(&g_m6_co
 static LONG m6_count_restore(void *ctx) { (void)ctx; InterlockedIncrement(&g_m6_counted); return OWNED_MUT_NONE; }
 #endif
 
-static const char *const m5_lines[] = { "REG_RESTORE", "DEVIATION", "GENERATION", "R2", "ORACLE_SLOT", "ORACLE_NEXT", "CONTROL", "GENERATION_RESTORED",
+static const char *const m5_lines[] = { "REG_RESTORE", "HANDLE", "DEVIATION", "GENERATION", "R2", "ORACLE_SLOT", "ORACLE_NEXT", "CONTROL", "GENERATION_RESTORED",
                                         "ORACLE_RESTORED_SLOT", "ORACLE_RESTORED_NEXT" };
-static const char *const m6_lines[] = { "REG_RESTORE", "DEVIATION", "ABORT_ORDER", "ABORT_ONE", "NO_REWRITE", "ABORT_SETTLED", "GENERATION_RESTORED", "CONTROL" };
+static const char *const m6_lines[] = { "REG_RESTORE", "HANDLE", "DEVIATION", "ABORT_ORDER", "ABORT_ONE", "NO_REWRITE", "ABORT_SETTLED", "GENERATION_RESTORED", "CONTROL" };
 
 static void m5_not_run(const char *tag, UINT32 index, avb_u16 did, const char *reason)
 {
@@ -4585,7 +4604,7 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
     TAS_STATUS_CLASS cls;
     DWORD br = 0, information = 0;
     long long phc = 0, phc_write = 0, base;
-    BOOL committed, armed, nine = TRUE, phase, guard, deviation, r2, r1, control;
+    BOOL committed, armed, nine = TRUE, owned, phase, guard, deviation, r2, r1, control;
     const char *missing;
     char why[800];
     unsigned k;
@@ -4640,6 +4659,8 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
         nine = nine && reg_st[k] == 0 && reg[k] == want[k];
     }
     deviated = (avb_u32)I226_ENDQT_SET(reg[7], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT, M5_END_NS);
+    owned = owned_mutation_own(&run->m, h);   /* a duplicate: the same file object, the same binding */
+    run->own = run->m.handle;
     phase = read_phc(h, &phc_write) && phc_write < base && base - phc_write >= M5_MARGIN_NS;
     missing = !committed ? "this case's commit (one complete STATUS_SUCCESS reply)" :
               (!armed ? "the driver record ARMED with the committed gate list" :
@@ -4649,10 +4670,12 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
               (!nine ? "nine registers read through the bound handle equal to the query's own values" :
               (I226_ENDQT_GET(reg[7], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT) != op.schedule.queue[3].end_ns ||
                deviated == reg[7] ? "ENDQT3.END_TIME as committed and different from the deviation" :
-              (!phase ? "the PHC read at least 1.5 s before BaseT immediately before the write" : NULL))))));
+              (!owned ? "a handle of the change's own, duplicated from the bound one" :
+              (!phase ? "the PHC read at least 1.5 s before BaseT immediately before the write" : NULL)))))));
     guard = missing == NULL;
-    if (guard) {
-        run->h = h;
+    if (!guard) {
+        owned_mutation_leave(&run->m);   /* not run: its handle is closed here */
+    } else {
         run->offset = offset[7];
         run->raw = reg[7];
         run->deviated = deviated;
@@ -4701,6 +4724,10 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
               restored == M5_RESTORE_VERIFIED ? ": the exact raw value" : (restored == M5_RESTORE_DIFFERS ? ": another value" :
               (restored == M5_RESTORE_UNREAD ? ": not read" : ": its end was not seen")));
     verdict(m5_restore_tag(restored), "REG_RESTORE", index, id->device_id, why);
+    sprintf_s(why, sizeof(why), "the change's own handle %p (the case's %p), duplicated from the bound one before the write; closed %ld times, now %p (required: "
+              "closed once, after the writer left and the restoration ended)", run->own, h, run->m.closed, run->m.handle);
+    verdict(owned_mutation_open(&run->m) || restored == OWNED_MUT_UNCONFIRMED ? "INCONCLUSIVE_RESTORATION" : (run->own != NULL && run->own != h && run->m.closed == 1 && run->m.handle == NULL ?
+            "PASS" : "FAIL"), "HANDLE", index, id->device_id, why);
 
     deviation = bst == 0 && back == deviated && m5_mine(&qr, &op, id) && m5_mine(&qj, &op, id) && qr.q.regs.endqt[3] == deviated &&
                 qj.q.regs.endqt[3] == deviated && m5_others_equal(&qr.q.regs, &qg.q.regs) && m5_others_equal(&qj.q.regs, &qg.q.regs);
