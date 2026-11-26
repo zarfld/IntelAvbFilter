@@ -47,6 +47,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_activate_cases.h"   /* #487: contained cases, selection, exit status */
 #include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
+#include "../ioctl/tas_link_event_eval.h"   /* TC-MOCK-076: TC-TASAPI-021 EVENT samples (#472), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -4494,6 +4495,150 @@ static void test_75_query_record(void)
     EXPECT_SLOTS("... COMMIT_INFO_LOST, never PENDING", q, U, INFO, N, 0, LOST);
 }
 
+/* TC-MOCK-076: the judgement of the EVENT samples of TC-TASAPI-021 (#472; test logic only, no link event). Row 15 is the oracle regression
+ * of 2026-11-25: the first evaluator let a link-down before the write open the phase after the event, so agreements measured before the
+ * write counted for EVENT-UP; with row 18 that was a pass without any comparison after the event. */
+static EV_SAMPLE g_ev76[200];
+static unsigned g_ev76_n;
+
+/** count samples: OS states of both readings, rate in Mbit/s, the driver's value (-1: the query failed) */
+static void ev76_add(int os1, int os2, unsigned long long tx_mbps, int mbps, unsigned count)
+{
+    while (count-- != 0) {
+        EV_SAMPLE *p = &g_ev76[g_ev76_n];
+        ZeroMemory(p, sizeof(*p));
+        p->t0 = g_ev76_n * 20.0;
+        p->t1 = p->t0 + 0.2;
+        p->t2 = p->t0 + 0.4;
+        p->t3 = p->t0 + 0.6;
+        p->s1 = os1;
+        p->s2 = os2;
+        p->tx1 = p->tx2 = tx_mbps * EV_BPS_PER_MBIT;
+        p->qok = mbps >= 0;
+        p->qstatus = mbps >= 0 ? 0 : (LONG)0xC00000A3L;
+        p->mbps = mbps >= 0 ? (unsigned)mbps : 0;
+        p->epoch = 1;
+        g_ev76_n++;
+    }
+}
+
+/** want: "before down up" as match,mismatch,split,missing (OS error + unknown state or rate + other context),failed; then saw_down,saw_up;
+ *  then the lines CAUSE BEFORE DOWN UP for an accepted write on a kept context (P, F, Q query failed, I) */
+static void ev76_row(const char *label, unsigned iw, const char *want)
+{
+    static const char out[] = "PFQI";
+    EV_RESULT r;
+    const EV_GROUP *g[3];
+    char got[200] = "", line[400];
+    unsigned i;
+
+    ev_judge(g_ev76, g_ev76_n, iw, &r);
+    g[0] = &r.before;
+    g[1] = &r.down;
+    g[2] = &r.up;
+    for (i = 0; i < 3; i++) {
+        sprintf_s(got + strlen(got), sizeof(got) - strlen(got), "%u,%u,%u,%u,%u ", g[i]->match, g[i]->mismatch, g[i]->split,
+                  g[i]->os_error + g[i]->state_unknown + g[i]->rate_unknown + g[i]->other_context, g[i]->failed);
+    }
+    sprintf_s(got + strlen(got), sizeof(got) - strlen(got), "%d,%d %c%c%c%c", r.track.saw_down, r.track.saw_up, out[ev_cause(&r, TRUE)],
+              out[ev_phase(&r.before, TRUE)], out[ev_phase(&r.down, r.track.saw_down)], out[ev_phase(&r.up, r.track.saw_up)]);
+    sprintf_s(line, sizeof(line), "%s: %s%s%s", label, got, strcmp(got, want) == 0 ? "" : " want ", strcmp(got, want) == 0 ? "" : want);
+    EXPECT_TRUE(line, strcmp(got, want) == 0);
+    g_ev76_n = 0;
+}
+
+static void test_76_link_event(void)
+{
+    const int A = EV_IF_CONNECTED, B = EV_IF_DISCONNECTED;
+    EV_RESULT r;
+    unsigned k;
+
+    printf("\n[TC-MOCK-076] #472 EVENT samples against their OS brackets (test logic only)\n");
+    /* The 16 sequences of the first evaluator, in its order */
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row(" 1 ideal", 5, "5,0,0,0,0 10,0,0,0,0 8,0,0,0,0 1,1 PPPP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 1000, 10); ev76_add(A, A, 1000, 1000, 8);
+    ev_judge(g_ev76, g_ev76_n, 5, &r);
+    EXPECT_TRUE(" 2 ... the measured run of disagreement: 180 ms from sample 5",
+                r.down.first_mismatch == 5 && r.down.longest_ms > 179.9 && r.down.longest_ms < 180.1);
+    ev76_row(" 2 1000 through the whole link-down", 5, "5,0,0,0,0 0,10,0,0,0 8,0,0,0,0 1,1 PPFP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 0, 8);
+    ev76_row(" 3 0 after the link-up", 5, "5,0,0,0,0 10,0,0,0,0 0,8,0,0,0 1,1 PPPF");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 1000, 1); ev76_add(B, B, 0, 0, 9); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row(" 4 one reply behind the OS", 5, "5,0,0,0,0 9,1,0,0,0 8,0,0,0,0 1,1 PPFP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(A, A, 1000, 0, 2); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row(" 5 two replies ahead of the OS at the link-down", 5, "5,2,0,0,0 10,0,0,0,0 8,0,0,0,0 1,1 PFPP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(B, B, 0, 1000, 2); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row(" 6 two replies ahead of the OS at the link-up", 5, "5,0,0,0,0 10,2,0,0,0 8,0,0,0,0 1,1 PPFP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 4); ev76_add(B, B, 0, 1000, 1); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row(" 7 one wrong reply inside the link-down", 5, "5,0,0,0,0 8,1,0,0,0 8,0,0,0,0 1,1 PPFP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 4); ev76_add(A, A, 1000, 0, 3); ev76_add(A, A, 1000, 1000, 2);
+    ev76_row(" 8 wrong replies after the link-up", 5, "5,0,0,0,0 4,0,0,0,0 6,3,0,0,0 1,1 PPPF");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 2500, 8);
+    ev76_row(" 9 another speed after the link-up", 5, "5,0,0,0,0 10,0,0,0,0 0,8,0,0,0 1,1 PPPF");
+    ev76_add(A, A, 1000, 1000, 30);
+    ev76_row("10 no transition: no event", 5, "30,0,0,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(A, B, 1000, 0, 1); ev76_add(B, B, 0, 0, 10); ev76_add(B, A, 1000, 1000, 1); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("11 OS changes inside two brackets: not compared", 5, "5,0,0,0,0 10,0,1,0,0 8,0,1,0,0 1,1 PPPP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, -1, 3); ev76_add(B, B, 0, 0, 7); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("12 failed queries during the link-down", 5, "5,0,0,0,0 7,0,0,0,3 8,0,0,0,0 1,1 PPQP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10);
+    ev76_row("13 never up again", 5, "5,0,0,0,0 10,0,0,0,0 0,0,0,0,0 1,0 IPPI");
+    ev76_add(A, A, 1000, 0, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("14 0 before the write: fails its own line only", 5, "0,5,0,0,0 10,0,0,0,0 8,0,0,0,0 1,1 PFPP");
+    ev76_add(B, B, 0, 0, 3); ev76_add(A, A, 1000, 1000, 5);
+    ev76_row("15 a link-down before the write only: no event, nothing counts for DOWN or UP", 8, "8,0,0,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 100, 100, 4); ev76_add(A, A, 1000, 1000, 4);
+    ev76_row("16 100 Mbit/s, then 1000", 5, "5,0,0,0,0 4,0,0,0,0 8,0,0,0,0 1,1 PPPP");
+
+    /* What the write separates */
+    ev76_add(B, B, 0, 0, 3); ev76_add(A, A, 1000, 1000, 5); ev76_add(A, A, 1000, 1000, 10);
+    ev76_row("17 row 15 and a connected link after the write: still no event", 8, "18,0,0,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(B, B, 0, 0, 3); ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 6); ev76_add(A, A, 0, 1000, 8);
+    ev76_row("18 row 15, then an event with an unknown rate: agreements before the write are no EVENT-UP", 8,
+             "8,0,0,0,0 6,0,0,0,0 0,0,0,8,0 1,1 PPPI");
+    ev76_add(B, B, 0, 0, 3); ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 6); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("19 row 15, then a complete event: counted from the write", 8, "8,0,0,0,0 6,0,0,0,0 8,0,0,0,0 1,1 PPPP");
+    ev76_add(A, A, 1000, 1000, 4); ev76_add(B, B, 0, 0, 4); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("20 down already before the write, up after it: no event", 8, "20,0,0,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(A, A, 1000, 1000, 4); ev76_add(A, B, 1000, 1000, 1); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("21 the last bracket before the write changes: no connected start, no event", 5, "16,0,1,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("22 nothing measured before the write: no event", 0, "12,0,0,0,0 0,0,0,0,0 0,0,0,0,0 0,0 IPII");
+    ev76_add(A, A, 1000, 1000, 4); ev76_add(A, A, 1000, -1, 1); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("23 a failed query before the write belongs to BEFORE", 5, "4,0,0,0,1 10,0,0,0,0 8,0,0,0,0 1,1 PQPP");
+
+    /* What the readings show */
+    ev76_add(A, A, 1000, 1000, 8); ev76_add(A, B, 1000, 1000, 1); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("24 a link-down in one reading only: an event, but no comparison of it", 8, "8,0,0,0,0 0,0,1,0,0 8,0,0,0,0 1,1 PPIP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 4); ev76_add(A, A, 1000, 1000, 3); ev76_add(B, B, 0, 1000, 2); ev76_add(A, A, 1000, 1000, 4);
+    ev76_row("25 a second link-down answered with 1000", 5, "5,0,0,0,0 4,2,0,0,0 7,0,0,0,0 1,1 PPFP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(0, 0, 1000, 1000, 1); ev76_add(A, A, 1000, 1000, 8);
+    ev76_row("26 an unknown OS state is a missing measurement", 5, "5,0,0,0,0 10,0,0,1,0 8,0,0,0,0 1,1 PPIP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    g_ev76[8].e2 = 31;
+    ev76_row("27 an OS error is a missing measurement", 5, "5,0,0,0,0 9,0,0,1,0 8,0,0,0,0 1,1 PPIP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    g_ev76[16].tx1 = g_ev76[16].tx2 = 1000500000ULL;
+    ev76_row("28 a fractional rate has no reference", 5, "5,0,0,0,0 10,0,0,0,0 7,0,0,1,0 1,1 PPPI");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 1000, 8);
+    g_ev76[16].tx2 = 100ULL * EV_BPS_PER_MBIT;
+    ev76_row("29 a rate that changes inside the bracket is not compared", 5, "5,0,0,0,0 10,0,0,0,0 7,0,1,0,0 1,1 PPPP");
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 1000, 10); ev76_add(A, A, 1000, 0, 8);
+    for (k = 7; k < g_ev76_n; k++) {
+        g_ev76[k].epoch = 2;
+    }
+    ev76_row("30 replies of another context are not compared, those of the first are", 5, "5,0,0,0,0 0,2,0,8,0 0,0,0,8,0 1,1 PPFI");
+
+    /* Without an accepted write or a kept context nothing passes; a compared disagreement stays one */
+    ev76_add(A, A, 1000, 1000, 5); ev76_add(B, B, 0, 0, 10); ev76_add(A, A, 1000, 0, 8);
+    ev_judge(g_ev76, g_ev76_n, 5, &r);
+    EXPECT_EQ("31 write not accepted: the event is not established", ev_cause(&r, FALSE), EV_OUT_INCONCLUSIVE);
+    EXPECT_EQ("32 path not proven: agreement is no pass", ev_phase(&r.down, FALSE), EV_OUT_INCONCLUSIVE);
+    EXPECT_EQ("33 path not proven: a compared disagreement is FAIL", ev_phase(&r.up, FALSE), EV_OUT_FAIL);
+    g_ev76_n = 0;
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -4559,6 +4704,7 @@ int main(void) {
     test_73_retained();
     test_74_phc_set();
     test_75_query_record();
+    test_76_link_event();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

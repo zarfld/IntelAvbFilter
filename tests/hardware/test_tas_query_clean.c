@@ -163,9 +163,29 @@
  *             LINK_BOUND_MS first; then one bracketed comparison.
  *   STEADY    two bracketed comparisons LINK_STEADY_INTERVAL_MS apart; each must agree with its own bracket. An OS state or rate
  *             that changed between them is printed as a measured link event, not failed for violating a constant speed.
- *   EVENT     a link transition without a detach is not exercised: the test has no owned procedure that changes the link
- *             without detaching the filter and restores it (a cable or link-partner change depends on topology the test cannot
- *             establish, #463). INCONCLUSIVE with that reason; repeating ATTACH is not EVENT coverage, never PASS by omission.
+ *   EVENT     a link change without a detach (approved by the maintainer on 2026-11-25 for this case: one auto-negotiation restart
+ *             through the dedicated IOCTL_AVB_MDIO_WRITE; no PHY reset, no PHY power-down, no generic register write). One
+ *             write of the BMCR value read plus the self-clearing restart bit, only after EVENT-PRE: INTEL_CAP_MDIO, a handle
+ *             proven to be bound to the NET_LUID, a plausible and stable PHY identity, auto-negotiation enabled and complete, no
+ *             command, mode or reserved bit set, OS link connected at a known rate and stable. Then OS-query-OS samples every
+ *             EV_PERIOD_MS on the run's own handle through link down and up. Lines, each its own verdict:
+ *               EVENT-CAUSE    the OS showed the link disconnected and connected again after an accepted write; the accepted
+ *                              write alone is nothing, and neither is a state from before the write: the last sample before it must
+ *                              show the link connected. Otherwise INCONCLUSIVE, and DOWN and UP cannot pass.
+ *               EVENT-CONTEXT  epoch and attach/detach/pause/restart counters unchanged, the same handle answers at the end.
+ *                              Otherwise INCONCLUSIVE: the path was not reached, not a verdict on the speed report.
+ *                              FilterStatusCount is printed and not judged (it counts every indication).
+ *               EVENT-BEFORE, EVENT-DOWN, EVENT-UP  every sample against its own OS bracket (tas_link_event_eval.h): up to the link-down of
+ *                              the event, while the OS reports it down, and after it is up again. When both OS readings agree, the
+ *                              reply must equal them, ahead of the OS or behind it, for any duration: a difference is FAIL, on every
+ *                              path. An OS change inside the bracket or a missing measurement is not compared. No time allowance and no
+ *                              tolerance; transitions and the intervals between OS and driver are printed as measured.
+ *               EVENT-RESTORE  OS link, transmit and receive rate as before and unchanged for EV_STABLE_MS; PHY identity and
+ *                              configuration by documented rules (self-clearing commands read 0; speed/duplex selection, without
+ *                              effect under auto-negotiation, only reported; reserved bits not compared). A violation is
+ *                              CLEANUP_FAILED and an owned NIC cycle follows (EVENT-RECOVERY), never skipped for lack of time.
+ *             The driver's MDIC access takes no PHY semaphore (concurrency with the miniport or firmware): see EV_PHY_ADDR.
+ *             A pass covers this one rate, down and back; no other speed, power event or status progression (#365 12.4, K8).
  *   FINAL     the adapter is bound, the OS link state and rate equal the pre-test observation, the TAS query reports a clean,
  *             readable adapter and GET_TAS_STATE is CLEAN, and HardwareFaults did not change from ATTACH to FINAL. The test arms
  *             no fault. The query requirement is judged field by field under #365 12.2/12.3 validity (reply and target
@@ -181,7 +201,7 @@
  *             invalid read is [CLEANUP:NOT_VERIFIED]. Read-only: nothing is written back, because neither the incoming nor the
  *             post-cycle values are an established restoration target. A clean TAS query does not prove clock restoration.
  * The incoming TAS state is printed as found (origin unknown to the test); it is never assumed clean.
- * Mutation: the owned NIC cycle only (it reseeds the PHC, E12; reported, not restored). No TAS write, no traffic. Agreement with
+ * Mutation: the owned NIC cycle (it reseeds the PHC, E12; reported, not restored) and EVENT's one BMCR write. No TAS write, no traffic. Agreement with
  * the OS checks the acquisition path through the shared Windows/miniport reporting chain; it is not a wire measurement and does
  * not verify TAS-DR-05's arithmetic (#368). Expected RED against a driver without K8: link_speed_mbps 0 while the OS reports a
  * connected speed (a hypothesis until a hardware run shows it). Unlike the other modes, it needs no IPv4 address, no
@@ -260,6 +280,7 @@
 #include "../common/avb_ntstatus.h"       /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
 #include "../ioctl/tas_query_tx_eval.h"   /* send-window accounting and TX verdict, checked offline by TC-MOCK-057 */
+#include "../ioctl/tas_link_event_eval.h"   /* --link-speed EVENT: judgement of the samples, checked offline by TC-MOCK-076 */
 #include "../../intel-ethernet-regs/gen/i226_regs.h"   /* --invalid: the QBVCYCLET.QBV_CYCLE_TIME field width (SSOT) */
 
 #define CASE_ID            g_case                   /* TC-TASAPI-001 (#366), -016 (--hw-verified, #381), -002 (--tiers-unbound, #367), -003 (--invalid, #368), -012 (--restore, #377), -021 (--link-speed, #472) */
@@ -373,6 +394,8 @@ static void report_outstanding(const char *when)
     fflush(stdout);
 }
 
+static void ev_report_abort(void);   /* --link-speed EVENT: an auto-negotiation restart whose restoration was not checked */
+
 static void report_abort(void)
 {
     LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
@@ -382,6 +405,7 @@ static void report_abort(void)
                CASE_ID, adapter, g_pending_did);
         fflush(stdout);
     }
+    ev_report_abort();
     report_outstanding("test aborted");
 }
 
@@ -3014,6 +3038,600 @@ static void link_final_query(const QUERY_READ *r, avb_u64 luid, FINAL_FINDINGS *
     }
 }
 
+/* ---- --link-speed EVENT (#472): an auto-negotiation restart through the dedicated MDIO IOCTL, link change without a detach ---- */
+
+/* PHY access, compared on 2026-11-25 with public sources: Linux v6.17 (commit e5f0a698) drivers/net/ethernet/intel/igc serves I225 and
+ * I226 through one path: igc_read/write_phy_reg_gpy (phy semaphore) -> igc_read/write_phy_reg_mdic (MDIC, clause 22), PHY address
+ * hw->phy.addr, which no igc file read assigns (zero-initialised), and igc_copper_link_autoneg reads PHY_CONTROL (0), sets
+ * MII_CR_AUTO_NEG_EN | MII_CR_RESTART_AUTO_NEG and writes it back. The public I225/I226 datasheet 2.6 (1.1.1, 3.6.1) states the IEEE
+ * 802.3 MII management interface to the internal PHY through the MAC register space and auto-negotiation on software command; it has
+ * no PHY register table. Register bits: IEEE 802.3 clause 22 (same names in Linux include/uapi/linux/mii.h).
+ * KNOWN CONCURRENCY, not repaired here: Linux takes the SW/FW PHY semaphore around every MDIC access; this driver takes none, so the
+ * miniport or the firmware may use MDIC at the same time and disturb a read or the one write. Every PHY read is therefore made twice
+ * and must agree, no MDIO access is made while the link changes, and an unexpected value never leads to a write. */
+#define EV_PHY_ADDR            0u       /* see above; confirmed per run by a plausible, stable PHY identity at this address */
+#define EV_REG_BMCR            0u
+#define EV_REG_BMSR            1u
+#define EV_REG_PHYID1          2u
+#define EV_REG_PHYID2          3u
+#define EV_REG_ANAR            4u
+#define EV_REG_CTRL1000        9u
+#define EV_BMCR_ANRESTART      0x0200u  /* self-clearing command */
+#define EV_BMCR_ANENABLE       0x1000u
+#define EV_BMCR_COMMANDS       0x8200u  /* reset, restart auto-negotiation: self-clearing, must read 0 before and after */
+#define EV_BMCR_MODES          0x4C80u  /* loopback, power-down, isolate, collision test: must read 0, else nothing is written */
+#define EV_BMCR_RESERVED       0x003Fu  /* unidirectional enable and reserved bits: must read 0, else nothing is written */
+#define EV_BMCR_CONFIG         0x5CBFu  /* compared after the event: auto-negotiation enable, the modes and the reserved bits */
+#define EV_BMCR_REPORTED       0x2140u  /* speed selection and duplex: without effect while auto-negotiation is enabled; reported, not judged */
+#define EV_BMSR_LINK           0x0004u
+#define EV_BMSR_ABLE           0x0008u
+#define EV_BMSR_COMPLETE       0x0020u
+#define EV_ANAR_COMPARED       0xBFFFu  /* bit 14 is reserved */
+#define EV_CTRL1000_COMPARED   0xFF00u  /* test mode, master/slave, port type, advertisement; bits 7:0 are reserved */
+/* The test's own bounds; none of them is a tolerance on a compared value */
+#define EV_PERIOD_MS           20
+#define EV_BASELINE_MS         500      /* samples before the write */
+#define EV_DOWN_BOUND_MS       15000    /* from the write: the OS must report the link down */
+#define EV_UP_BOUND_MS         LINK_BOUND_MS
+#define EV_STABLE_MS           10000    /* unchanged OS state after the link is back */
+#define EV_TOTAL_BOUND_MS      100000   /* whole observation: a link that keeps changing ends it */
+#define EV_MAX_SAMPLES         6000
+
+C_ASSERT(EV_IF_CONNECTED == MediaConnectStateConnected && EV_IF_DISCONNECTED == MediaConnectStateDisconnected);
+C_ASSERT(EV_BPS_PER_MBIT == BITS_PER_MBIT);
+
+typedef struct { BOOL ok; avb_u16 bmcr, bmsr, id1, id2, anar, ctrl1000; } EV_PHY;
+
+static EV_SAMPLE g_ev[EV_MAX_SAMPLES];
+static volatile LONG g_link_restart_adapter = -1;   /* from before the write until EVENT-RESTORE has reported */
+static volatile LONG g_link_restart_did;
+
+static void ev_report_abort(void)
+{
+    LONG adapter = InterlockedExchange(&g_link_restart_adapter, -1);
+    if (adapter >= 0) {
+        printf("[INCONCLUSIVE_RESTORATION] %s-EVENT-RESTORE/adapter:%ld did=0x%04lX: test aborted after an auto-negotiation restart; "
+               "the link was not checked afterwards. Operator: check the adapter's link state and speed, NIC cycle it if they are not "
+               "as before\n", CASE_ID, adapter, g_link_restart_did);
+        fflush(stdout);
+    }
+}
+
+static BOOL ev_mdio(HANDLE h, BOOL write, avb_u32 reg, avb_u16 *value, const char *label)
+{
+    AVB_MDIO_REQUEST m;
+    DWORD got = 0;
+    LONG st;
+    BOOL ok;
+
+    ZeroMemory(&m, sizeof(m));
+    m.page = EV_PHY_ADDR;
+    m.reg = reg;
+    if (write) {
+        m.value = *value;
+    }
+    m.status = 0xFFFFFFFFu;   /* never a success the driver did not write */
+    st = avb_ioctl_ntstatus(h, write ? IOCTL_AVB_MDIO_WRITE : IOCTL_AVB_MDIO_READ, &m, sizeof(m), &m, sizeof(m), &got);
+    ok = st == 0 && got == sizeof(m) && m.status == 0;
+    printf("    [EVIDENCE] MDIO %s %s: addr=%u reg=%u value=0x%04X ntstatus=0x%08lX information=%lu reply=0x%08X%s\n",
+           write ? "write" : "read", label, EV_PHY_ADDR, reg, m.value, (unsigned long)st, got, m.status, ok ? "" : " NOT VALID");
+    fflush(stdout);
+    if (!write) {
+        *value = ok ? m.value : 0;
+    }
+    return ok;
+}
+
+/** Every register twice; both reads valid and, except the latching BMSR, equal. BMSR: the second read counts (IEEE 802.3 22.2.4.2) */
+static BOOL ev_phy_snap(HANDLE h, const char *label, BOOL with_bmsr, EV_PHY *p, char *why, size_t size)
+{
+    static const avb_u32 regs[] = { EV_REG_PHYID1, EV_REG_PHYID2, EV_REG_BMCR, EV_REG_ANAR, EV_REG_CTRL1000, EV_REG_BMSR };
+    unsigned i;
+
+    ZeroMemory(p, sizeof(*p));
+    for (i = 0; i < ARRAYSIZE(regs); i++) {
+        avb_u16 a, b;
+        if (regs[i] == EV_REG_BMSR && !with_bmsr) {
+            continue;
+        }
+        if (!ev_mdio(h, FALSE, regs[i], &a, label) || !ev_mdio(h, FALSE, regs[i], &b, label)) {
+            sprintf_s(why, size, "PHY register %u could not be read (see the MDIO evidence)", regs[i]);
+            return FALSE;
+        }
+        if (regs[i] != EV_REG_BMSR && a != b) {
+            sprintf_s(why, size, "PHY register %u read 0x%04X then 0x%04X: not stable (a concurrent MDIC access is possible)", regs[i], a, b);
+            return FALSE;
+        }
+        switch (regs[i]) {
+        case EV_REG_PHYID1:   p->id1 = b; break;
+        case EV_REG_PHYID2:   p->id2 = b; break;
+        case EV_REG_BMCR:     p->bmcr = b; break;
+        case EV_REG_ANAR:     p->anar = b; break;
+        case EV_REG_CTRL1000: p->ctrl1000 = b; break;
+        default:              p->bmsr = b; break;
+        }
+    }
+    p->ok = TRUE;
+    return TRUE;
+}
+
+/** Everything that must hold before the one write; the first missing condition is the reason */
+static BOOL ev_phy_allows_restart(const EV_PHY *p, char *why, size_t size)
+{
+    if (p->id1 == 0 || p->id1 == 0xFFFFu || p->id2 == 0xFFFFu) {
+        sprintf_s(why, size, "no plausible PHY identity at address %u (0x%04X 0x%04X)", EV_PHY_ADDR, p->id1, p->id2);
+    } else if ((p->bmcr & EV_BMCR_ANENABLE) == 0) {
+        sprintf_s(why, size, "auto-negotiation is not enabled (BMCR 0x%04X); it is not enabled by this test", p->bmcr);
+    } else if ((p->bmcr & (EV_BMCR_COMMANDS | EV_BMCR_MODES | EV_BMCR_RESERVED)) != 0) {
+        sprintf_s(why, size, "BMCR 0x%04X has a command, mode or reserved bit set: writing it back could trigger it again", p->bmcr);
+    } else if (p->bmsr == 0xFFFFu || (p->bmsr & (EV_BMSR_ABLE | EV_BMSR_COMPLETE | EV_BMSR_LINK)) !=
+                                         (EV_BMSR_ABLE | EV_BMSR_COMPLETE | EV_BMSR_LINK)) {
+        sprintf_s(why, size, "BMSR 0x%04X does not report auto-negotiation ability, completion and link, although the OS reports a "
+                  "connected link: this PHY address is not established as the adapter's PHY", p->bmsr);
+    } else {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void ev_sample(HANDLE h, avb_u64 luid, EV_SAMPLE *s)
+{
+    MIB_IF_ROW2 a, b;
+    QUERY_READ q;
+
+    ZeroMemory(s, sizeof(*s));
+    s->t0 = qpc_ms();
+    s->e1 = read_if_raw(luid, &a);
+    s->t1 = qpc_ms();
+    query(h, &q);
+    s->t2 = qpc_ms();
+    s->e2 = read_if_raw(luid, &b);
+    s->t3 = qpc_ms();
+    s->s1 = a.MediaConnectState;
+    s->s2 = b.MediaConnectState;
+    s->tx1 = a.TransmitLinkSpeed;
+    s->tx2 = b.TransmitLinkSpeed;
+    s->qstatus = q.status;
+    s->qgot = q.got;
+    s->qok = !link_query_failed(&q, luid);
+    if (s->qok) {
+        s->mbps = q.q.link_speed_mbps;
+        s->epoch = q.q.context_epoch;
+        s->generation = q.q.generation;
+    }
+}
+
+static BOOL ev_same(const EV_SAMPLE *a, const EV_SAMPLE *b)
+{
+    return a->e1 == b->e1 && a->e2 == b->e2 && a->s1 == b->s1 && a->s2 == b->s2 && a->tx1 == b->tx1 && a->tx2 == b->tx2 &&
+           a->qok == b->qok && a->qstatus == b->qstatus && a->mbps == b->mbps && a->epoch == b->epoch && a->generation == b->generation;
+}
+
+/** Every sample, as runs of identical content with their times relative to the write */
+static void ev_print(const EV_SAMPLE *s, unsigned n, double tw)
+{
+    unsigned i, j;
+
+    for (i = 0; i < n; i = j) {
+        for (j = i + 1; j < n && ev_same(&s[i], &s[j]); j++) { }
+        printf("    [EVIDENCE] EVENT %+.1f .. %+.1f ms (%u): os1 err=%lu %s tx=%llu | ntstatus=0x%08lX information=%lu ", s[i].t0 - tw,
+               s[j - 1].t3 - tw, j - i, s[i].e1, media_name(s[i].s1), s[i].tx1, (unsigned long)s[i].qstatus, s[i].qgot);
+        if (s[i].qok) {
+            printf("link_speed_mbps=%u epoch=0x%016llX generation=%llu", s[i].mbps, s[i].epoch, s[i].generation);
+        } else {
+            printf("(no valid reply for this NET_LUID)");
+        }
+        printf(" | os2 err=%lu %s tx=%llu\n", s[i].e2, media_name(s[i].s2), s[i].tx2);
+    }
+    fflush(stdout);
+}
+
+static double ev_dist(double a, double b) { return a > b ? a - b : b - a; }
+
+/** Measured transitions: the OS change from its individual readings, the driver change from the replies, and the interval between them
+ *  (positive: the driver changed later, negative: earlier). Printed only; the samples alone are judged */
+static void ev_print_transitions(const EV_SAMPLE *s, unsigned n, double tw)
+{
+    unsigned k, d;
+
+    for (k = 1; k < n; k++) {
+        double os_lo, os_hi, d_lo = 0, d_hi = 0;
+        BOOL found = FALSE;
+        int to;
+        BOOL want_zero;
+
+        if (s[k - 1].e2 != NO_ERROR || s[k].e1 != NO_ERROR || s[k].e2 != NO_ERROR) {
+            continue;
+        }
+        if (s[k].s1 != s[k - 1].s2) {
+            os_lo = s[k - 1].t2;
+            os_hi = s[k].t1;
+            to = s[k].s1;
+        } else if (s[k].s1 != s[k].s2) {
+            os_lo = s[k].t0;
+            os_hi = s[k].t3;
+            to = s[k].s2;
+        } else {
+            continue;
+        }
+        want_zero = to == EV_IF_DISCONNECTED;
+        /* the driver change of the same direction nearest to the OS change */
+        for (d = 1; d < n; d++) {
+            if (s[d].qok && s[d - 1].qok && (s[d].mbps == 0) != (s[d - 1].mbps == 0) && (s[d].mbps == 0) == want_zero &&
+                (!found || ev_dist(s[d].t2, os_hi) < ev_dist(d_hi, os_hi))) {
+                d_lo = s[d - 1].t1;
+                d_hi = s[d].t2;
+                found = TRUE;
+            }
+        }
+        printf("    [EVIDENCE] EVENT transition: OS -> %s between %+.1f and %+.1f ms after the write; ", media_name(to), os_lo - tw, os_hi - tw);
+        if (found) {
+            printf("driver -> %s between %+.1f and %+.1f ms; driver minus OS between %+.1f and %+.1f ms (measured, no allowance)\n",
+                   want_zero ? "0" : "a speed", d_lo - tw, d_hi - tw, d_lo - os_hi, d_hi - os_lo);
+        } else {
+            printf("the driver's replies show no change in that direction\n");
+        }
+    }
+    fflush(stdout);
+}
+
+/** One phase line (ev_phase). path_proven: the path #472 asks for; otherwise not_proven says what is missing */
+static void ev_group_verdict(const char *check, UINT32 index, avb_u16 did, const EV_GROUP *g, double tw, BOOL path_proven, const char *not_proven)
+{
+    EV_OUT out = ev_phase(g, path_proven);
+    char m[500], full[1000];
+
+    sprintf_s(m, sizeof(m), "agree %u, disagree %u (longest run %.1f ms); not compared: OS changed inside the bracket %u, OS error %u, OS state "
+              "unknown %u, rate unknown %u, other context %u, failed queries %u", g->match, g->mismatch, g->longest_ms, g->split, g->os_error,
+              g->state_unknown, g->rate_unknown, g->other_context, g->failed);
+    if (out == EV_OUT_FAIL) {
+        const EV_SAMPLE *f = &g_ev[g->first_mismatch];
+        sprintf_s(full, sizeof(full), "a reply differs from its agreeing OS bracket, first at %+.1f ms: OS %s tx=%llu, link_speed_mbps %u; %s%s%s",
+                  f->t1 - tw, media_name(f->s1), f->tx1, f->mbps, m, path_proven ? "" : "; and the path is not proven: ", path_proven ? "" : not_proven);
+        verdict("FAIL", check, index, did, full);
+    } else if (out == EV_OUT_QUERY_FAILED) {
+        AVB_VERDICT v = avb_verdict_from_status((NTSTATUS)g->first_failed, AVB_CAP_PRESENT, FALSE, TRUE);
+        sprintf_s(full, sizeof(full), "%u queries failed, the first with ntstatus=0x%08lX; %s", g->failed, (unsigned long)g->first_failed, m);
+        verdict(v == AVB_VERDICT_PASS ? "INCONCLUSIVE" : avb_verdict_tag(v), check, index, did, full);
+    } else if (out == EV_OUT_INCONCLUSIVE) {
+        sprintf_s(full, sizeof(full), "%s; %s", !path_proven ? not_proven : g->match == 0 ? "no compared sample" : "a necessary measurement is missing", m);
+        verdict("INCONCLUSIVE", check, index, did, full);
+    } else {
+        verdict("PASS", check, index, did, m);
+    }
+}
+
+/** Opens a read/write handle, binds it by NET_LUID and proves the binding with a reply that names the target. An unbound MDIO request
+ *  would be served on another adapter (src/device.c fallback), so nothing is sent without this proof */
+static HANDLE ev_open_bound(avb_u64 luid)
+{
+    HANDLE h = open_device(GENERIC_READ | GENERIC_WRITE);
+    QUERY_READ q;
+
+    if (h == INVALID_HANDLE_VALUE) {
+        return h;
+    }
+    if (bind_luid(h, luid)) {
+        query(h, &q);
+        if (!link_query_failed(&q, luid)) {
+            return h;
+        }
+    }
+    CloseHandle(h);
+    return INVALID_HANDLE_VALUE;
+}
+
+/** The comparison after the event, with the rules documented above; every difference is its own line */
+static void ev_compare_phy(const EV_PHY *a, const EV_PHY *b, FINAL_FINDINGS *f)
+{
+    printf("    [EVIDENCE] EVENT PHY before/after: BMCR 0x%04X/0x%04X (compared 0x%04X, reported only 0x%04X) ANAR 0x%04X/0x%04X (0x%04X) "
+           "CTRL1000 0x%04X/0x%04X (0x%04X); 2.5G and EEE advertisement (clause 45) not read\n", a->bmcr, b->bmcr, EV_BMCR_CONFIG,
+           EV_BMCR_REPORTED, a->anar, b->anar, EV_ANAR_COMPARED, a->ctrl1000, b->ctrl1000, EV_CTRL1000_COMPARED);
+    if (a->id1 != b->id1 || a->id2 != b->id2) {
+        final_missing(f, "EVENT PHY identity read 0x%04X 0x%04X, before 0x%04X 0x%04X: the PHY comparison is not trusted", b->id1, b->id2,
+                      a->id1, a->id2);
+        return;
+    }
+    if ((b->bmcr & EV_BMCR_COMMANDS) != 0) {
+        final_violation(f, "EVENT BMCR 0x%04X: a self-clearing command bit still reads set", b->bmcr);
+    }
+    if (((a->bmcr ^ b->bmcr) & EV_BMCR_CONFIG) != 0) {
+        final_violation(f, "EVENT BMCR configuration 0x%04X -> 0x%04X (mask 0x%04X)", a->bmcr, b->bmcr, EV_BMCR_CONFIG);
+    }
+    if (((a->anar ^ b->anar) & EV_ANAR_COMPARED) != 0) {
+        final_violation(f, "EVENT advertisement 0x%04X -> 0x%04X (mask 0x%04X)", a->anar, b->anar, EV_ANAR_COMPARED);
+    }
+    if (((a->ctrl1000 ^ b->ctrl1000) & EV_CTRL1000_COMPARED) != 0) {
+        final_violation(f, "EVENT 1000BASE-T control 0x%04X -> 0x%04X (mask 0x%04X)", a->ctrl1000, b->ctrl1000, EV_CTRL1000_COMPARED);
+    }
+}
+
+/** Owned recovery after a restoration that was not established by the restart itself. Never skipped for lack of remaining time */
+static HANDLE ev_recover(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const MIB_IF_ROW2 *pre, const EV_PHY *before)
+{
+    EV_PHY now;
+    FINAL_FINDINGS ff;
+    HANDLE hw;
+    char why[300];
+    MIB_IF_ROW2 row;
+    HANDLE h;
+    BOOL ok;
+    DWORD start;
+    char reason[300];
+
+    printf("\n  --- Owned NIC cycle (EVENT recovery) ---\n");
+    g_pending_did = id->device_id;
+    InterlockedExchange(&g_pending_adapter, (LONG)index);
+    ok = cm_bounded(inst, FALSE, DISABLE_BOUND_MS);
+    if (ok) {
+        Sleep(3000);
+        ok = cm_bounded(inst, TRUE, ENABLE_BOUND_MS);
+    } else {
+        printf("    enable not attempted: the disable did not complete and may still be pending in Windows\n");
+    }
+    h = ok ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
+    InterlockedExchange(&g_pending_adapter, -1);
+    if (h == INVALID_HANDLE_VALUE) {
+        verdict("CLEANUP_FAILED", "EVENT-RECOVERY", index, id->device_id, "the recovery NIC cycle did not complete or the adapter did not "
+                "return; a timed-out disable may still be pending in Windows. Operator: NIC cycle once it ends, then check the link");
+        return h;
+    }
+    ZeroMemory(&row, sizeof(row));
+    start = GetTickCount();
+    while (GetTickCount() - start < LINK_BOUND_MS) {
+        if (read_if_raw(id->net_luid, &row) == NO_ERROR && row.MediaConnectState == pre->MediaConnectState &&
+            row.TransmitLinkSpeed == pre->TransmitLinkSpeed && row.ReceiveLinkSpeed == pre->ReceiveLinkSpeed) {
+            break;
+        }
+        Sleep(500);
+    }
+    ZeroMemory(&ff, sizeof(ff));
+    if (row.MediaConnectState != pre->MediaConnectState || row.TransmitLinkSpeed != pre->TransmitLinkSpeed ||
+        row.ReceiveLinkSpeed != pre->ReceiveLinkSpeed) {
+        final_violation(&ff, "EVENT recovery link: before the event %s tx=%llu rx=%llu, now %s tx=%llu rx=%llu",
+                        media_name(pre->MediaConnectState), pre->TransmitLinkSpeed, pre->ReceiveLinkSpeed,
+                        media_name(row.MediaConnectState), row.TransmitLinkSpeed, row.ReceiveLinkSpeed);
+    }
+    hw = ev_open_bound(id->net_luid);
+    if (hw == INVALID_HANDLE_VALUE) {
+        final_missing(&ff, "EVENT recovery PHY: no handle proven to be bound to this NET_LUID");
+    } else {
+        if (ev_phy_snap(hw, "after recovery", FALSE, &now, why, sizeof(why))) {
+            ev_compare_phy(before, &now, &ff);
+        } else {
+            final_missing(&ff, "EVENT recovery PHY: %s", why);
+        }
+        CloseHandle(hw);
+    }
+    sprintf_s(reason, sizeof(reason), "NIC cycle completed; %u violation(s), %u missing measurement(s), each listed above; link %s tx=%llu "
+              "rx=%llu", ff.violations, ff.missing, media_name(row.MediaConnectState), row.TransmitLinkSpeed, row.ReceiveLinkSpeed);
+    verdict(ff.violations != 0 ? "CLEANUP_FAILED" : ff.missing != 0 ? "INCONCLUSIVE_RESTORATION" : "PASS", "EVENT-RECOVERY", index,
+            id->device_id, reason);
+    return h;
+}
+
+/** EVENT (#472). h: the read-only bound handle of the run, held through the whole event. Returns the handle the run continues with
+ *  (another one, or INVALID_HANDLE_VALUE, after a recovery cycle). *recovered: the adapter context is a new one */
+static HANDLE run_link_event(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, BOOL *recovered)
+{
+    EV_PHY before, after;
+    EV_RESULT r;
+    EV_TRACK track;
+    STATS_READ s0, s1;
+    MIB_IF_ROW2 pre, fin;
+    FINAL_FINDINGS ff;
+    DWORD pre_err, fin_err;
+    HANDLE hw;
+    avb_u16 bmcr, value;
+    unsigned n = 0, iw, violations_link, failed, i;
+    double tw = 0, t_start = 0, t_change = 0, t_down = 0;
+    BOOL write_ok, stable, full = FALSE, epoch_ok = TRUE, kept, measured, reached;
+    int last_os = -1;
+    unsigned long long last_tx = 0, pre_mbps;
+    const char *nr;
+    char reason[900], why[300];
+
+    *recovered = FALSE;
+    ZeroMemory(&ff, sizeof(ff));
+    ZeroMemory(&before, sizeof(before));
+    ZeroMemory(&after, sizeof(after));
+    ZeroMemory(&s0, sizeof(s0));
+    ZeroMemory(&s1, sizeof(s1));
+    printf("\n  --- EVENT: auto-negotiation restart, no detach (#472) ---\n");
+
+    /* EVENT-PRE: nothing is written unless every condition was measured */
+    pre_err = read_if_raw(id->net_luid, &pre);
+    hw = INVALID_HANDLE_VALUE;
+    why[0] = '\0';
+    if ((id->capabilities & INTEL_CAP_MDIO) == 0) {
+        sprintf_s(why, sizeof(why), "the adapter does not advertise INTEL_CAP_MDIO (caps 0x%08X): no owned link-change mechanism", id->capabilities);
+    } else if (pre_err != NO_ERROR || pre.MediaConnectState != MediaConnectStateConnected || pre.TransmitLinkSpeed == 0 ||
+               pre.TransmitLinkSpeed == ~0ULL || pre.TransmitLinkSpeed % BITS_PER_MBIT != 0) {
+        sprintf_s(why, sizeof(why), "the OS reports no connected link with a known whole-Mbit/s rate (err=%lu %s tx=%llu)", pre_err,
+                  media_name(pre.MediaConnectState), pre.TransmitLinkSpeed);
+    } else if ((hw = ev_open_bound(id->net_luid)) == INVALID_HANDLE_VALUE) {
+        sprintf_s(why, sizeof(why), "no read/write handle proven to be bound to this NET_LUID: no MDIO request is sent");
+    } else if (ev_phy_snap(hw, "before", TRUE, &before, why, sizeof(why))) {
+        (void)ev_phy_allows_restart(&before, why, sizeof(why));
+    }
+    pre_mbps = pre.TransmitLinkSpeed / BITS_PER_MBIT;
+    if (why[0] == '\0') {
+        read_stats(h, &s0);
+        t_start = qpc_ms();
+        while (qpc_ms() - t_start < EV_BASELINE_MS && n < EV_MAX_SAMPLES) {   /* the state before the write, sampled the same way */
+            ev_sample(h, id->net_luid, &g_ev[n++]);
+            Sleep(EV_PERIOD_MS);
+        }
+        for (i = 0; i < n && why[0] == '\0'; i++) {
+            unsigned long long e;
+            if (!ev_expected(&g_ev[i], &e) || e != pre_mbps || !g_ev[i].qok) {
+                sprintf_s(why, sizeof(why), "the link or the query was not stable for %d ms before the write (sample %u of %u)", EV_BASELINE_MS, i, n);
+            }
+        }
+    }
+    if (why[0] == '\0') {
+        QUERY_READ q;
+        query(hw, &q);   /* the binding again, immediately before the write */
+        if (link_query_failed(&q, id->net_luid)) {
+            sprintf_s(why, sizeof(why), "the write handle no longer answers for this NET_LUID (ntstatus=0x%08lX)", (unsigned long)q.status);
+        } else if (!ev_mdio(hw, FALSE, EV_REG_BMCR, &bmcr, "before the write") || bmcr != before.bmcr) {
+            sprintf_s(why, sizeof(why), "BMCR could not be read again, or differs from 0x%04X read before", before.bmcr);
+        } else {
+            unsigned long long e;
+            ev_sample(h, id->net_luid, &g_ev[n++]);   /* the state from which the event starts, immediately before the write */
+            if (!ev_expected(&g_ev[n - 1], &e) || e != pre_mbps || !g_ev[n - 1].qok) {
+                sprintf_s(why, sizeof(why), "the last sample before the write does not show the link connected at %llu Mbit/s", pre_mbps);
+            }
+        }
+    }
+    if (why[0] != '\0') {
+        verdict("INCONCLUSIVE", "EVENT-PRE", index, id->device_id, why);
+        if (n != 0) {   /* the samples taken are judged all the same */
+            ev_judge(g_ev, n, n, &r);
+            ev_print(g_ev, n, t_start);
+            ev_group_verdict("EVENT-BEFORE", index, id->device_id, &r.before, t_start, TRUE, "");
+        }
+        verdict("INCONCLUSIVE", "EVENT", index, id->device_id, "not exercised: nothing was written (EVENT-PRE); ATTACH is not EVENT coverage");
+        if (hw != INVALID_HANDLE_VALUE) {
+            CloseHandle(hw);
+        }
+        return h;
+    }
+    sprintf_s(reason, sizeof(reason), "bound by NET_LUID, PHY 0x%04X 0x%04X at address %u, BMCR 0x%04X with auto-negotiation enabled and "
+              "complete (BMSR 0x%04X), OS connected at %llu bit/s", before.id1, before.id2, EV_PHY_ADDR, before.bmcr, before.bmsr,
+              pre.TransmitLinkSpeed);
+    verdict("PASS", "EVENT-PRE", index, id->device_id, reason);
+
+    /* The one write: the value read plus the restart command, nothing else */
+    iw = n;
+    value = (avb_u16)(before.bmcr | EV_BMCR_ANRESTART);
+    g_link_restart_did = id->device_id;
+    InterlockedExchange(&g_link_restart_adapter, (LONG)index);
+    tw = qpc_ms();
+    write_ok = ev_mdio(hw, TRUE, EV_REG_BMCR, &value, "restart auto-negotiation");
+    t_change = tw;
+    ev_track_start(&track, &g_ev[iw - 1]);
+    while (n < EV_MAX_SAMPLES) {
+        EV_SAMPLE *s = &g_ev[n++];
+        int os;
+        double now;
+        BOOL had_down = track.saw_down;
+        ev_sample(h, id->net_luid, s);
+        ev_track(&track, s);
+        os = ev_os(s);
+        now = s->t3;
+        if (os != last_os || (os == 2 && s->tx1 != last_tx)) {
+            t_change = now;
+            last_os = os;
+            last_tx = s->tx1;
+        }
+        if (track.saw_down && !had_down) {
+            t_down = now;
+        }
+        if ((!track.saw_down && now - tw > EV_DOWN_BOUND_MS) || (track.phase == EV_PHASE_DOWN && now - t_down > EV_UP_BOUND_MS) ||
+            (track.phase == EV_PHASE_UP && now - t_change >= EV_STABLE_MS) || now - tw > EV_TOTAL_BOUND_MS) {
+            break;
+        }
+        Sleep(EV_PERIOD_MS);
+    }
+    full = n == EV_MAX_SAMPLES;
+    read_stats(h, &s1);
+    ev_judge(g_ev, n, iw, &r);
+    stable = last_os == 2 && g_ev[n - 1].t3 - t_change >= EV_STABLE_MS;
+    failed = r.before.failed + r.down.failed + r.up.failed;
+    ev_print(g_ev, n, tw);
+    ev_print_transitions(g_ev, n, tw);
+
+    /* EVENT-CAUSE: the OS must have shown the link down and up again; the accepted write alone is nothing */
+    sprintf_s(reason, sizeof(reason), "write %s; after it the OS reported the link %s%s, %s at the end; %u samples%s", write_ok ? "accepted" :
+              "NOT accepted (it may still have reached the PHY)", r.track.saw_down ? "disconnected" : "never disconnected",
+              r.track.saw_down ? (r.track.saw_up ? " and connected again" : " and not connected again") : "", stable ? "stable" : "not stable", n,
+              full ? " (sample capacity reached)" : "");
+    verdict(ev_cause(&r, write_ok) == EV_OUT_PASS ? "PASS" : "INCONCLUSIVE", "EVENT-CAUSE", index, id->device_id, reason);
+    printf("    [EVIDENCE] EVENT start: the last sample before the write ended %.1f ms before it\n", tw - g_ev[iw - 1].t3);
+
+    /* EVENT-CONTEXT: the epoch of every reply and the lifecycle counters are unchanged and the same handle still answers at the end. A
+     * query refused in between on a kept context is the driver's answer (EVENT-DOWN, EVENT-UP), not a missing context */
+    for (i = 0; i < n; i++) {
+        if (g_ev[i].qok && (g_ev[i].epoch == 0 || g_ev[i].epoch != g_ev[0].epoch)) {
+            epoch_ok = FALSE;
+        }
+    }
+    measured = s0.ok && s1.ok && g_ev[0].epoch != 0 && g_ev[n - 1].qok;
+    kept = measured && epoch_ok && s0.s.FilterAttachCount == s1.s.FilterAttachCount && s0.s.FilterDetachCount == s1.s.FilterDetachCount &&
+           s0.s.FilterPauseCount == s1.s.FilterPauseCount && s0.s.FilterRestartCount == s1.s.FilterRestartCount &&
+           s0.s.PauseRestartGeneration == s1.s.PauseRestartGeneration && s1.s.IoctlCount > s0.s.IoctlCount;
+    sprintf_s(reason, sizeof(reason), "statistics %s/%s, epoch 0x%016llX %s, last query %s, failed queries %u", s0.ok ? "read" : "unavailable",
+              s1.ok ? "read" : "unavailable", g_ev[0].epoch, epoch_ok ? "in every reply" : "NOT the same in every reply",
+              g_ev[n - 1].qok ? "answered" : "NOT answered", failed);
+    if (s0.ok && s1.ok) {
+        sprintf_s(reason + strlen(reason), sizeof(reason) - strlen(reason), "; attach %llu/%llu detach %llu/%llu pause %llu/%llu restart "
+                  "%llu/%llu pause-restart generation %llu/%llu ioctl %llu/%llu", s0.s.FilterAttachCount, s1.s.FilterAttachCount,
+                  s0.s.FilterDetachCount, s1.s.FilterDetachCount, s0.s.FilterPauseCount, s1.s.FilterPauseCount, s0.s.FilterRestartCount,
+                  s1.s.FilterRestartCount, s0.s.PauseRestartGeneration, s1.s.PauseRestartGeneration, s0.s.IoctlCount, s1.s.IoctlCount);
+        printf("    [EVIDENCE] EVENT FilterStatusCount %llu -> %llu: every indication counts, so the difference is not attributed to the "
+               "link and not judged\n", s0.s.FilterStatusCount, s1.s.FilterStatusCount);
+    }
+    if (kept) {
+        verdict("PASS", "EVENT-CONTEXT", index, id->device_id, reason);
+    } else {
+        char all[1000];
+        sprintf_s(all, sizeof(all), "%s: the EVENT-without-detach path was not reached or not proven; not a verdict on the speed report; %s",
+                  measured ? "the adapter context was not kept" : "not measured", reason);
+        verdict("INCONCLUSIVE", "EVENT-CONTEXT", index, id->device_id, all);
+    }
+
+    /* EVENT-BEFORE, EVENT-DOWN, EVENT-UP: the driver's answers. A pass of DOWN and UP needs the path #472 asks for; a compared
+     * disagreement is FAIL on every path */
+    reached = kept && write_ok && r.track.saw_down && !full;
+    nr = full ? "the observation was cut by the sample capacity" : !kept ? "the event without a detach was not proven (EVENT-CONTEXT)"
+                                                                        : "no link-down was observed after an accepted write (EVENT-CAUSE)";
+    ev_group_verdict("EVENT-BEFORE", index, id->device_id, &r.before, tw, TRUE, "");
+    ev_group_verdict("EVENT-DOWN", index, id->device_id, &r.down, tw, reached, nr);
+    ev_group_verdict("EVENT-UP", index, id->device_id, &r.up, tw, reached && r.track.saw_up,
+                     reached ? "the OS did not report the link connected again (EVENT-CAUSE)" : nr);
+
+    /* EVENT-RESTORE: the OS link as before and stable, the PHY configuration by its documented rules */
+    CloseHandle(hw);
+    fin_err = read_if_raw(id->net_luid, &fin);
+    printf("    [EVIDENCE] EVENT OS before: %s tx=%llu rx=%llu | after: err=%lu %s tx=%llu rx=%llu, %s\n", media_name(pre.MediaConnectState),
+           pre.TransmitLinkSpeed, pre.ReceiveLinkSpeed, fin_err, media_name(fin.MediaConnectState), fin.TransmitLinkSpeed,
+           fin.ReceiveLinkSpeed, stable ? "stable" : "not stable");
+    if (fin_err != NO_ERROR) {
+        final_missing(&ff, "EVENT link state after: GetIfEntry2 err=%lu", fin_err);
+    } else if (fin.MediaConnectState != pre.MediaConnectState || fin.TransmitLinkSpeed != pre.TransmitLinkSpeed ||
+               fin.ReceiveLinkSpeed != pre.ReceiveLinkSpeed) {
+        final_violation(&ff, "EVENT link %s tx=%llu rx=%llu -> %s tx=%llu rx=%llu", media_name(pre.MediaConnectState), pre.TransmitLinkSpeed,
+                        pre.ReceiveLinkSpeed, media_name(fin.MediaConnectState), fin.TransmitLinkSpeed, fin.ReceiveLinkSpeed);
+    } else if (!stable) {
+        final_violation(&ff, "EVENT link as before, but not unchanged for %d ms", EV_STABLE_MS);
+    }
+    violations_link = ff.violations;
+    hw = ev_open_bound(id->net_luid);
+    if (hw == INVALID_HANDLE_VALUE) {
+        final_missing(&ff, "EVENT PHY after: no handle proven to be bound to this NET_LUID");
+    } else {
+        if (ev_phy_snap(hw, "after", FALSE, &after, why, sizeof(why))) {
+            ev_compare_phy(&before, &after, &ff);
+        } else {
+            final_missing(&ff, "EVENT PHY after: %s", why);
+        }
+        CloseHandle(hw);
+    }
+    sprintf_s(reason, sizeof(reason), "%u violation(s) (link %u), %u missing measurement(s), each listed above", ff.violations, violations_link,
+              ff.missing);
+    verdict(ff.violations != 0 ? "CLEANUP_FAILED" : ff.missing != 0 ? "INCONCLUSIVE_RESTORATION" : "PASS", "EVENT-RESTORE", index,
+            id->device_id, ff.violations != 0 || ff.missing != 0 ? reason :
+            "OS link, transmit and receive rate as before and stable; PHY identity and compared configuration as before");
+    InterlockedExchange(&g_link_restart_adapter, -1);
+    if (ff.violations != 0) {
+        CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
+        *recovered = TRUE;
+        return ev_recover(index, id, inst, &pre, &before);
+    }
+    return h;
+}
+
 static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst)
 {
     CLOCK_READ ck0, ck1;
@@ -3024,7 +3642,7 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     MIB_IF_ROW2 pre_os, fin_os;
     DWORD pre_err, fin_err, start;
     HANDLE h;
-    BOOL cycled, returned, pre_connected;
+    BOOL cycled, returned, pre_connected, recovered = FALSE;
     AVB_VERDICT v1, v2;
     FINAL_FINDINGS ff;
     char reason[900], r2[400];
@@ -3079,7 +3697,7 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
                 "disable may still be pending in Windows. Operator: NIC cycle once it ends, then check it with the TAS query");
         verdict("BLOCKED", "ATTACH", index, id->device_id, "requires the test's own NIC cycle and the adapter's return");
         verdict("BLOCKED", "STEADY", index, id->device_id, "requires the test's own NIC cycle and the adapter's return");
-        verdict("INCONCLUSIVE", "EVENT", index, id->device_id, "not exercised: no owned link transition without a detach (see the header)");
+        verdict("INCONCLUSIVE", "EVENT", index, id->device_id, "not exercised: requires the test's own NIC cycle and the adapter's return");
         verdict("BLOCKED", "FINAL", index, id->device_id, "the adapter did not return; its final state is not established");
         link_clock_cleanup(index, id->device_id, &ck0, &ck1, FALSE);
         return;
@@ -3127,10 +3745,17 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
         verdict(avb_verdict_tag(v), "STEADY", index, id->device_id, both);
     }
 
-    /* EVENT: required by #472 but not exercised by this test; never a pass by omission */
-    verdict("INCONCLUSIVE", "EVENT", index, id->device_id,
-            "not exercised: the test has no owned procedure that changes the link without detaching the filter and restores it "
-            "(a cable or link-partner change depends on topology it cannot establish, #463); ATTACH is not EVENT coverage");
+    /* EVENT: a link change without a detach; never a pass by omission, and never a reason to leave out what follows */
+    h = run_link_event(h, index, id, inst, &recovered);
+    if (h == INVALID_HANDLE_VALUE) {
+        verdict("BLOCKED", "FINAL", index, id->device_id, "the adapter did not return from the EVENT recovery cycle; its final state is not established");
+        link_clock_cleanup(index, id->device_id, &ck0, &ck1, FALSE);
+        return;
+    }
+    if (recovered) {
+        printf("    [EVIDENCE] the EVENT recovery cycle created a new adapter context: the HardwareFaults baseline from ATTACH is lost\n");
+        st_att.ok = FALSE;
+    }
 
     /* FINAL: bound, link as before the test, TAS clean, no fault; a difference is a cleanup defect, not a functional verdict.
      * Each requirement is judged on its own valid measurement first (r4619159432): an observed violation stays a violation
