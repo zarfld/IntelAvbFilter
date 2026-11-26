@@ -49,6 +49,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 #include "../ioctl/tas_link_event_eval.h"   /* TC-MOCK-076: TC-TASAPI-021 EVENT samples (#472), test logic only */
 #include "../ioctl/tas_link_status_eval.h"  /* TC-MOCK-078, -080: META-007 status after a link change, META-004 after a Pause (#350), test logic only */
+#include "../ioctl/tas_lookup_eval.h"       /* TC-MOCK-081: TC-TASAPI-014 failure-record lookup (#379), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -4982,6 +4983,144 @@ static void test_80_pause_status(void)
     EXPECT_EQ("no RETAINED control: not judged", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
 }
 
+/* TC-MOCK-081: one #352 record lookup and the record it returns (TC-TASAPI-014, #379; tests/ioctl/tas_lookup_eval.h). Test logic only:
+ * no store exists, so the FOUND and NOT_FOUND paths are reachable offline only until the #352 store (#365 12.2) */
+static void m81_reply(AVB_TAS_QUERY_HW_REQUEST *q, avb_u64 luid, avb_u32 lookup_result)
+{
+    ZeroMemory(q, sizeof(*q));
+    q->version = AVB_TAS_QUERY_VERSION;
+    q->size = (avb_u32)sizeof(*q);
+    q->lookup_client_op_id = 0x1111;
+    q->net_luid = luid;
+    q->lookup_result = lookup_result;
+}
+
+static void m81_record(AVB_TAS_OP_RECORD *r)
+{
+    ZeroMemory(r, sizeof(*r));
+    r->client_op_id = 0x1111;
+    r->net_luid = 0x0006008006000000ull;
+    r->context_epoch = 777;
+    r->generation_after = 6;
+    r->result = AVB_TAS_ACT_FAILED_RESTORED;
+    r->ntstatus = (avb_u32)STATUS_IO_DEVICE_ERROR;
+}
+
+static void test_81_failure_lookup(void)
+{
+    const avb_u64 L = 0x0006008006000000ull, OTHER = 0x0006008005000000ull;
+    const DWORD N = (DWORD)sizeof(AVB_TAS_QUERY_HW_REQUEST);
+    AVB_TAS_QUERY_HW_REQUEST q;
+    AVB_TAS_OP_RECORD r;
+    TAS_LK_CONTENT c;
+
+    printf("\n[TC-MOCK-081] #379 failure-record lookup and record content (test logic only)\n");
+
+    /* The originating instance (and a handle duplicated from it) */
+    m81_reply(&q, L, AVB_TAS_LOOKUP_FOUND);
+    m81_record(&q.lookup);
+    EXPECT_EQ("originating FOUND: PASS", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_PASS);
+    m81_reply(&q, L, AVB_TAS_LOOKUP_NOT_FOUND);
+    EXPECT_EQ("originating NOT_FOUND after a recorded failure: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    m81_reply(&q, L, AVB_TAS_LOOKUP_NOT_IMPLEMENTED);
+    EXPECT_EQ("originating NOT_IMPLEMENTED (no store): SKIP_NOT_IMPLEMENTED", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE),
+              TAS_LK_NOT_IMPLEMENTED);
+    q.lookup.result = 3;
+    EXPECT_EQ("NOT_IMPLEMENTED with record bytes: FAIL (U1)", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    m81_reply(&q, L, AVB_TAS_LOOKUP_NOT_REQUESTED);
+    EXPECT_EQ("NOT_REQUESTED for a non-zero id: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    m81_reply(&q, L, 0);
+    EXPECT_EQ("lookup_result 0 on success: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    m81_reply(&q, L, 5);
+    EXPECT_EQ("an undefined lookup_result: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    m81_reply(&q, L, AVB_TAS_LOOKUP_FOUND);
+    EXPECT_EQ("originating refused NOT_SUPPORTED: FAIL", tas_lk_reply(TRUE, STATUS_NOT_SUPPORTED, 0, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    EXPECT_EQ("originating NOT_SUPPORTED without the capability flag: still FAIL",
+              tas_lk_reply(TRUE, STATUS_NOT_SUPPORTED, 0, &q, L, FALSE, TRUE), TAS_LK_FAIL);
+    EXPECT_EQ("query NOT_IMPLEMENTED: SKIP_NOT_IMPLEMENTED", tas_lk_reply(TRUE, STATUS_NOT_IMPLEMENTED, 0, &q, L, TRUE, TRUE),
+              TAS_LK_NOT_IMPLEMENTED);
+    EXPECT_EQ("status not captured: INCONCLUSIVE", tas_lk_reply(FALSE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_INCONCLUSIVE);
+    EXPECT_EQ("status unavailable: INCONCLUSIVE", tas_lk_reply(TRUE, (LONG)AVB_NTSTATUS_UNAVAILABLE, 0, &q, L, TRUE, TRUE),
+              TAS_LK_INCONCLUSIVE);
+    EXPECT_EQ("another error: INCONCLUSIVE", tas_lk_reply(TRUE, STATUS_INVALID_DEVICE_STATE, 0, &q, L, TRUE, TRUE), TAS_LK_INCONCLUSIVE);
+    EXPECT_EQ("success with a short reply: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N - 1, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    q.version = AVB_TAS_QUERY_VERSION + 1;
+    EXPECT_EQ("success with another version: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    q.version = AVB_TAS_QUERY_VERSION;
+    q.size = 0;
+    EXPECT_EQ("success with another size: FAIL", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, L, TRUE, TRUE), TAS_LK_FAIL);
+    q.size = (avb_u32)sizeof(q);
+    EXPECT_EQ("the reply names another adapter: INCONCLUSIVE", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, OTHER, TRUE, TRUE),
+              TAS_LK_INCONCLUSIVE);
+
+    /* An independent instance, or another adapter */
+    m81_reply(&q, OTHER, AVB_TAS_LOOKUP_NOT_FOUND);
+    EXPECT_EQ("other NOT_FOUND: PASS", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, OTHER, TRUE, FALSE), TAS_LK_PASS);
+    q.lookup.client_op_id = 0x1111;
+    EXPECT_EQ("other NOT_FOUND with record bytes: FAIL (U1)", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, OTHER, TRUE, FALSE), TAS_LK_FAIL);
+    m81_reply(&q, OTHER, AVB_TAS_LOOKUP_FOUND);
+    m81_record(&q.lookup);
+    EXPECT_EQ("other FOUND: FAIL (disclosure)", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, OTHER, TRUE, FALSE), TAS_LK_FAIL);
+    m81_reply(&q, OTHER, AVB_TAS_LOOKUP_NOT_IMPLEMENTED);
+    EXPECT_EQ("other NOT_IMPLEMENTED: SKIP_NOT_IMPLEMENTED", tas_lk_reply(TRUE, STATUS_SUCCESS, N, &q, OTHER, TRUE, FALSE),
+              TAS_LK_NOT_IMPLEMENTED);
+    EXPECT_EQ("other adapter without TSN_TAS refused: SKIP_UNSUPPORTED", tas_lk_reply(TRUE, STATUS_NOT_SUPPORTED, 0, &q, OTHER, FALSE, FALSE),
+              TAS_LK_UNSUPPORTED);
+    EXPECT_EQ("other TAS adapter refused NOT_SUPPORTED: FAIL", tas_lk_reply(TRUE, STATUS_NOT_SUPPORTED, 0, &q, OTHER, TRUE, FALSE),
+              TAS_LK_FAIL);
+
+    /* Content of a FOUND record */
+    m81_record(&r);
+    c = tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE);
+    EXPECT_EQ("content as sent and observed: nothing differs", c.mismatch, 0);
+    EXPECT_EQ("content as sent and observed: everything compared", c.unmeasured, 0);
+    EXPECT_EQ("content as sent and observed: PASS", tas_lk_content_out(c), TAS_LK_PASS);
+    r.client_op_id = 0x1112;
+    EXPECT_EQ("another client_op_id", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch, TAS_LK_F_ID);
+    m81_record(&r);
+    r.net_luid = OTHER;
+    EXPECT_EQ("another net_luid", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch, TAS_LK_F_LUID);
+    m81_record(&r);
+    r.context_epoch = 778;
+    EXPECT_EQ("another context_epoch", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch, TAS_LK_F_EPOCH);
+    m81_record(&r);
+    r.generation_after = 5;
+    EXPECT_EQ("generation_after not advanced", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch,
+              TAS_LK_F_GEN);
+    r.generation_after = 7;
+    EXPECT_EQ("generation_after advanced twice", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch,
+              TAS_LK_F_GEN);
+    m81_record(&r);
+    r.result = AVB_TAS_ACT_FAILED_NOT_RESTORED;
+    EXPECT_EQ("another result", tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).mismatch, TAS_LK_F_RESULT);
+    m81_record(&r);
+    r.ntstatus = (avb_u32)STATUS_UNSUCCESSFUL;
+    c = tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE);
+    EXPECT_EQ("another ntstatus", c.mismatch, TAS_LK_F_NTSTATUS);
+    EXPECT_EQ("a difference: FAIL", tas_lk_content_out(c), TAS_LK_FAIL);
+    c = tas_lk_content(&r, 0x1111, L, 0, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE);
+    EXPECT_EQ("a difference stays FAIL when the epoch is not reported", tas_lk_content_out(c), TAS_LK_FAIL);
+
+    m81_record(&r);
+    c = tas_lk_content(&r, 0x1111, L, 0, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE);
+    EXPECT_EQ("epoch 0: not compared", c.unmeasured, TAS_LK_F_EPOCH);
+    EXPECT_EQ("epoch 0: INCONCLUSIVE", tas_lk_content_out(c), TAS_LK_INCONCLUSIVE);
+    EXPECT_EQ("generation 0: not compared", tas_lk_content(&r, 0x1111, L, 777, 0, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).unmeasured,
+              TAS_LK_F_GEN);
+    EXPECT_EQ("write attempt not established: generation not compared",
+              tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, FALSE, TRUE).unmeasured, TAS_LK_F_GEN);
+    r.result = AVB_TAS_ACT_FAILED_NOT_RESTORED;
+    EXPECT_EQ("FAILED_RESTORED not established: result not compared",
+              tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, FALSE).unmeasured, TAS_LK_F_RESULT);
+    EXPECT_EQ("FAILED_RESTORED not established: no result difference",
+              tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, STATUS_IO_DEVICE_ERROR, TRUE, FALSE).mismatch, 0);
+    m81_record(&r);
+    EXPECT_EQ("completion not captured: ntstatus not compared",
+              tas_lk_content(&r, 0x1111, L, 777, 5, FALSE, STATUS_IO_DEVICE_ERROR, TRUE, TRUE).unmeasured, TAS_LK_F_NTSTATUS);
+    EXPECT_EQ("completion unavailable: ntstatus not compared",
+              tas_lk_content(&r, 0x1111, L, 777, 5, TRUE, (LONG)AVB_NTSTATUS_UNAVAILABLE, TRUE, TRUE).unmeasured, TAS_LK_F_NTSTATUS);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -5051,6 +5190,7 @@ int main(void) {
     test_76_link_event();
     test_78_link_status();
     test_80_pause_status();
+    test_81_failure_lookup();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
