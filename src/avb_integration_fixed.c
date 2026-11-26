@@ -5007,7 +5007,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 q->lookup_result = (lookup == 0) ? AVB_TAS_LOOKUP_NOT_REQUESTED : AVB_TAS_LOOKUP_NOT_IMPLEMENTED;
                 q->legacy_conflicts = AVB_TAS_NOT_REPORTED_U32;
                 (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended,
-                                     locked ? &currentContext->tas_retained : NULL);
+                                     locked ? &currentContext->tas_retained : NULL, &currentContext->tas_event_seq);
                 seq1 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
                 if (locked) {
                     lock_t1 = avb_tas_reg_release_shared_at_dpc(currentContext, &lock_freq);
@@ -5397,7 +5397,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             const avb_u64 bound_luid = (activeContext->filter_instance != NULL) ? activeContext->filter_instance->MiniportNetLuid.Value : 0u;
             AVB_TAS_OP_OUTCOME oc;
             avb_u32 result = AVB_TAS_ACT_INVALID, before = 0, after = 0, link_mbps = 0;
-            avb_u64 gen_before = 0, gen_after = 0, epoch = 0;
+            avb_u64 gen_before = 0, gen_after = 0, epoch = 0, event_seq = AVB_TAS_EVSEQ_LOST;
             BOOLEAN ran = FALSE;
 #ifndef NDEBUG
             avb_u64 dbg_commit_seq = 0;   /* #505: marker taken where the record is published after writes */
@@ -5442,6 +5442,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             LARGE_INTEGER lock_t0 = avb_tas_reg_lock(activeContext, &lock_irql);
 
                             before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
+                            /* #365 decision 2026-11-26 (C): the event sequence before the first register write */
+                            event_seq = avb_tas_event_read(&activeContext->tas_event_seq);
                             ops->activate_tas_hold(&activeContext->intel_device, &r->schedule, link_mbps, r->flags, r->debug_fault,
                                                    AVB_TAS_MIN_LEAD_NS, before != AVB_TAS_STATE_CLEAN, &oc);   /* steps 6-9 */
                             ran = TRUE;
@@ -5464,7 +5466,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             InterlockedExchange(&activeContext->tas_armed, (LONG)after);
                             /* #350 (C6): the schedule as handed over and the operation's own readings around the commit write */
                             avb_tas_retained_activate(&activeContext->tas_retained, result, oc.write_attempted, after, &r->schedule,
-                                                      oc.phc_recheck_ns, oc.phc_at_commit_ns);
+                                                      oc.phc_recheck_ns, oc.phc_at_commit_ns, event_seq);
 #ifndef NDEBUG
                             if (oc.write_attempted) {
                                 dbg_commit_seq = (avb_u64)InterlockedIncrement64(&activeContext->dbg_seq);   /* #505, no logging */

@@ -683,7 +683,7 @@ static void activate_tas_hold(device_t *dev, const struct AVB_TAS_SCHEDULE *sche
  * DISPATCH_LEVEL with the adapter's TAS register lock held in shared mode, or with contended set and no register access
  * allowed; the caller logs the reply after releasing it */
 static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
-                     int op_in_progress, int contended, const struct AVB_TAS_RETAINED *retained)
+                     int op_in_progress, int contended, const struct AVB_TAS_RETAINED *retained, volatile long long *event_seq)
 {
     I226_TAS_IO io;
 
@@ -692,7 +692,7 @@ static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int 
     io.write = NULL;
     io.phc = activate_phc;
     io.fault_injection = 0;
-    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, retained, reply);
+    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, retained, event_seq, reply);
     return 0;
 }
 
