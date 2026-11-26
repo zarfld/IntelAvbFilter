@@ -48,6 +48,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 #include "../ioctl/tas_link_event_eval.h"   /* TC-MOCK-076: TC-TASAPI-021 EVENT samples (#472), test logic only */
+#include "../ioctl/tas_link_status_eval.h"  /* TC-MOCK-078: TC-TASACT-META-007 status after a link change (#350), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -4039,12 +4040,13 @@ static void test_72_reseed_match(void)
 static void ret_commit(AVB_TAS_RETAINED *t, const AVB_TAS_SCHEDULE *s, avb_u32 result)
 {
     ZeroMemory(t, sizeof(*t));
-    avb_tas_retained_activate(t, result, 1, avb_tas_state_after(result, AVB_TAS_STATE_CLEAN, 1), s, 1010, 1020);
+    avb_tas_retained_activate(t, result, 1, avb_tas_state_after(result, AVB_TAS_STATE_CLEAN, 1), s, 1010, 1020, 0);
 }
 
 static void test_73_retained(void)
 {
-    const avb_u32 full = AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_BRACKET | AVB_TAS_RET_IN_TIME;
+    /* A commit also retains its pre-write event sequence (#365 K8 events decision 2026-11-26, C) */
+    const avb_u32 full = AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_BRACKET | AVB_TAS_RET_IN_TIME | AVB_TAS_RET_EVENT_SEQ;
     static const avb_u32 refusals[] = { AVB_TAS_ACT_INVALID, AVB_TAS_ACT_NOT_CLEAN, AVB_TAS_ACT_READ_FAILED, AVB_TAS_ACT_STATE_CONFLICT };
     static const avb_u32 dirty[] = { AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_ACT_FAILED_RESTORED };
     AVB_TAS_SCHEDULE s, other;
@@ -4066,9 +4068,9 @@ static void test_73_retained(void)
     EXPECT_TRUE("... and exactly the operation's own readings", t.phc_before_commit_ns == 1010 && t.phc_after_commit_ns == 1020);
     EXPECT_TRUE("... reportable", avb_tas_retained_timed(&t));
     ret_commit(&t, &s, AVB_TAS_ACT_BASE_PASSED);
-    EXPECT_EQ("BASE_PASSED: schedule and bracket, not in time", t.flags, AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_BRACKET);
+    EXPECT_EQ("BASE_PASSED: schedule and bracket, not in time", t.flags, AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_BRACKET | AVB_TAS_RET_EVENT_SEQ);
     ret_commit(&t, &s, AVB_TAS_ACT_COMMITTED_UNTIMED);
-    EXPECT_EQ("COMMITTED_UNTIMED: schedule, timing lost", t.flags, AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_TIMING_LOST);
+    EXPECT_EQ("COMMITTED_UNTIMED: schedule, timing lost", t.flags, AVB_TAS_RET_SCHEDULE | AVB_TAS_RET_TIMING_LOST | AVB_TAS_RET_EVENT_SEQ);
     EXPECT_TRUE("... no bracket", t.phc_before_commit_ns == 0 && t.phc_after_commit_ns == 0 && !avb_tas_retained_timed(&t));
     for (k = 0; k < sizeof(dirty) / sizeof(dirty[0]); k++) {
         ret_commit(&t, &s, dirty[k]);
@@ -4076,12 +4078,12 @@ static void test_73_retained(void)
         EXPECT_EQ("... nothing of the request is kept", t.schedule.base_time_ns == 0 && t.phc_before_commit_ns == 0, 1);
     }
     ZeroMemory(&keep, sizeof(keep));
-    avb_tas_retained_activate(&keep, AVB_TAS_ACT_FAILED_RESTORED, 1, avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 0), &s, 1, 2);
+    avb_tas_retained_activate(&keep, AVB_TAS_ACT_FAILED_RESTORED, 1, avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 0), &s, 1, 2, 0);
     EXPECT_EQ("a failure before the mode write, record still CLEAN: nothing retained", keep.flags, 0);
     for (k = 0; k < sizeof(refusals) / sizeof(refusals[0]); k++) {
         ret_commit(&t, &s, AVB_TAS_ACT_COMMITTED);
         keep = t;
-        avb_tas_retained_activate(&t, refusals[k], 0, avb_tas_state_after(refusals[k], AVB_TAS_STATE_ARMED, 0), &other, 7, 8);
+        avb_tas_retained_activate(&t, refusals[k], 0, avb_tas_state_after(refusals[k], AVB_TAS_STATE_ARMED, 0), &other, 7, 8, 0);
         EXPECT_EQ("a refusal changes nothing", memcmp(&t, &keep, sizeof(t)), 0);
     }
 
@@ -4141,7 +4143,7 @@ static void test_73_retained(void)
     ret_commit(&t, &s, AVB_TAS_ACT_COMMITTED);
     before = avb_tas_retained_phc_begin(&t);
     avb_tas_retained_phc_end(&t, before, AVB_PHC_EFFECT_ISSUED);
-    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &other, 30, 40);
+    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &other, 30, 40, 0);
     EXPECT_EQ("a new commit starts over", t.flags == full && t.schedule.cycle_ns == 2000 && t.phc_before_commit_ns == 30, 1);
 }
 
@@ -4231,6 +4233,11 @@ typedef struct {
     avb_u32 fail_read;   /* offset whose read fails, 0 = none */
 } C6_HW;
 
+/* The context's event sequence for the production code on the fake register file (TC-MOCK-079), and the register whose read or write a
+ * link indication accompanies (0 = none) */
+static volatile LONG64 g_c6_events;
+static avb_u32 g_c6_event_offset;
+
 static avb_u32 *c6_reg(C6_HW *f, avb_u32 offset)
 {
     unsigned k;
@@ -4248,12 +4255,14 @@ static int c6_read(void *ctx, avb_u32 offset, avb_u32 *value)
     C6_HW *f = (C6_HW *)ctx;
 
     if (f->fail_read == offset) { return -1; }
+    if (g_c6_event_offset != 0 && offset == g_c6_event_offset) { avb_tas_event_link_indication(&g_c6_events, 1); }
     *value = *c6_reg(f, offset);
     return 0;
 }
 
 static int c6_write(void *ctx, avb_u32 offset, avb_u32 value)
 {
+    if (g_c6_event_offset != 0 && offset == g_c6_event_offset) { avb_tas_event_link_indication(&g_c6_events, 1); }
     *c6_reg((C6_HW *)ctx, offset) = value;
     return 0;
 }
@@ -4291,6 +4300,7 @@ static avb_u32 c6_commit(C6_HW *f, AVB_TAS_SCHEDULE *s, AVB_TAS_RETAINED *t, avb
 {
     I226_TAS_OP_OUTCOME oc;
     I226_TAS_IO io;
+    avb_u64 ev;
     unsigned k;
 
     ZeroMemory(f, sizeof(*f));
@@ -4305,9 +4315,10 @@ static avb_u32 c6_commit(C6_HW *f, AVB_TAS_SCHEDULE *s, AVB_TAS_RETAINED *t, avb
     }
     c6_phcs(f, 3, 1000000000ULL, 1000100000ULL, after);
     c6_io(f, &io);
+    ev = avb_tas_event_read(&g_c6_events);   /* as the driver: before the first register write */
     i226_tas_op_hold(&io, s, 1000, AVB_TAS_F_ACCEPT_UNVERIFIED, 0, AVB_TAS_MIN_LEAD_NS, 0, &oc);
     *record = avb_tas_state_after(oc.result, AVB_TAS_STATE_CLEAN, oc.mode_written);
-    avb_tas_retained_activate(t, oc.result, oc.write_attempted, *record, s, oc.phc_recheck_ns, oc.phc_at_commit_ns);
+    avb_tas_retained_activate(t, oc.result, oc.write_attempted, *record, s, oc.phc_recheck_ns, oc.phc_at_commit_ns, ev);
     return oc.result;
 }
 
@@ -4319,7 +4330,7 @@ static void c6_query(C6_HW *f, avb_u32 record, const AVB_TAS_RETAINED *t, avb_u6
     q->link_speed_mbps = 1000;
     c6_phcs(f, 2, before, after, 0);
     c6_io(f, &io);
-    i226_tas_query(&io, 1, 1, record, 0, 0, t, q);
+    i226_tas_query(&io, 1, 1, record, 0, 0, t, &g_c6_events, q);
 }
 
 #define EXPECT_SLOTS(label, q, cs, cr, ns, nr, want_state) \
@@ -4404,11 +4415,11 @@ static void test_75_query_record(void)
     q.link_speed_mbps = 10;
     c6_phcs(&f, 2, 2000000000ULL, 2000010000ULL, 0);
     c6_io(&f, &io);
-    i226_tas_query(&io, 1, 1, record, 0, 0, &t, &q);
+    i226_tas_query(&io, 1, 1, record, 0, 0, &t, &g_c6_events, &q);
     EXPECT_SLOTS("the windows are too small at the current speed: LINK_SPEED_CHANGED, next NONE", q, I, AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED, N, 0, RET);
     ZeroMemory(&q, sizeof(q));
     c6_phcs(&f, 2, 2000000000ULL, 2000010000ULL, 0);
-    i226_tas_query(&io, 1, 1, record, 0, 0, &t, &q);
+    i226_tas_query(&io, 1, 1, record, 0, 0, &t, &g_c6_events, &q);
     EXPECT_SLOTS("an unknown speed contradicts nothing", q, P, 0, N, 0, RET);
 
     /* PHC resets: a known write in either direction, and what the pass itself shows */
@@ -4452,13 +4463,13 @@ static void test_75_query_record(void)
     /* S1 */
     ZeroMemory(&q, sizeof(q));
     c6_phcs(&f, 2, 2000000000ULL, 2000010000ULL, 0);
-    i226_tas_query(&io, 1, 1, record, 1, 0, &t, &q);
+    i226_tas_query(&io, 1, 1, record, 1, 0, &t, &g_c6_events, &q);
     EXPECT_SLOTS("a TAS operation runs: UNKNOWN in both slots without reasons; the record is reported as record", q, U, 0, U, 0, RET);
     ZeroMemory(&q, sizeof(q));
-    i226_tas_query(&io, 1, 1, record, 1, 1, NULL, &q);
+    i226_tas_query(&io, 1, 1, record, 1, 1, NULL, &g_c6_events, &q);
     EXPECT_SLOTS("the register lock is not obtained: no coherent record", q, U, 0, U, 0, LOST);
     ZeroMemory(&q, sizeof(q));
-    i226_tas_query(&io, 0, 1, record, 0, 0, &t, &q);
+    i226_tas_query(&io, 0, 1, record, 0, 0, &t, &g_c6_events, &q);
     EXPECT_SLOTS("not running: UNKNOWN, the record is still reported (12.3)", q, U, 0, U, 0, RET);
     EXPECT_EQ("... as committed", memcmp(&q.current, &s, sizeof(s)), 0);
     f.fail_read = I226_STQT3;
@@ -4639,6 +4650,185 @@ static void test_76_link_event(void)
     g_ev76_n = 0;
 }
 
+/* TC-MOCK-078: the query's answer after a link change under a retained schedule (TC-TASACT-META-007, #350, #362; test logic only) */
+static void m78_q(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 cur, avb_u32 cur_rsn, avb_u32 next, avb_u32 next_rsn, avb_u32 snap)
+{
+    ZeroMemory(q, sizeof(*q));
+    q->current_status = cur;
+    q->current_reasons = cur_rsn;
+    q->next_status = next;
+    q->next_reasons = next_rsn;
+    q->snapshot_reasons = snap;
+    q->current_commit.state = AVB_TAS_COMMIT_RETAINED;
+}
+
+static void test_78_link_status(void)
+{
+    const avb_u32 U = AVB_TAS_ST_UNKNOWN, P = AVB_TAS_ST_PENDING, N = AVB_TAS_ST_NONE, I = AVB_TAS_ST_INCONSISTENT;
+    const avb_u32 EV = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED, LEU = AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED;
+    AVB_TAS_QUERY_HW_REQUEST q;
+    TAS_EV_COUNT c;
+
+    printf("\n[TC-MOCK-078] #350 the answer after a link change under a retained schedule (test logic only)\n");
+    m78_q(&q, P, 0, N, 0, 0);
+    EXPECT_EQ("control: PENDING, next NONE, no snapshot reason", tas_ev_control(TRUE, &q), TAS_EV_PASS);
+    EXPECT_EQ("after the event: PENDING is wrong (the predicted defect)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, N, 0, 0);
+    EXPECT_EQ("after the event: only LINK_EVENTS_UNOBSERVED is wrong (S3, the predicted defect past BaseT)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    EXPECT_EQ("... and no control either", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, EV);
+    EXPECT_EQ("S1 UNKNOWN with EVENT_UNRECONCILED, reasons 0: as required", tas_ev_unreconciled(TRUE, &q), TAS_EV_PASS);
+    EXPECT_EQ("... never a control", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, EV | AVB_TAS_SNAP_RSN_READ_INCONSISTENT);
+    EXPECT_EQ("further S1 inputs beside it: still as required", tas_ev_unreconciled(TRUE, &q), TAS_EV_PASS);
+    m78_q(&q, P, 0, N, 0, EV);
+    EXPECT_EQ("the bit with a PENDING slot is wrong (S1 first)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, I, AVB_TAS_SLOT_RSN_WINDOW_MISMATCH, U, AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED, EV);
+    EXPECT_EQ("the bit with an INCONSISTENT slot is wrong (S1 before S2)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, U, 0, EV);
+    EXPECT_EQ("the bit with slot reasons is wrong (12.10: S1 carries none)", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, 0, U, 0, AVB_TAS_SNAP_RSN_READ_INCONSISTENT);
+    EXPECT_EQ("UNKNOWN for another S1 cause is not the event's answer", tas_ev_unreconciled(TRUE, &q), TAS_EV_FAIL);
+    EXPECT_EQ("no complete reply: missing, never agreement", tas_ev_unreconciled(FALSE, &q), TAS_EV_INCONCLUSIVE);
+    EXPECT_EQ("... also for the control", tas_ev_control(FALSE, &q), TAS_EV_INCONCLUSIVE);
+    m78_q(&q, P, 0, N, 0, 0);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("a control without a retained commit fails", tas_ev_control(TRUE, &q), TAS_EV_FAIL);
+
+    ZeroMemory(&c, sizeof(c));
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_FAIL);
+    EXPECT_EQ("one wrong reply fails the phase", tas_ev_phase(&c, TRUE), TAS_EV_FAIL);
+    EXPECT_EQ("not attributed: nothing is judged, also not a wrong reply", tas_ev_phase(&c, FALSE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    EXPECT_EQ("no reply: not measured", tas_ev_phase(&c, TRUE), TAS_EV_INCONCLUSIVE);
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_INCONCLUSIVE);
+    EXPECT_EQ("a missing reply beside correct ones: not established", tas_ev_phase(&c, TRUE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    tas_ev_count(&c, TAS_EV_PASS);
+    tas_ev_count(&c, TAS_EV_PASS);
+    EXPECT_EQ("every reply as required: PASS", tas_ev_phase(&c, TRUE), TAS_EV_PASS);
+}
+
+/* TC-MOCK-079: the event sequence of an adapter context and the query's EVENT_UNRECONCILED (#365 K8 events decision 2026-11-26, link class;
+ * the production rules of src/avb_tas_retained.h and the production device query on the fake register file of TC-MOCK-075; test logic only,
+ * no NDIS indication). Not provoked on hardware: an event during the commit's writes, an event during the query's pass, tracking lost */
+static void test_79_event_sequence(void)
+{
+    const avb_u64 LOST = AVB_TAS_EVSEQ_LOST;
+    volatile LONG64 seq = 0, saved;
+    AVB_TAS_RETAINED t, none;
+    AVB_TAS_SCHEDULE s;
+    AVB_TAS_QUERY_HW_REQUEST q;
+    C6_HW f;
+    avb_u32 record;
+
+    printf("\n[TC-MOCK-079] #350 the event sequence and EVENT_UNRECONCILED, link class (test logic and device code on a fake register file)\n");
+
+    /* Counting: every link indication, also a repeated or a malformed one */
+    avb_tas_event_link_indication(&seq, 1);
+    EXPECT_EQ("a valid link indication counts", (int)avb_tas_event_read(&seq), 1);
+    avb_tas_event_link_indication(&seq, 1);
+    EXPECT_EQ("the same indication again counts again (never merged into no event)", (int)avb_tas_event_read(&seq), 2);
+    avb_tas_event_link_indication(&seq, 0);
+    EXPECT_EQ("a malformed indication counts", (int)avb_tas_event_read(&seq), 3);
+
+    /* Exhaustion: tracking lost, never an unchanged value again */
+    seq = (LONG64)(LOST - 1u);
+    avb_tas_event_advance(&seq);
+    EXPECT_TRUE("the last step reaches tracking lost", avb_tas_event_read(&seq) == LOST);
+    avb_tas_event_advance(&seq);
+    EXPECT_TRUE("... and stays there", avb_tas_event_read(&seq) == LOST);
+
+    /* The rule */
+    ZeroMemory(&none, sizeof(none));
+    ZeroMemory(&t, sizeof(t));
+    ZeroMemory(&s, sizeof(s));
+    EXPECT_FALSE("no retained commit: nothing to invalidate", avb_tas_event_unreconciled(NULL, 5));
+    EXPECT_FALSE("a record without a schedule: nothing to invalidate", avb_tas_event_unreconciled(&none, 5));
+    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &s, 10, 20, 7);
+    EXPECT_TRUE("a commit retains its pre-write sequence", (t.flags & AVB_TAS_RET_EVENT_SEQ) != 0 && t.event_seq == 7);
+    EXPECT_FALSE("the same sequence at the query: no event", avb_tas_event_unreconciled(&t, 7));
+    EXPECT_TRUE("another sequence: unreconciled", avb_tas_event_unreconciled(&t, 8));
+    EXPECT_TRUE("tracking lost at the query: unreconciled, never unchanged", avb_tas_event_unreconciled(&t, LOST));
+    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &s, 10, 20, LOST);
+    EXPECT_TRUE("tracking lost at the commit: unreconciled, also against itself", avb_tas_event_unreconciled(&t, LOST));
+    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &s, 10, 20, 7);
+    t.flags &= ~AVB_TAS_RET_EVENT_SEQ;
+    EXPECT_TRUE("a commit that retained no sequence: unreconciled, even with an equal value", avb_tas_event_unreconciled(&t, 7));
+    avb_tas_retained_activate(&t, AVB_TAS_ACT_COMMITTED, 1, AVB_TAS_STATE_ARMED, &s, 10, 20, 7);
+    {
+        avb_u32 b = avb_tas_retained_phc_begin(&t);
+        avb_tas_retained_phc_end(&t, b, AVB_PHC_EFFECT_ISSUED);
+    }
+    EXPECT_TRUE("a PHC operation keeps the retained sequence", (t.flags & AVB_TAS_RET_EVENT_SEQ) != 0 && t.event_seq == 7);
+    avb_tas_retained_setup(&t, 1, AVB_TAS_STATE_ARMED);
+    EXPECT_TRUE("SETUP_TAS on the retained schedule keeps it too", avb_tas_event_unreconciled(&t, 8) && !avb_tas_event_unreconciled(&t, 7));
+    avb_tas_retained_disarm(&t, 1, 1);
+    EXPECT_FALSE("a removed record ends the association (no claim about the hardware)", avb_tas_event_unreconciled(&t, 8));
+
+    /* The production query: commit, then events before, during and after a query */
+    g_c6_events = 0;
+    EXPECT_EQ("a commit", c6_commit(&f, &s, &t, &record, 1000200000ULL), AVB_TAS_ACT_COMMITTED);
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("no event: PENDING, no snapshot reason (the control)", q.current_status == AVB_TAS_ST_PENDING && q.snapshot_reasons == 0);
+    avb_tas_event_link_indication(&g_c6_events, 1);
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("after a link indication, before BaseT: S1, both UNKNOWN, reasons 0, EVENT_UNRECONCILED",
+                q.snapshot_reasons == AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED && q.current_status == AVB_TAS_ST_UNKNOWN && q.current_reasons == 0 &&
+                q.next_status == AVB_TAS_ST_UNKNOWN && q.next_reasons == 0);
+    EXPECT_TRUE("... the record is kept", q.current_commit.state == AVB_TAS_COMMIT_RETAINED && memcmp(&q.current, &s, sizeof(s)) == 0);
+    c6_query(&f, record, &t, C6_BASE + 1, C6_BASE + 2, &q);
+    EXPECT_TRUE("past BaseT: still EVENT_UNRECONCILED, not only LINK_EVENTS_UNOBSERVED", q.snapshot_reasons == AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED &&
+                q.current_status == AVB_TAS_ST_UNKNOWN && q.current_reasons == 0);
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("a later query does not end it", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0);
+    EXPECT_EQ("... and no query advances the sequence", (int)avb_tas_event_read(&g_c6_events), 1);
+
+    /* An event during the commit's writes stays visible */
+    g_c6_events = 0;
+    g_c6_event_offset = I226_STQT2;   /* the commit writes the windows: an indication arrives there */
+    EXPECT_EQ("a commit with an event during its writes", c6_commit(&f, &s, &t, &record, 1000200000ULL), AVB_TAS_ACT_COMMITTED);
+    g_c6_event_offset = 0;
+    EXPECT_TRUE("... the retained sequence is the one before the writes", t.event_seq == 0 && avb_tas_event_read(&g_c6_events) != 0);
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("... the first query reports it: the commit did not erase it", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0 &&
+                q.current_status == AVB_TAS_ST_UNKNOWN);
+
+    /* An event during the query's register pass is part of that reply */
+    g_c6_events = 0;
+    EXPECT_EQ("a commit", c6_commit(&f, &s, &t, &record, 1000200000ULL), AVB_TAS_ACT_COMMITTED);
+    g_c6_event_offset = I226_ENDQT1;  /* the query reads the windows: an indication arrives there */
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    g_c6_event_offset = 0;
+    EXPECT_TRUE("an event during the pass is in that reply's judgement", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0);
+
+    /* No tracking and tracking lost at the query */
+    g_c6_events = 0;
+    EXPECT_EQ("a commit", c6_commit(&f, &s, &t, &record, 1000200000ULL), AVB_TAS_ACT_COMMITTED);
+    saved = g_c6_events;
+    g_c6_events = (LONG64)LOST;
+    c6_query(&f, record, &t, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("tracking lost after the commit: unreconciled", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0);
+    g_c6_events = saved;
+    {
+        I226_TAS_IO io;
+        ZeroMemory(&q, sizeof(q));
+        q.link_speed_mbps = 1000;
+        c6_phcs(&f, 2, 2000000000ULL, 2000010000ULL, 0);
+        c6_io(&f, &io);
+        i226_tas_query(&io, 1, 1, record, 0, 0, &t, NULL, &q);
+    }
+    EXPECT_TRUE("no tracking at all: unreconciled, never no event", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) != 0);
+
+    /* Without a retained commit the event changes nothing */
+    avb_tas_event_link_indication(&g_c6_events, 1);
+    c6_query(&f, AVB_TAS_STATE_CLEAN, NULL, 2000000000ULL, 2000010000ULL, &q);
+    EXPECT_TRUE("no record: no EVENT_UNRECONCILED", (q.snapshot_reasons & AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED) == 0);
+    g_c6_events = 0;
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -4704,7 +4894,9 @@ int main(void) {
     test_73_retained();
     test_74_phc_set();
     test_75_query_record();
+    test_79_event_sequence();
     test_76_link_event();
+    test_78_link_status();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

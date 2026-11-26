@@ -1656,16 +1656,23 @@ NOTE: called at <= DISPATCH_LEVEL
     if (StatusIndication->StatusCode == NDIS_STATUS_LINK_STATE) {
         const NDIS_LINK_STATE *linkState = (const NDIS_LINK_STATE *)StatusIndication->StatusBuffer;
         LONG mbps = 0;
+        int wellFormed = 0;
 
         if (linkState != NULL && StatusIndication->StatusBufferSize >= NDIS_SIZEOF_LINK_STATE_REVISION_1 &&
             linkState->Header.Type == NDIS_OBJECT_TYPE_DEFAULT && linkState->Header.Revision >= NDIS_LINK_STATE_REVISION_1 &&
             linkState->Header.Size >= NDIS_SIZEOF_LINK_STATE_REVISION_1 && linkState->Header.Size <= StatusIndication->StatusBufferSize) {
             mbps = AvbLinkSpeedMbps(linkState->MediaConnectState, linkState->XmitLinkSpeed);
+            wellFormed = 1;
             DEBUGP(DL_INFO, "FilterStatus: NDIS_STATUS_LINK_STATE state=%d xmit=%I64u bit/s -> link_speed_mbps=%lu\n",
                    (int)linkState->MediaConnectState, linkState->XmitLinkSpeed, (ULONG)mbps);
         } else {
             DEBUGP(DL_WARN, "FilterStatus: malformed NDIS_STATUS_LINK_STATE (buffer %p, size %lu): link speed unknown\n",
                    StatusIndication->StatusBuffer, StatusIndication->StatusBufferSize);
+        }
+        /* #365 K8 events decision 2026-11-26: every link-state indication, valid, repeated or malformed, invalidates the retained
+         * activation inference; counted before the speed is published, so a query that sees the new speed also sees the event */
+        if (pFilter->AvbContext != NULL) {
+            avb_tas_event_link_indication(&((PAVB_DEVICE_CONTEXT)pFilter->AvbContext)->tas_event_seq, wellFormed);
         }
         InterlockedExchange(&pFilter->LinkSpeedMbps, mbps);
     }

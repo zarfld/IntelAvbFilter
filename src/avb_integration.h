@@ -355,6 +355,12 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * belongs to; read under tas_reg_lock. Zero in a new context (#352 R1 L11): nothing retained. */
     AVB_TAS_RETAINED tas_retained;
 
+    /* Event sequence of this context (#365 K8 events decision 2026-11-26, C; src/avb_tas_retained.h). Advanced by FilterStatus for every
+     * NDIS_STATUS_LINK_STATE, interlocked only (DISPATCH_LEVEL, no lock); read by an activation before its first register write and by
+     * the query after its register pass. 0 in a new context; AVB_TAS_EVSEQ_LOST: tracking lost. Reset, power and pause are not counted
+     * yet, so runtime coverage (decision E) cannot hold */
+    volatile LONG64 tas_event_seq;
+
     /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's register pass (#350): the query reads registers only while it
      * holds this rundown, and reads nothing when it cannot acquire it. FilterPause waits for the current holders before it
      * publishes FilterPausing, so a query register pass happens only while the filter is FilterRunning. FilterRestart

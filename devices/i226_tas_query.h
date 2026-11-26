@@ -164,7 +164,8 @@ static __inline void i226_tas_query_record(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 
  * READ_FAILED clear. Both PHC bits are derived on the common path from phc_before_ok and phc_after_ok (#365 12.2).
  */
 static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
-                                    int contended, const AVB_TAS_RETAINED *retained, AVB_TAS_QUERY_HW_REQUEST *q)
+                                    int contended, const AVB_TAS_RETAINED *retained, volatile LONG64 *event_seq,
+                                    AVB_TAS_QUERY_HW_REQUEST *q)
 {
     AVB_TAS_REGS *g = &q->regs;
     avb_u32 failed = 0, snap = 0, h2 = 0, tries, k;
@@ -250,6 +251,11 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
     /* Every path, including those that read nothing: a PHC value is valid iff its INVALID bit is clear (#365 12.2) */
     if (!phc_before_ok) { snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID; }
     if (!phc_after_ok)  { snap |= AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID; }
+    /* Events since the retained commit (#365 K8 events decision 2026-11-26, C): the sequence is sampled here, after the register pass and
+     * with the retained commit this reply uses; that sample ends the observation interval of this reply. No tracking: lost */
+    if (avb_tas_event_unreconciled(retained, event_seq != NULL ? avb_tas_event_read(event_seq) : AVB_TAS_EVSEQ_LOST)) {
+        snap |= AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED;
+    }
     g->read_failed = failed;
     q->snapshot_reasons = snap;
 
