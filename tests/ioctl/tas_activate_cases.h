@@ -12,7 +12,7 @@
 #include <string.h>
 #include <windows.h>
 
-typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV, MODE_HOLDCTL, MODE_META, MODE_COUNT } RUN_MODE;
+typedef enum { MODE_NONE = 0, MODE_HOLD, MODE_PASS, MODE_FAULT, MODE_FAULTV, MODE_HOLDCTL, MODE_META, MODE_FAILRET, MODE_COUNT } RUN_MODE;
 
 typedef struct {
     const char *arg;       /* the argument that selects the case */
@@ -28,6 +28,7 @@ static const TAS_ACT_CASE g_tas_act_cases[] = {
     { "--fault-versioned", MODE_FAULTV, "TC-TASACT-FAULT-001" },      /* #482 */
     { "--phc-hold-control", MODE_HOLDCTL, "TC-TASACT-HOLDCTL-001" },  /* #505 */
     { "--metadata-events", MODE_META, "TC-TASACT-META-001" },         /* #357: L9/L10 events, -002/-003 (F1), -004 (restart) */
+    { "--failure-retrieval", MODE_FAILRET, "TC-TASAPI-014" },         /* #379: the record of a failed operation, #352 */
 };
 #define TAS_ACT_CASE_COUNT ((unsigned)(sizeof(g_tas_act_cases) / sizeof(g_tas_act_cases[0])))
 

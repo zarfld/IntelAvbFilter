@@ -265,6 +265,42 @@
  *            independently measurable result is still taken and reported, and a check whose fault path was not reached is
  *            INCONCLUSIVE (not exercised), never PASS, unless a measured change makes it FAIL. Coverage limits (#482): N = 1 only;
  *            no late-write, partial-schedule, PHC-recheck or read-back-failure control.
+ *   --failure-retrieval  TEST-TAS-API-014 (#379, Verifies #352), case TC-TASAPI-014: the record of a real failed operation, looked up
+ *            by its client_op_id through IOCTL_AVB_TAS_QUERY_HW (#365 12.1/12.2; #352 AC1/AC2, its 2026-11-17 open-instance terminology).
+ *            Per TAS adapter, with the proved pre-state, observer trial and owned NIC-cycle cleanup of every mode. The originating open
+ *            instance A (bound by NET_LUID) sends the versioned HOLD with a distinct non-zero client_op_id, the pre-state query's
+ *            generation and epoch, AVB_TAS_F_ACCEPT_UNVERIFIED and #482 F1's debug_fault (N = 1: the first schedule write fails,
+ *            restore not failed). The obligation to record it is published: a failed TAS operation whose error completion carries no
+ *            output (#352 SHALL, #365 13.1/13.4). Debug only: a Release driver gets no request and the case is BLOCKED (no
+ *            Release-legal trigger of a write-attempted failure; whether a refusal before any write is recorded is not decided, #352
+ *            2026-11-17). Every lookup is judged by tests/ioctl/tas_lookup_eval.h (TC-MOCK-081):
+ *              OPERATION   the failure control: STATUS_IO_DEVICE_ERROR, Information 0, the next query in the same context with the
+ *                          generation + 1 (a write was attempted, #352 R1 L7), every restoration-set register as before and the record
+ *                          CLEAN: FAILED_RESTORED observed independently. PASS only then; a write-attempted failure with another
+ *                          observation is INCONCLUSIVE (the record's result is then not compared); no write-attempted failure
+ *                          established: INCONCLUSIVE, and the lookups below are BLOCKED (no recording obligation is shown for that
+ *                          outcome), except an observed disclosure on another instance (FAIL).
+ *              ORIGIN      the first query after the operation, on A, before any further mutation: FOUND is PASS; NOT_FOUND FAIL;
+ *                          lookup_result NOT_IMPLEMENTED (no #352 store, nothing searched) SKIP_NOT_IMPLEMENTED, nonpassing; a failed
+ *                          query INCONCLUSIVE; a reply not naming A's adapter INCONCLUSIVE; record bytes without FOUND, or
+ *                          NOT_REQUESTED/undefined for a non-zero id, FAIL.
+ *              CONTENT     with FOUND on A: client_op_id and net_luid as sent; context_epoch as sent; generation_after = the sent
+ *                          generation + 1 (with OPERATION's write attempt); result FAILED_RESTORED (with OPERATION PASS); ntstatus the
+ *                          raw completion. A compared difference is FAIL; a value not established INCONCLUSIVE. Otherwise BLOCKED.
+ *              STAGE       with FOUND on A: #352 AC1 requires the stage, but no stage encoding is published, so it is printed raw and
+ *                          INCONCLUSIVE (with operation, hw_effect, op_flags and the commit bracket, also unpublished). Otherwise BLOCKED.
+ *              DUPLICATE   a handle duplicated from A (DuplicateHandle, the same file object, #352 2026-11-17): judged as A; FOUND with
+ *                          a record other than A's is FAIL. Closed before the cleanup.
+ *              INSTANCE    an independent CreateFile instance bound to the same adapter before the operation: NOT_FOUND is PASS, FOUND
+ *                          FAIL (disclosure), NOT_IMPLEMENTED SKIP_NOT_IMPLEMENTED, a failed query INCONCLUSIVE.
+ *              OTHER_ADAPTER  per other enumerated adapter, an instance bound to it: as INSTANCE. A refusal STATUS_NOT_SUPPORTED by an
+ *                          adapter without INTEL_CAP_TSN_TAS is SKIP_UNSUPPORTED, not counted: no lookup happened there, so isolation is
+ *                          not exercised on it (never relabelled NOT_FOUND); by an adapter advertising it FAIL.
+ *              CLEANUP, RESTORE  as below (the owned NIC cycle, the restoration set against the pre-state query).
+ *            Expected RED against the producer stage without the #352 store: OPERATION PASS, ORIGIN, DUPLICATE and INSTANCE
+ *            SKIP_NOT_IMPLEMENTED, CONTENT and STAGE BLOCKED, OTHER_ADAPTER SKIP_UNSUPPORTED for adapters without TSN_TAS. Not covered:
+ *            Release, a failure after a mode write, inherited handles, a second process, eviction, cleanup and lifetime (#401),
+ *            successful-operation records (#460).
  *
  * Pre-state and setup (#369 "pre-state proved by the test itself through the TAS query"; #365 13.7, tests own setup): before
  * TAS_ACTIVATE the driver record is CLEAN (GET_TAS_STATE) and IOCTL_AVB_TAS_QUERY_HW returns a readable, clean reply (hw_read
@@ -379,6 +415,7 @@
 #include "../ioctl/tas_lifecycle_eval.h"   /* instance lookup and lifecycle outcome of #364 (META-004) */
 #include "../ioctl/tas_link_event_eval.h"   /* META-007: OS readings around a link change (#472, unchanged) */
 #include "../ioctl/tas_link_status_eval.h"  /* META-007: the query after a link change, checked offline by TC-MOCK-078 */
+#include "../ioctl/tas_lookup_eval.h"       /* --failure-retrieval: one #352 record lookup (#379), checked offline by TC-MOCK-081 */
 typedef int NDIS_PARAMETER_TYPE;           /* a kernel type in structures of filteruser.h that this test does not use (as in #364) */
 #include "../../src/filteruser.h"          /* IOCTL_FILTER_RESTART_ONE_INSTANCE, IOCTL_FILTER_ENUERATE_ALL_INSTANCES */
 #include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
@@ -1916,6 +1953,8 @@ static void run_meta_race(HANDLE h, HANDLE ha, UINT32 index, const AVB_ADAPTER_I
 static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 static void meta_new_context(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u64 old_epoch);
 static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
+static void run_failret(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, const QUERY_READ *qbefore,
+                        long long base, avb_u32 frame);
 #ifndef NDEBUG
 static void run_meta_link(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, avb_u32 frame);
 #endif
@@ -2408,6 +2447,15 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         } else {
             verdict("PASS", "UNCHANGED", index, id->device_id, "17 of 17 restoration-set registers as in the pre-state query, record CLEAN");
         }
+        (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
+        return;
+    }
+
+    if (g_mode == MODE_FAILRET) {
+        /* #379 TC-TASAPI-014: h is the originating open instance, h2 the independent one bound before the operation (closed there) */
+        if (wire) { wire_stop(); }
+        if (sock != INVALID_SOCKET) { closesocket(sock); }
+        run_failret(h, h2, index, id, &qbefore, base, frame);
         (void)cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
         return;
     }
@@ -5268,6 +5316,218 @@ static void run_meta_mismatch(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY
 
 /* Every case starts from its own state: nothing a previous case counted, captured or left pending is carried over. g_op_id alone
  * continues - client_op_id stays distinct within the process */
+/** The lookup fields of one reply, raw (#379) */
+static void print_lookup(const char *label, const QUERY_READ *r)
+{
+    const AVB_TAS_OP_RECORD *k = &r->q.lookup;
+
+    printf("    [EVIDENCE] lookup %s: ntstatus=0x%08lX information=%lu net_luid=0x%016llX lookup_client_op_id=0x%016llX lookup_result=%u | "
+           "record client_op_id=0x%016llX net_luid=0x%016llX epoch=%llu generation_after=%llu result=%u ntstatus=0x%08X stage=%u "
+           "operation=%u hw_effect=%u op_flags=0x%X bracket=[%llu, %llu]\n", label, (unsigned long)r->status, r->got, r->q.net_luid,
+           r->q.lookup_client_op_id, r->q.lookup_result, k->client_op_id, k->net_luid, k->context_epoch, k->generation_after, k->result,
+           k->ntstatus, k->stage, k->operation, k->hw_effect, k->op_flags, k->phc_before_commit_ns, k->phc_after_commit_ns);
+}
+
+/** One lookup line (#379). executed: a write-attempted failed operation is established, so a recording obligation exists; without it
+ *  every line is BLOCKED except an observed disclosure on another instance */
+static void lk_verdict(const char *check, UINT32 index, avb_u16 did, TAS_LK_OUT o, const QUERY_READ *r, BOOL originating, BOOL executed,
+                       const char *who)
+{
+    char reason[700];
+
+    if (!executed && !(o == TAS_LK_FAIL && !originating && r->q.lookup_result == AVB_TAS_LOOKUP_FOUND)) {
+        sprintf_s(reason, sizeof(reason), "%s: no write-attempted failed operation established (see OPERATION), so no record is owed; "
+                  "lookup_result %u printed, not judged", who, r->q.lookup_result);
+        verdict("BLOCKED", check, index, did, reason);
+        return;
+    }
+    switch (o) {
+    case TAS_LK_PASS:
+        sprintf_s(reason, sizeof(reason), "%s: %s", who, originating ? "FOUND" : "NOT_FOUND");
+        verdict("PASS", check, index, did, reason);
+        break;
+    case TAS_LK_NOT_IMPLEMENTED:
+        sprintf_s(reason, sizeof(reason), "%s: %s (#365 12.1/12.2): nothing was searched, so %s is not shown; nonpassing", who,
+                  r->status == (LONG)STATUS_NOT_IMPLEMENTED ? "the query is not implemented for this adapter (STATUS_NOT_IMPLEMENTED)"
+                                                            : "lookup_result NOT_IMPLEMENTED, no #352 store",
+                  originating ? "retrieval" : "isolation");
+        verdict("SKIP_NOT_IMPLEMENTED", check, index, did, reason);
+        break;
+    case TAS_LK_UNSUPPORTED:
+        printf("[SKIP_UNSUPPORTED] %s-%s/adapter:%u did=0x%04X: %s: STATUS_NOT_SUPPORTED, the adapter does not advertise INTEL_CAP_TSN_TAS: "
+               "no lookup happened, so isolation is not exercised on this adapter (not NOT_FOUND)\n", g_case, check, index, did, who);
+        break;
+    case TAS_LK_INCONCLUSIVE:
+        sprintf_s(reason, sizeof(reason), "%s: no answer to judge: query ntstatus=0x%08lX information=%lu, reply net_luid=0x%016llX "
+                  "(a failed query, or the reply not naming the instance's adapter)", who, (unsigned long)r->status, r->got, r->q.net_luid);
+        verdict("INCONCLUSIVE", check, index, did, reason);
+        break;
+    default:
+        sprintf_s(reason, sizeof(reason), "%s: query ntstatus=0x%08lX information=%lu lookup_result=%u, record client_op_id=0x%016llX: "
+                  "%s", who, (unsigned long)r->status, r->got, r->q.lookup_result, r->q.lookup.client_op_id,
+                  originating ? "the originating open instance must get FOUND with a complete reply (#352 AC1)"
+                              : "another open instance or adapter must get NOT_FOUND and no record bytes (#352 AC2, #365 12.2 U1)");
+        verdict("FAIL", check, index, did, reason);
+        break;
+    }
+}
+
+/* #379 TC-TASAPI-014 (--failure-retrieval): a real failed ACTIVATE on the originating open instance h and the lookup of its record.
+ * h2 is an independent instance bound to the same adapter before the operation. Every handle used here, h2 included, is closed here,
+ * so that no reference to this adapter's open instances but h remains when the caller's owned NIC-cycle cleanup closes h */
+static void run_failret(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, const QUERY_READ *qbefore,
+                        long long base, avb_u32 frame)
+{
+    AVB_TAS_OP_REQUEST op;
+    IOCTL_VERSION version = {0};
+    QUERY_READ qa, qd, qi, qo;
+    AVB_TAS_STATE s;
+    TAS_LK_CONTENT c;
+    TAS_LK_OUT o_origin, o;
+    HANDLE hd = NULL;
+    DWORD br = 0, information = 0;
+    LONG st;
+    BOOL captured, build_known, state_ok, executed, restored, found;
+    unsigned differing = 0, unread = 0, others = 0;
+    UINT32 k;
+    char reason[1200], status_text[96];
+
+    build_known = DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) &&
+                  br >= sizeof(version);   /* only a complete reply carries Flags */
+    if (!build_known || (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) == 0) {
+        verdict("BLOCKED", "OPERATION", index, id->device_id, !build_known
+                ? "GET_VERSION gave no complete reply: Debug or Release is unknown, so the failing operation is not sent"
+                : "Release driver: the failing operation is the Debug-only injected write failure (debug_fault, #365 13.3); a Release "
+                  "trigger of a write-attempted failure is not available, and whether a refusal before any write creates a record is not "
+                  "decided (#352 2026-11-17); nothing is sent and no lookup is judged");
+        CloseHandle(h2);
+        return;
+    }
+    build_op(&op, id->net_luid, &qbefore->q, base, frame);
+    op.flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
+    op.debug_fault = FAULTV_FIRST_SCHEDULE_WRITE & AVB_TAS_DEBUG_FAULT_WRITE_MASK;   /* #482 F1: the first schedule write fails */
+    printf("\n  --- #379: IOCTL_AVB_TAS_ACTIVATE_80C on the originating open instance, HOLD, the first schedule write fails (Debug driver) ---\n");
+    printf("    request: op=0x%016llX pre=HOLD base=%lld cycle=%lld window=%lld..%lld ms frame=%u flags=0x%X (ACCEPT_UNVERIFIED: authorizes "
+           "execution, not HARDWARE_VERIFIED) debug_fault=0x%X gen=%llu%s epoch=%llu%s\n", op.client_op_id, base, CYCLE_NS,
+           WINDOW_START_NS / NS_PER_MS, WINDOW_END_NS / NS_PER_MS, frame, op.flags, op.debug_fault, op.expected_generation,
+           op.expected_generation == 0 ? " (not reported)" : "", op.context_epoch, op.context_epoch == 0 ? " (not reported)" : "");
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE_80C, &op, sizeof(op), &op, sizeof(op), &information);
+    captured = st != AVB_NTSTATUS_UNAVAILABLE;
+    tas_fv_status_text(captured, st, status_text, sizeof(status_text));
+    printf("    operation: %s information=%lu\n", status_text, information);
+
+    /* ORIGIN's query comes first, before any further mutation; its metadata and registers are also the operation's observed outcome */
+    query_lookup(h, op.client_op_id, &qa);
+    print_query("lookup on the originating instance", &qa);
+    print_lookup("on the originating instance", &qa);
+    state_ok = read_state(h, &s);
+    if (state_ok) {
+        print_state("after the operation", &s);
+    }
+    restoration_set_compare(qbefore, &qa, &differing, &unread);
+    executed = captured && st != (LONG)STATUS_SUCCESS && information == 0 && query_valid(qbefore) && query_valid(&qa) &&
+               qbefore->q.generation != 0 && qbefore->q.context_epoch != 0 && qa.q.context_epoch == qbefore->q.context_epoch &&
+               qa.q.generation == qbefore->q.generation + 1;
+    restored = executed && st == (LONG)STATUS_IO_DEVICE_ERROR && differing == 0 && unread == 0 && state_ok && s.armed == AVB_TAS_STATE_CLEAN;
+    printf("    [EVIDENCE] operation: client_op_id=0x%016llX completion %s information=%lu; generation %llu -> %llu, epoch %llu -> %llu (query "
+           "%s); restoration set %u of %u compared differ, %u of 17 unread; record %s\n", op.client_op_id, status_text, information,
+           qbefore->q.generation, query_valid(&qa) ? qa.q.generation : 0ull, qbefore->q.context_epoch,
+           query_valid(&qa) ? qa.q.context_epoch : 0ull, query_valid(&qa) ? "valid" : "not valid", differing, 17u - unread, unread,
+           state_ok ? (s.armed == AVB_TAS_STATE_CLEAN ? "CLEAN" : "not CLEAN") : "unread");
+
+    /* OPERATION: the failure control */
+    if (restored) {
+        verdict("PASS", "OPERATION", index, id->device_id, "a write-attempted failed operation: STATUS_IO_DEVICE_ERROR with no output, the "
+                "generation advanced once in the same context, every restoration-set register as before, record CLEAN: FAILED_RESTORED "
+                "observed independently (#365 13.4, R8); its record is owed (#352)");
+    } else if (executed) {
+        verdict("INCONCLUSIVE", "OPERATION", index, id->device_id, "a write-attempted failed operation (generation + 1, error completion "
+                "with no output), but FAILED_RESTORED is not established independently (see the evidence line): the lookups are judged, "
+                "the record's result is not compared");
+    } else {
+        verdict("INCONCLUSIVE", "OPERATION", index, id->device_id, !captured ? "the raw NTSTATUS was not captured: no failed operation "
+                "established" : "no write-attempted failed operation established (completion, output, or the generation + 1 in the same "
+                "context missing; see the evidence line): no recording obligation is shown, the lookups are not judged");
+    }
+
+    /* ORIGIN, CONTENT, STAGE */
+    o_origin = tas_lk_reply(TRUE, qa.status, qa.got, &qa.q, id->net_luid, TRUE, TRUE);
+    lk_verdict("ORIGIN", index, id->device_id, o_origin, &qa, TRUE, executed, "originating open instance");
+    found = executed && o_origin == TAS_LK_PASS;
+    if (!found) {
+        verdict("BLOCKED", "CONTENT", index, id->device_id, "no record retrieved on the originating open instance (see ORIGIN)");
+        verdict("BLOCKED", "STAGE", index, id->device_id, "no record retrieved on the originating open instance (see ORIGIN)");
+    } else {
+        c = tas_lk_content(&qa.q.lookup, op.client_op_id, id->net_luid, op.context_epoch, op.expected_generation, captured, st, executed,
+                           restored);
+        sprintf_s(reason, sizeof(reason), "fields differing 0x%X, not established 0x%X (0x1 client_op_id, 0x2 net_luid, 0x4 context_epoch, "
+                  "0x8 generation_after = %llu + 1, 0x10 result FAILED_RESTORED 3, 0x20 ntstatus 0x%08lX); record: op 0x%016llX luid "
+                  "0x%016llX epoch %llu generation_after %llu result %u ntstatus 0x%08X", c.mismatch, c.unmeasured, op.expected_generation,
+                  (unsigned long)st, qa.q.lookup.client_op_id, qa.q.lookup.net_luid, qa.q.lookup.context_epoch, qa.q.lookup.generation_after,
+                  qa.q.lookup.result, qa.q.lookup.ntstatus);
+        o = tas_lk_content_out(c);
+        verdict(o == TAS_LK_PASS ? "PASS" : o == TAS_LK_FAIL ? "FAIL" : "INCONCLUSIVE", "CONTENT", index, id->device_id, reason);
+        sprintf_s(reason, sizeof(reason), "stage=%u printed raw: #352 AC1 requires the stage, but no stage encoding is published (#365 12.2 "
+                  "names the field only); operation=%u, hw_effect=%u, op_flags=0x%X and the bracket [%llu, %llu] are also unpublished and "
+                  "not judged", qa.q.lookup.stage, qa.q.lookup.operation, qa.q.lookup.hw_effect, qa.q.lookup.op_flags,
+                  qa.q.lookup.phc_before_commit_ns, qa.q.lookup.phc_after_commit_ns);
+        verdict("INCONCLUSIVE", "STAGE", index, id->device_id, reason);
+    }
+
+    /* DUPLICATE: the same file object through another handle value */
+    if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &hd, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        sprintf_s(reason, sizeof(reason), "DuplicateHandle failed (error %lu): the duplicated-handle lookup was not measured", GetLastError());
+        verdict("INCONCLUSIVE", "DUPLICATE", index, id->device_id, reason);
+        hd = NULL;
+    } else {
+        query_lookup(hd, op.client_op_id, &qd);
+        print_lookup("on a handle duplicated from the originating instance", &qd);
+        CloseHandle(hd);   /* before the cleanup: the duplicate references the same file object */
+        hd = NULL;
+        o = tas_lk_reply(TRUE, qd.status, qd.got, &qd.q, id->net_luid, TRUE, TRUE);
+        if (executed && o == TAS_LK_PASS && o_origin == TAS_LK_PASS && memcmp(&qd.q.lookup, &qa.q.lookup, sizeof(qa.q.lookup)) != 0) {
+            verdict("FAIL", "DUPLICATE", index, id->device_id, "FOUND, but a record other than the originating handle's: a duplicated "
+                    "handle is the same open instance (#352 2026-11-17)");
+        } else {
+            lk_verdict("DUPLICATE", index, id->device_id, o, &qd, TRUE, executed, "handle duplicated from the originating instance");
+        }
+    }
+
+    /* INSTANCE: an independent open instance on the same adapter, bound before the operation */
+    query_lookup(h2, op.client_op_id, &qi);
+    print_lookup("on an independent open instance of the same adapter", &qi);
+    CloseHandle(h2);
+    o = tas_lk_reply(TRUE, qi.status, qi.got, &qi.q, id->net_luid, TRUE, FALSE);
+    lk_verdict("INSTANCE", index, id->device_id, o, &qi, FALSE, executed, "independent open instance, same adapter");
+
+    /* OTHER_ADAPTER: an open instance bound to each other enumerated adapter */
+    for (k = 0; k < g_nall; k++) {
+        HANDLE ho;
+        char who[96];
+
+        if (g_all[k].net_luid == id->net_luid) {
+            continue;
+        }
+        others++;
+        sprintf_s(who, sizeof(who), "open instance bound to adapter:%u did=0x%04X", g_all[k].index, g_all[k].device_id);
+        ho = open_bound(GENERIC_READ | GENERIC_WRITE, g_all[k].net_luid);
+        if (ho == INVALID_HANDLE_VALUE) {
+            sprintf_s(reason, sizeof(reason), "%s: cannot open and bind an instance to it: the cross-adapter lookup was not measured", who);
+            verdict("INCONCLUSIVE", "OTHER_ADAPTER", g_all[k].index, g_all[k].device_id, reason);
+            continue;
+        }
+        query_lookup(ho, op.client_op_id, &qo);
+        CloseHandle(ho);
+        print_lookup(who, &qo);
+        o = tas_lk_reply(TRUE, qo.status, qo.got, &qo.q, g_all[k].net_luid, (g_all[k].capabilities & INTEL_CAP_TSN_TAS) != 0, FALSE);
+        lk_verdict("OTHER_ADAPTER", g_all[k].index, g_all[k].device_id, o, &qo, FALSE, executed, who);
+    }
+    if (others == 0) {
+        printf("[SKIP_UNSUPPORTED] %s-OTHER_ADAPTER/adapter:%u did=0x%04X: no other adapter enumerated: the cross-adapter lookup is not "
+               "exercised\n", g_case, index, id->device_id);
+    }
+}
+
 static void reset_case_state(const TAS_ACT_CASE *c)
 {
     g_mode = c->mode;

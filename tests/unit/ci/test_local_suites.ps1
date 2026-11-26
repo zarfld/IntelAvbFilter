@@ -396,7 +396,8 @@ tc_check 'TEST-LOCALSUITES-024-elevated-whole-suite-runs-every-registered-entry-
 
 # --- 036 (#480): the default outer deadline of the elevated child covers the budget of what it runs --------------------
 # Expected values are written out from the documented per-adapter budgets (n x 980 + n x (n-1) x 5 s and 1960 / 10 s) and the
-# HardwareIntegration suite default of 600 s, plus the wrapper's own 300 s and 60 s per item.  Nothing is executed.
+# HardwareIntegration suite default of 600 s (three bare entries: --phc-hold-control, --metadata-events and, since #379,
+# --failure-retrieval), plus the wrapper's own 300 s and 60 s per item.  Nothing is executed.
 $dlBad = @()
 try { Import-Functions $ElevPath @('Get-AvbElevatedBudget', 'Resolve-AvbElevatedDeadline', 'Get-AvbFilterAdapterBound') } catch { $dlBad += $_.Exception.Message }
 if ($dlBad.Count -eq 0) {
@@ -405,10 +406,10 @@ if ($dlBad.Count -eq 0) {
     $hold = { param([int]$n) $m = [Math]::Max(1, $n); 980 * $m + 5 * $m * ($m - 1) }
     foreach ($n in -1, 0, 1, 3, 9) {
         $b = & $bud 'test_tas_activate' '--hold' $n $(if ($n -eq 3) { '' } else { 'HardwareIntegration' }); if ($b.Seconds -ne (& $hold $n) + 360) { $dlBad += "--hold with $n adapter(s): $($b.Seconds) s, expected $((& $hold $n) + 360) s" }
-        $all = 3 * (& $hold $n) + 2 * (& $hold $n) + 2 * 600 + 6 * 60 + 300
+        $all = 3 * (& $hold $n) + 2 * (& $hold $n) + 3 * 600 + 7 * 60 + 300
         foreach ($s in $(if ($n -eq 3) { '', 'HardwareIntegration' } else { 'HardwareIntegration' })) {
             $b = & $bud 'test_tas_activate' '' $n $s
-            if ($b.Seconds -ne $all -or @($b.Entries).Count -ne 6) { $dlBad += "bare program (suite '$s') with $n adapter(s): $($b.Seconds) s for $(@($b.Entries).Count) entries, expected $all s for 6" }
+            if ($b.Seconds -ne $all -or @($b.Entries).Count -ne 7) { $dlBad += "bare program (suite '$s') with $n adapter(s): $($b.Seconds) s for $(@($b.Entries).Count) entries, expected $all s for 7" }
         }
     }
     $b = & $bud 'test_tas_activate.exe' '--phc-hold-control' 3; if ($b.Seconds -ne 960) { $dlBad += "--phc-hold-control: $($b.Seconds) s, expected 960 s" }
