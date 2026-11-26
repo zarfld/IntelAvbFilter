@@ -1,7 +1,8 @@
-/* tas_link_status_eval.h - the query's answer after a link change under a retained schedule (TC-TASACT-META-007, #350, #362). Pure: no I/O.
+/* tas_link_status_eval.h - the query's answer after a link change (TC-TASACT-META-007) or a Pause (TC-TASACT-META-004) under a retained
+ * schedule (#350, #362, #365 K8 events). Pure: no I/O.
  *
- * Used by tests/hardware/test_tas_activate.c (--metadata-events, META-007) and checked offline by tests/unit/test_tas_restore_contract.c
- * (TC-MOCK-078). The offline check is test logic only, never a link event.
+ * Used by tests/hardware/test_tas_activate.c (--metadata-events, META-007 and META-004) and checked offline by
+ * tests/unit/test_tas_restore_contract.c (TC-MOCK-078, TC-MOCK-080). The offline check is test logic only, never a link event or a Pause.
  *
  * Published rules (#362 ADR-TSN-002 lifecycle table; #365 12.4, 12.10):
  *   - after a link change in the same context the record is kept and the driver reports unknown until re-established; a query never
@@ -69,6 +70,59 @@ static __inline TAS_EV_OUT tas_ev_phase(const TAS_EV_COUNT *c, BOOL attributed)
         return TAS_EV_FAIL;
     }
     return c->pass == 0 || c->missing != 0 ? TAS_EV_INCONCLUSIVE : TAS_EV_PASS;
+}
+
+/* ---- TC-TASACT-META-004: the Pause class (#365 decision 2026-11-26 B, lifecycle row: FilterPause counts, whatever its reason; the
+ * return of FilterRestart ends nothing; C: the association ends only with a removed record or a new context) ---- */
+
+/** The positive control before a Pause, taken before or past BaseT: this commit RETAINED, no snapshot reason, next NONE, and the slot
+ *  PENDING without reasons or, past BaseT, UNKNOWN with LINK_EVENTS_UNOBSERVED alone (#365 delivery boundary: no coverage) */
+static __inline TAS_EV_OUT tas_ev_control_retained(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    if (!valid) {
+        return TAS_EV_INCONCLUSIVE;
+    }
+    if (q->snapshot_reasons != 0 || q->current_commit.state != AVB_TAS_COMMIT_RETAINED || q->next_status != AVB_TAS_ST_NONE ||
+        q->next_reasons != 0) {
+        return TAS_EV_FAIL;
+    }
+    return (q->current_status == AVB_TAS_ST_PENDING && q->current_reasons == 0) ||
+           (q->current_status == AVB_TAS_ST_UNKNOWN && q->current_reasons == AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED) ? TAS_EV_PASS : TAS_EV_FAIL;
+}
+
+/** The replies after one Pause of this context (counted by tas_ev_unreconciled). paused: after a positive control, FilterPause entered once,
+ *  its Restart completed, one context. status_quiet: FilterStatus was not entered on this context from before the control to after the
+ *  last reply, so the link class, the only other counted notification, cannot have produced the answer. A reply without the answer fails
+ *  whatever else was counted: then neither notification was counted. The answer is attributed to the Pause only with status_quiet;
+ *  otherwise it is INCONCLUSIVE, never a Pause GREEN */
+static __inline TAS_EV_OUT tas_ev_pause_phase(const TAS_EV_COUNT *c, BOOL paused, BOOL status_quiet)
+{
+    if (!paused) {
+        return TAS_EV_INCONCLUSIVE;
+    }
+    if (c->fail != 0) {
+        return TAS_EV_FAIL;
+    }
+    return c->pass == 0 || c->missing != 0 || !status_quiet ? TAS_EV_INCONCLUSIVE : TAS_EV_PASS;
+}
+
+/** The record after the same event, judged apart from the status (#352 R1 L10, #365 12.2): the bring-up reset the PHC (reset: the restart
+ *  completed and the reset measured by the caller), so the commit no longer claims RETAINED. It keeps the committed schedule and the
+ *  commit's own bracket in the commit's context; PHC_DISCONTINUOUS, or HW_MISMATCH (no published priority between the two). before: the
+ *  control, which must show this commit RETAINED in its context */
+static __inline TAS_EV_OUT tas_ev_record_reset(BOOL before_valid, const AVB_TAS_QUERY_HW_REQUEST *before, BOOL valid,
+                                               const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_OP_REQUEST *op, BOOL reset)
+{
+    const AVB_TAS_COMMIT_INFO *b = &before->current_commit, *i = &q->current_commit;
+
+    if (!reset || !before_valid || !valid || op->context_epoch == 0 || before->context_epoch != op->context_epoch ||
+        b->state != AVB_TAS_COMMIT_RETAINED || b->phc_after_commit_ns == 0) {
+        return TAS_EV_INCONCLUSIVE;
+    }
+    return q->context_epoch == op->context_epoch &&
+           (i->state == AVB_TAS_COMMIT_PHC_DISCONTINUOUS || i->state == AVB_TAS_COMMIT_HW_MISMATCH) &&
+           memcmp(&q->current, &op->schedule, sizeof(op->schedule)) == 0 && i->phc_before_commit_ns == b->phc_before_commit_ns &&
+           i->phc_after_commit_ns == b->phc_after_commit_ns && q->next_commit.state == AVB_TAS_COMMIT_NONE ? TAS_EV_PASS : TAS_EV_FAIL;
 }
 
 #endif /* TAS_LINK_STATUS_EVAL_H */

@@ -98,7 +98,7 @@
  *                             the L10 lines need; without it they are BLOCKED (prerequisite), never judged.
  *              RESEED_SET     SET_TIMESTAMP (current PHC + 1 s, a PHC reseed) with the schedule retained: +1 (L10).
  *              STATUS_SET     the schedule status after that reseed, the first event since the commit (#350; tas_status_reseed, TC-MOCK-072,
- *                             as STATUS_OFFSET and STATUS_RESTART below). Required: INCONSISTENT with PHC_RESET_SINCE_COMMIT (#365 12.4
+ *                             as STATUS_OFFSET below). Required: INCONSISTENT with PHC_RESET_SINCE_COMMIT (#365 12.4
  *                             S2), commit PHC_DISCONTINUOUS with the committed schedule and its bracket (12.2), next NONE when every
  *                             compared field equals the committed schedule (R1); otherwise exactly the mismatch reasons besides and
  *                             next UNKNOWN/SLOT_UNATTRIBUTED (R2, tas_status_match); a comparison that cannot be established is
@@ -147,16 +147,26 @@
  *                          prerequisite: BLOCKED, nothing is triggered.
  *              INIT_READY  control: INIT_DEVICE on the second bound instance of the READY adapter, STATUS_SUCCESS, the PHC measured running
  *                          before and after without a reset: +0. A PHC that was not read or did not run is no control: INCONCLUSIVE.
+ *              CONTROL_BEFORE  the query before the restart: this commit RETAINED in its context with the generation after the commit,
+ *                          no snapshot reason, next NONE, the slot PENDING or past BaseT UNKNOWN with LINK_EVENTS_UNOBSERVED alone
+ *                          (tas_ev_control_retained). Otherwise INCONCLUSIVE, and STATUS_RESTART judges nothing.
  *              RESTART     Pause +1, Restart +1, Pause/Restart generation +1, no attach and no detach, the same non-zero epoch
  *                          (tas_lifecycle_outcome, TC-MOCK-015), and its end: hw_read READ again after the Restart entry (the query gate
  *                          reopens only after a successful bring-up). The counters move on entry and show no end; the trigger's own result
  *                          is no evidence. Otherwise INCONCLUSIVE (tas_restart_stage, TC-MOCK-070).
  *              RESEED      the PHC ran before and after and went below its last value (tas_phc_reset): measured, not concluded from the
  *                          bring-up. Otherwise INCONCLUSIVE. Who reset it is not separated (#348).
- *              GENERATION  only with RESTART (its end included) and RESEED: exactly +1 (one event). Without a shown end a later write may
- *                          still follow, so the value is printed and not judged; a failed bring-up is therefore not covered here.
- *              STATUS_RESTART  the status after that event (STATUS_SET's rules), with RESTART and RESEED as its measured event. INCONCLUSIVE
- *                          without them.
+ *              GENERATION  only with RESTART (its end included) and RESEED: exactly +1 (one event, the reset; the Pause has no step of
+ *                          its own). Without a shown end a later write may still follow, so the value is printed and not judged; a failed
+ *                          bring-up is therefore not covered here.
+ *              STATUS_RESTART  the Pause class (#365 decision 2026-11-26 B: FilterPause counts, whatever its reason; the return of
+ *                          FilterRestart ends nothing): with CONTROL_BEFORE and RESTART (its end included), the reply after the Restart and
+ *                          two further replies each S1 UNKNOWN/UNKNOWN, reasons 0, with EVENT_UNRECONCILED (12.4, 12.10). A reply without it
+ *                          is FAIL. The answer is the Pause's only when FilterStatus was not entered on this context from before the
+ *                          control to after the last reply (a link indication gives the same answer, META-007); otherwise INCONCLUSIVE
+ *                          (tas_ev_pause_phase). The PHC reset is not required for it and is judged apart (RESEED, GENERATION, RECORD_RESTART).
+ *              RECORD_RESTART  with RESTART and RESEED: the commit no longer RETAINED (PHC_DISCONTINUOUS, or HW_MISMATCH), the committed
+ *                          schedule and its bracket kept, one epoch, next commit NONE (tas_ev_record_reset). Otherwise INCONCLUSIVE.
  *              ONCE        only with a shown end: two further queries, +0.
  *              STALE_VIEW  only with RESTART and RESEED: an ACTIVATE with the pair from before the event must be refused STATE_CONFLICT.
  *                          Both refusals complete STATUS_INVALID_DEVICE_STATE, so the #505 record of this arm and this op id decides
@@ -3788,6 +3798,10 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     LONG st;
     long long phc = 0, base;
     BOOL record, retained, quiet = FALSE, entered, completed, event, readable = FALSE;
+    AVB_DRIVER_STATISTICS sp, sz;
+    BOOL read_sp = FALSE, read_sz = FALSE, paused, status_quiet;
+    TAS_EV_OUT ctl, pause_out, rec;
+    TAS_EV_COUNT cnt;
     TAS_RESTART_STAGE stage;
     unsigned polls;
     char why[700];
@@ -3817,7 +3831,8 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
               qa.q.context_epoch, q0.q.generation, qa.q.generation);
     verdict(retained ? "PASS" : "FAIL", "COMMIT", index, id->device_id, why);
     if (!retained) {
-        static const char *const lines[] = { "INIT_READY", "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "ONCE", "STALE_VIEW" };
+        static const char *const lines[] = { "INIT_READY", "CONTROL_BEFORE", "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "RECORD_RESTART",
+                                             "ONCE", "STALE_VIEW" };
         unsigned k;
 
         for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
@@ -3861,11 +3876,19 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
     ZeroMemory(&job, sizeof(job));
     job.luid = id->net_luid;
     trigger = owned_op_new(&g_ops, id->net_luid);
+    read_sp = read_stats(h, &sp);   /* before the control: a status indication from here on is counted (STATUS_RESTART) */
     query(h, &qt);
     print_query("before the restart", &qt);
+    ctl = meta_same_context(&qa, &qt) && qt.q.generation == qa.q.generation ? tas_ev_control_retained(TRUE, &qt.q) : TAS_EV_INCONCLUSIVE;
+    sprintf_s(why, sizeof(why), "this commit before the Pause: current %u/0x%X next %u/0x%X commit %u snapshot 0x%X, epoch %llu generation %llu "
+              "(after the commit %llu, %llu): %s", qt.q.current_status, qt.q.current_reasons, qt.q.next_status, qt.q.next_reasons,
+              qt.q.current_commit.state, qt.q.snapshot_reasons, qt.q.context_epoch, qt.q.generation, qa.q.context_epoch, qa.q.generation,
+              ctl == TAS_EV_PASS ? "RETAINED without a snapshot reason: the positive control" :
+              "no positive control in this commit's context: STATUS_RESTART judges nothing");
+    verdict(ctl == TAS_EV_PASS ? "PASS" : "INCONCLUSIVE", "CONTROL_BEFORE", index, id->device_id, why);
     meta_phc_reads(h, "before the restart", &p0);
     if (trigger == NULL || meta_find_instance(h, id->net_luid, &job) != TAS_INSTANCE_FOUND || !read_stats(h, &before)) {
-        static const char *const lines[] = { "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "ONCE", "STALE_VIEW" };
+        static const char *const lines[] = { "RESTART", "RESEED", "GENERATION", "STATUS_RESTART", "RECORD_RESTART", "ONCE", "STALE_VIEW" };
         unsigned k;
 
         for (k = 0; k < sizeof(lines) / sizeof(lines[0]); k++) {
@@ -3947,16 +3970,49 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
                   qt.q.generation, qe.q.generation);
         verdict("INCONCLUSIVE", "GENERATION", index, id->device_id, why);
     }
-    meta_reseed_status("STATUS_RESTART", index, id->device_id, &qt, &qe, &op, event, "FilterRestart (RESTART and RESEED)");
+    /* STATUS_RESTART: the Pause class (#365 B). The reply after the completed Restart and two further ones: its return ends nothing */
+    query(h, &qx);
+    query(h, &qy);
+    read_sz = read_stats(h, &sz);   /* after the last judged reply */
+    printf("    [EVIDENCE] two further queries: generation %llu, %llu\n", qx.q.generation, qy.q.generation);
+    ZeroMemory(&cnt, sizeof(cnt));
+    tas_ev_count(&cnt, tas_ev_unreconciled(query_valid(&qe), &qe.q));
+    tas_ev_count(&cnt, tas_ev_unreconciled(query_valid(&qx), &qx.q));
+    tas_ev_count(&cnt, tas_ev_unreconciled(query_valid(&qy), &qy.q));
+    paused = ctl == TAS_EV_PASS && completed && meta_same_context(&qe, &qy) && qe.q.context_epoch == qt.q.context_epoch;
+    status_quiet = read_sp && read_sz && sp.FilterStatusCount == sz.FilterStatusCount;
+    pause_out = tas_ev_pause_phase(&cnt, paused, status_quiet);
+    printf("    [EVIDENCE] STATUS_RESTART: replies %s, %s, %s; from before the control to after the last reply: statistics %s, FilterStatus %+lld, "
+           "NetPnP %+lld, pause %+lld, restart %+lld (evidence of this context's counters only)\n", tas_ev_class(&qe.q), tas_ev_class(&qx.q),
+           tas_ev_class(&qy.q), read_sp && read_sz ? "read" : "NOT read",
+           read_sp && read_sz ? (long long)(sz.FilterStatusCount - sp.FilterStatusCount) : 0LL,
+           read_sp && read_sz ? (long long)(sz.FilterNetPnPCount - sp.FilterNetPnPCount) : 0LL,
+           read_sp && read_sz ? (long long)(sz.FilterPauseCount - sp.FilterPauseCount) : 0LL,
+           read_sp && read_sz ? (long long)(sz.FilterRestartCount - sp.FilterRestartCount) : 0LL);
+    sprintf_s(why, sizeof(why), "required after the Pause: S1 UNKNOWN/UNKNOWN, reasons 0, EVENT_UNRECONCILED in each of 3 replies: %u as required, "
+              "%u not, %u missing; first current %u/0x%X next %u/0x%X commit %u snapshot 0x%X, last current %u/0x%X snapshot 0x%X: %s",
+              cnt.pass, cnt.fail, cnt.missing, qe.q.current_status, qe.q.current_reasons, qe.q.next_status, qe.q.next_reasons,
+              qe.q.current_commit.state, qe.q.snapshot_reasons, qy.q.current_status, qy.q.current_reasons, qy.q.snapshot_reasons,
+              !paused ? "no Pause after a positive control with its Restart completed in this context (see CONTROL_BEFORE, RESTART): not judged" :
+              (pause_out == TAS_EV_FAIL ? "a reply without the answer: the Pause did not invalidate the retained commit" :
+              (!status_quiet ? "FilterStatus entered on this context or not read: a link indication gives the same answer, the Pause is not separated" :
+              (pause_out == TAS_EV_PASS ? "no status indication on this context: the answer is the Pause's" : "not every reply measured"))));
+    verdict(pause_out == TAS_EV_PASS ? "PASS" : (pause_out == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "STATUS_RESTART", index, id->device_id, why);
+    rec = tas_ev_record_reset(query_valid(&qt), &qt.q, query_valid(&qe), &qe.q, &op, event);
+    sprintf_s(why, sizeof(why), "commit %u -> %u, bracket [%llu, %llu] -> [%llu, %llu], committed schedule %s, epoch %llu -> %llu (commit %llu), "
+              "next commit %u: %s", qt.q.current_commit.state, qe.q.current_commit.state, qt.q.current_commit.phc_before_commit_ns,
+              qt.q.current_commit.phc_after_commit_ns, qe.q.current_commit.phc_before_commit_ns, qe.q.current_commit.phc_after_commit_ns,
+              memcmp(&qe.q.current, &op.schedule, sizeof(op.schedule)) == 0 ? "kept" : "NOT kept", qt.q.context_epoch, qe.q.context_epoch,
+              op.context_epoch, qe.q.next_commit.state,
+              rec == TAS_EV_PASS ? "the reset commit keeps its schedule and bracket and no longer claims RETAINED" :
+              (rec == TAS_EV_FAIL ? "the record after the reset is wrong" : "the reset or the control is not established (see RESTART, RESEED, CONTROL_BEFORE)"));
+    verdict(rec == TAS_EV_PASS ? "PASS" : (rec == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "RECORD_RESTART", index, id->device_id, why);
     record = read_state(h, &s);
     printf("    [EVIDENCE] record after the restart: %s%d; registers (TQAVCTRL 0x%08X BASET 0x%08X/0x%08X) against before (0x%08X 0x%08X/0x%08X), reported only (#364)\n",
            record ? "" : "unread ", record ? (int)s.armed : -1, qe.q.regs.tqavctrl, qe.q.regs.baset_h, qe.q.regs.baset_l, qt.q.regs.tqavctrl, qt.q.regs.baset_h,
            qt.q.regs.baset_l);
 
-    /* ONCE: the query is a read-only observer of the same event */
-    query(h, &qx);
-    query(h, &qy);
-    printf("    [EVIDENCE] two further queries: generation %llu, %llu\n", qx.q.generation, qy.q.generation);
+    /* ONCE: the query is a read-only observer of the same event (the two further queries above) */
     if (trigger->effect_open) {
         verdict("INCONCLUSIVE", "ONCE", index, id->device_id, "the end of the restart is not shown (see RESTART): a change could still come from it");
     } else {

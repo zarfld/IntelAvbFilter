@@ -48,7 +48,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_lifecycle_eval.h"   /* #364: instance lookup and lifecycle outcome (verbatim part) */
 #include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 #include "../ioctl/tas_link_event_eval.h"   /* TC-MOCK-076: TC-TASAPI-021 EVENT samples (#472), test logic only */
-#include "../ioctl/tas_link_status_eval.h"  /* TC-MOCK-078: TC-TASACT-META-007 status after a link change (#350), test logic only */
+#include "../ioctl/tas_link_status_eval.h"  /* TC-MOCK-078, -080: META-007 status after a link change, META-004 after a Pause (#350), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -4829,6 +4829,106 @@ static void test_79_event_sequence(void)
     g_c6_events = 0;
 }
 
+/* TC-MOCK-080: the answer after a Pause under a retained schedule and the record after the bring-up's PHC reset (TC-TASACT-META-004,
+ * #350, #365 K8 events decision 2026-11-26 B lifecycle row; test logic only, never a Pause) */
+static void test_80_pause_status(void)
+{
+    const avb_u32 U = AVB_TAS_ST_UNKNOWN, P = AVB_TAS_ST_PENDING, N = AVB_TAS_ST_NONE, I = AVB_TAS_ST_INCONSISTENT;
+    const avb_u32 EV = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED, LEU = AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED;
+    AVB_TAS_QUERY_HW_REQUEST q, b;
+    AVB_TAS_OP_REQUEST op;
+    TAS_EV_COUNT c;
+
+    printf("\n[TC-MOCK-080] #350 the answer after a Pause and the record after the reset (test logic only)\n");
+
+    /* The control before the Pause */
+    m78_q(&q, U, LEU, N, 0, 0);
+    EXPECT_EQ("control past BaseT: UNKNOWN with LINK_EVENTS_UNOBSERVED alone, RETAINED", tas_ev_control_retained(TRUE, &q), TAS_EV_PASS);
+    m78_q(&q, P, 0, N, 0, 0);
+    EXPECT_EQ("control before BaseT: PENDING", tas_ev_control_retained(TRUE, &q), TAS_EV_PASS);
+    m78_q(&q, U, LEU | AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT, N, 0, 0);
+    EXPECT_EQ("a further slot reason: no control", tas_ev_control_retained(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, N, 0, EV);   /* only the snapshot differs from the control */
+    EXPECT_EQ("already unreconciled before the event: no control", tas_ev_control_retained(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, N, 0, 0);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("a commit that no longer claims RETAINED: no control", tas_ev_control_retained(TRUE, &q), TAS_EV_FAIL);
+    m78_q(&q, U, LEU, U, AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED, 0);
+    EXPECT_EQ("next not NONE: no control", tas_ev_control_retained(TRUE, &q), TAS_EV_FAIL);
+    EXPECT_EQ("no complete reply: missing", tas_ev_control_retained(FALSE, &q), TAS_EV_INCONCLUSIVE);
+
+    /* The replies after the Pause */
+    ZeroMemory(&c, sizeof(c));
+    m78_q(&q, I, AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT, N, 0, 0);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    EXPECT_EQ("S2 PHC_RESET_SINCE_COMMIT alone after a Pause is wrong (the predicted defect)", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_FAIL);
+    EXPECT_EQ("... also when a status indication was counted: then neither notification was counted", tas_ev_pause_phase(&c, TRUE, FALSE),
+              TAS_EV_FAIL);
+    EXPECT_EQ("... and nothing without an established Pause", tas_ev_pause_phase(&c, FALSE, TRUE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    m78_q(&q, U, 0, U, 0, EV);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    EXPECT_EQ("S1 with EVENT_UNRECONCILED in every reply, no status indication: the Pause's answer", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_PASS);
+    EXPECT_EQ("... with a status indication on this context: a link indication gives the same answer, not separated",
+              tas_ev_pause_phase(&c, TRUE, FALSE), TAS_EV_INCONCLUSIVE);
+    m78_q(&q, I, AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT, N, 0, 0);
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    EXPECT_EQ("a later reply without it fails: the return of FilterRestart or a query ends nothing", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_FAIL);
+    ZeroMemory(&c, sizeof(c));
+    m78_q(&q, U, 0, U, 0, EV);
+    tas_ev_count(&c, tas_ev_unreconciled(TRUE, &q));
+    tas_ev_count(&c, tas_ev_unreconciled(FALSE, &q));
+    EXPECT_EQ("a missing reply beside a correct one: not established", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_INCONCLUSIVE);
+    ZeroMemory(&c, sizeof(c));
+    EXPECT_EQ("no reply: not measured", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_INCONCLUSIVE);
+
+    /* The record after the reset, apart from the status */
+    ZeroMemory(&op, sizeof(op));
+    op.context_epoch = 77;
+    op.schedule.base_time_ns = 19000000000ULL;
+    op.schedule.cycle_ns = 1000000000u;
+    m78_q(&b, U, LEU, N, 0, 0);
+    b.context_epoch = 77;
+    b.current = op.schedule;
+    b.current_commit.phc_before_commit_ns = 100;
+    b.current_commit.phc_after_commit_ns = 200;
+    b.next_commit.state = AVB_TAS_COMMIT_NONE;   /* as the driver reports it (1, not 0) */
+    q = b;
+    q.current_status = U;
+    q.current_reasons = 0;
+    q.next_status = U;
+    q.snapshot_reasons = EV;
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("S1 reply: PHC_DISCONTINUOUS with the schedule and the bracket kept", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+    q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
+    EXPECT_EQ("... HW_MISMATCH as well (no published priority)", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+    q.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("still RETAINED after a reset is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    q.current_commit.phc_after_commit_ns = 300;
+    EXPECT_EQ("a moved bracket is wrong (a fact of the commit)", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    q.current_commit.phc_after_commit_ns = 200;
+    q.current.cycle_ns = 500000000u;
+    EXPECT_EQ("another schedule is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    q.current = op.schedule;
+    q.context_epoch = 78;
+    EXPECT_EQ("another context is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    q.context_epoch = 77;
+    q.next_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("a next commit is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    q.next_commit.state = AVB_TAS_COMMIT_NONE;
+    EXPECT_EQ("the reset not established: not judged", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, FALSE), TAS_EV_INCONCLUSIVE);
+    EXPECT_EQ("the reply missing: not judged", tas_ev_record_reset(TRUE, &b, FALSE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
+    b.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("no RETAINED control: not judged", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -4897,6 +4997,7 @@ int main(void) {
     test_79_event_sequence();
     test_76_link_event();
     test_78_link_status();
+    test_80_pause_status();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
