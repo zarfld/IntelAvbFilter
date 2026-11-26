@@ -751,6 +751,10 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     DEBUGP(DL_TRACE, "===>IntelAvbFilter FilterPause: FilterInstance %p\n", FilterModuleContext);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        /* #365 K8 events decision 2026-11-26 (B, lifecycle row): every FilterPause, whatever its reason, invalidates the retained
+         * activation inference; the return of FilterRestart ends nothing. Interlocked only, no lock; no generation step (#352 R1 L10:
+         * a PHC reset of the later bring-up is counted by its own owner) */
+        avb_tas_event_advance(&avbCtx->tas_event_seq);
         InterlockedIncrement64(&avbCtx->stats_filter_pause_count);
         InterlockedIncrement64(&avbCtx->stats_pause_restart_generation);
     }
