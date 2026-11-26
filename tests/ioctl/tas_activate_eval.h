@@ -809,15 +809,18 @@ static __inline TAS_NEW_CONTEXT tas_new_context(unsigned long long old_epoch, BO
 typedef struct {
     avb_u64 base;           /* the BaseT the test requested */
     BOOL identified;        /* the judged reply and the committed request both carry a generation and an epoch */
-    BOOL measured;          /* the facts below were measured: both queries observable, and the one after the commit is of that commit */
+    BOOL measured;          /* the facts below were measured: both queries observable, the one after the commit is of that commit, and the
+                               judged one could be compared with the committed schedule */
     avb_u32 contradiction;  /* TAS_STATUS_C_*: a measured fact that contradicts the progression */
+    BOOL compared;          /* the judged reply's compared registers could be compared with the committed schedule (tas_status_match) */
+    avb_u32 mismatch;       /* ... and these are the mismatch reasons they have; 0 = R1. 0 as well when not compared */
     BOOL no_event_counted;  /* observed: the driver counted no status, PnP, pause, restart, attach or detach event of this adapter since
                                before the commit, OS link unchanged and connected, the driver's link speed unchanged and non-zero */
     BOOL k8_verified;       /* #472 EVENT is verified evidence (a published fact, never inferred by the test) */
 } TAS_STATUS_CONTROL;
 
-#define TAS_STATUS_C_MODE_OFF   0x01u   /* hw_mode is not TSN */
-#define TAS_STATUS_C_REGS       0x02u   /* a compared schedule register (STQT, ENDQT, QBVCYCLET) differs from right after the commit */
+#define TAS_STATUS_C_MODE_OFF   0x01u   /* TRANSMIT_MODE is off */
+#define TAS_STATUS_C_REGS       0x02u   /* a compared schedule field (START_TIME, END_TIME, QBV_CYCLE_TIME) differs from the committed schedule */
 #define TAS_STATUS_C_PHC_BACK   0x04u   /* the PHC is below its value right after the commit */
 #define TAS_STATUS_C_CONTEXT    0x08u   /* another context epoch than the committed request's */
 #define TAS_STATUS_C_GENERATION 0x10u   /* another generation than its commit published: an invalidating event or a further mutation (L7, L10) */
@@ -896,16 +899,56 @@ static __inline BOOL tas_status_observable(BOOL valid, const AVB_TAS_QUERY_HW_RE
            (q->snapshot_reasons & invalid) == 0 && q->phc_before_ns <= q->phc_after_ns;
 }
 
+/* The compared fields of a reply against a schedule (#365 12.4: TRANSMIT_MODE, START_TIME, END_TIME, QBV_CYCLE_TIME, decoded with the generated
+ * SSOT helpers that 12.3 names for the v1 register set). Readings of two queries that equal each other say nothing about the schedule.
+ * established: the comparison could be made; a schedule value that does not fit its field, or a hw_mode that disagrees with the raw register,
+ * leaves it open. mismatch: the slot reasons that a contradiction of this reply has (R2); 0 = R1. Expects an observable reply */
+#define TAS_STATUS_MISMATCH_BITS (AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH)
+
+typedef struct {
+    BOOL established;
+    avb_u32 mismatch;
+} TAS_STATUS_MATCH;
+
+static __inline void tas_status_match(const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_SCHEDULE *s, TAS_STATUS_MATCH *m)
+{
+    const BOOL tsn = I226_TQAVCTRL_GET(q->regs.tqavctrl, I226_TQAVCTRL_TRANSMIT_MODE_MASK, I226_TQAVCTRL_TRANSMIT_MODE_SHIFT) != 0;
+    unsigned k;
+
+    ZeroMemory(m, sizeof(*m));
+    m->established = s->cycle_ns != 0 && s->cycle_ns <= (I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) &&
+                     q->hw_mode == (avb_u32)(tsn ? AVB_TAS_HWMODE_TSN : AVB_TAS_HWMODE_OFF);
+    if (!tsn) {
+        m->mismatch |= AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
+    }
+    for (k = 0; k < AVB_TAS_QUEUES; k++) {
+        const AVB_TAS_QUEUE_WINDOW *w = &s->queue[k];
+
+        if (w->start_ns > (I226_STQT_START_TIME_MASK >> I226_STQT_START_TIME_SHIFT) ||
+            w->end_ns > (I226_ENDQT_END_TIME_MASK >> I226_ENDQT_END_TIME_SHIFT)) {
+            m->established = FALSE;
+        }
+        if (I226_STQT_GET(q->regs.stqt[k], I226_STQT_START_TIME_MASK, I226_STQT_START_TIME_SHIFT) != w->start_ns ||
+            I226_ENDQT_GET(q->regs.endqt[k], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT) != w->end_ns) {
+            m->mismatch |= AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
+        }
+    }
+    if (I226_QBVCYCLET_GET(q->regs.qbvcyclet, I226_QBVCYCLET_QBV_CYCLE_TIME_MASK, I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) != s->cycle_ns) {
+        m->mismatch |= AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
+    }
+}
+
 /* The control between the query right after the commit and the judged one. Unobservable or unreported is "not measured", never "no
- * contradiction". The shadow cycle, BASET and TXQCTL are no compared fields of the activation's record (12.4).
+ * contradiction". The compared registers of the judged reply are compared with the committed schedule (tas_status_match); the query after
+ * the commit is the PHC reference only, its registers prove no agreement. The shadow cycle, BASET and TXQCTL are no compared fields of the
+ * activation's record (12.4).
  * Whose reply it is comes from the committed request itself (op): the driver compared its pair under the claim and advanced once, so its
  * commit is (context_epoch, expected_generation + 1) (#352 R1 L7, L8). Any other pair is another context, an invalidating event or
  * another mutation: what that reply says, matching or not, is not about this commit */
 static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_HW_REQUEST *commit, BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q,
                                         const AVB_TAS_OP_REQUEST *op, BOOL no_event_counted, BOOL k8_verified, TAS_STATUS_CONTROL *c)
 {
-    BOOL same = TRUE;
-    unsigned i;
+    TAS_STATUS_MATCH m;
 
     ZeroMemory(c, sizeof(*c));
     c->base = op->schedule.base_time_ns;
@@ -914,17 +957,18 @@ static __inline void tas_status_control(BOOL commit_valid, const AVB_TAS_QUERY_H
     c->identified = valid && q->generation != 0 && q->context_epoch != 0 && op->expected_generation != 0 && op->context_epoch != 0;
     if (c->identified && q->context_epoch != op->context_epoch)            { c->contradiction |= TAS_STATUS_C_CONTEXT; }
     if (c->identified && q->generation != op->expected_generation + 1)     { c->contradiction |= TAS_STATUS_C_GENERATION; }
+    if (tas_status_observable(valid, q)) {
+        tas_status_match(q, &op->schedule, &m);
+        c->compared = m.established;
+        c->mismatch = m.established ? m.mismatch : 0u;
+        if ((c->mismatch & AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF) != 0)  { c->contradiction |= TAS_STATUS_C_MODE_OFF; }
+        if ((c->mismatch & ~AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF) != 0) { c->contradiction |= TAS_STATUS_C_REGS; }
+    }
     if (!c->identified || !tas_status_observable(commit_valid, commit) || !tas_status_observable(valid, q) ||
         commit->context_epoch != op->context_epoch || commit->generation != op->expected_generation + 1) {
         return;
     }
-    c->measured = TRUE;
-    for (i = 0; i < AVB_TAS_QUEUES; i++) {
-        same = same && commit->regs.stqt[i] == q->regs.stqt[i] && commit->regs.endqt[i] == q->regs.endqt[i];
-    }
-    same = same && commit->regs.qbvcyclet == q->regs.qbvcyclet;
-    if (q->hw_mode != AVB_TAS_HWMODE_TSN)          { c->contradiction |= TAS_STATUS_C_MODE_OFF; }
-    if (!same)                                     { c->contradiction |= TAS_STATUS_C_REGS; }
+    c->measured = c->compared;
     if (q->phc_before_ns < commit->phc_after_ns)   { c->contradiction |= TAS_STATUS_C_PHC_BACK; }
 }
 
@@ -951,6 +995,17 @@ static __inline TAS_STATUS_CLASS tas_status_slot(avb_u32 expected, BOOL valid, c
     }
     if (expected == AVB_TAS_ST_PENDING ? q->phc_after_ns >= c->base : q->phc_before_ns < c->base) {
         return TAS_STATUS_NOT_PHASE;
+    }
+    if (c->identified && (c->contradiction & TAS_STATUS_C_IDENTITY) == 0 && c->mismatch != 0) {
+        /* R2, observed in this reply: no positive control. The correct R2 answer is not judged here; any other answer is wrong */
+        if (unreconciled) {
+            return TAS_STATUS_UNRECONCILED;
+        }
+        if (progressed) {
+            return TAS_STATUS_CLAIMED;
+        }
+        return q->current_status == AVB_TAS_ST_INCONSISTENT && (q->current_reasons & TAS_STATUS_MISMATCH_BITS) == c->mismatch ?
+               TAS_STATUS_CONTROL_LOST : TAS_STATUS_WRONG;
     }
     if (!c->measured) {
         return TAS_STATUS_NOT_MEASURED;
@@ -1012,7 +1067,8 @@ static __inline TAS_STATUS_CLASS tas_status_record(BOOL valid, const AVB_TAS_QUE
     return i->phc_before_commit_ns < phc_lo || i->phc_after_commit_ns > phc_hi ? TAS_STATUS_WRONG : TAS_STATUS_PASS;
 }
 
-/* 12.7 (#369 row): after the activation next NONE, next_reasons 0, no CYCLE_MISMATCH; v1 has no next record (next_commit NONE) */
+/* 12.7 (#369 row): after the activation next NONE, next_reasons 0, no CYCLE_MISMATCH; v1 has no next record (next_commit NONE). That is R1:
+ * under a measured mismatch with the committed schedule (R2) NONE is claimed against it and the correct R2 answer is no positive control */
 static __inline TAS_STATUS_CLASS tas_status_next(BOOL valid, const AVB_TAS_QUERY_HW_REQUEST *q, const TAS_STATUS_CONTROL *c)
 {
     if (!valid) {
@@ -1032,6 +1088,16 @@ static __inline TAS_STATUS_CLASS tas_status_next(BOOL valid, const AVB_TAS_QUERY
     }
     if ((c->contradiction & TAS_STATUS_C_IDENTITY) != 0) {
         return TAS_STATUS_CONTROL_LOST;
+    }
+    if (c->mismatch != 0) {
+        if (q->next_status == AVB_TAS_ST_NONE) {
+            return TAS_STATUS_CLAIMED;
+        }
+        return q->next_status == AVB_TAS_ST_UNKNOWN && q->next_reasons == AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED ? TAS_STATUS_CONTROL_LOST :
+               TAS_STATUS_WRONG;
+    }
+    if (!c->compared) {
+        return TAS_STATUS_NOT_MEASURED;
     }
     if (q->next_status == AVB_TAS_ST_NONE && q->next_reasons == 0 && (q->current_reasons & AVB_TAS_SLOT_RSN_CYCLE_MISMATCH) == 0 &&
         q->next_commit.state == AVB_TAS_COMMIT_NONE) {
@@ -1095,45 +1161,6 @@ static __inline BOOL tas_phc_step(long long step, BOOL a_valid, const AVB_TAS_QU
         return moved - wall_max >= size / 2 && moved - wall_min <= size + size / 2;
     }
     return moved - wall_min <= -(size / 2) && moved - wall_max >= -(size + size / 2);
-}
-
-/* The compared fields of a reply against a schedule (#365 12.4: TRANSMIT_MODE, START_TIME, END_TIME, QBV_CYCLE_TIME, decoded with the generated
- * SSOT helpers that 12.3 names for the v1 register set). Readings of two queries that equal each other say nothing about the schedule.
- * established: the comparison could be made; a schedule value that does not fit its field, or a hw_mode that disagrees with the raw register,
- * leaves it open. mismatch: the slot reasons that a contradiction of this reply has (R2); 0 = R1. Expects an observable reply */
-#define TAS_STATUS_MISMATCH_BITS (AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF | AVB_TAS_SLOT_RSN_WINDOW_MISMATCH | AVB_TAS_SLOT_RSN_CYCLE_MISMATCH)
-
-typedef struct {
-    BOOL established;
-    avb_u32 mismatch;
-} TAS_STATUS_MATCH;
-
-static __inline void tas_status_match(const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_SCHEDULE *s, TAS_STATUS_MATCH *m)
-{
-    const BOOL tsn = I226_TQAVCTRL_GET(q->regs.tqavctrl, I226_TQAVCTRL_TRANSMIT_MODE_MASK, I226_TQAVCTRL_TRANSMIT_MODE_SHIFT) != 0;
-    unsigned k;
-
-    ZeroMemory(m, sizeof(*m));
-    m->established = s->cycle_ns != 0 && s->cycle_ns <= (I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) &&
-                     q->hw_mode == (avb_u32)(tsn ? AVB_TAS_HWMODE_TSN : AVB_TAS_HWMODE_OFF);
-    if (!tsn) {
-        m->mismatch |= AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF;
-    }
-    for (k = 0; k < AVB_TAS_QUEUES; k++) {
-        const AVB_TAS_QUEUE_WINDOW *w = &s->queue[k];
-
-        if (w->start_ns > (I226_STQT_START_TIME_MASK >> I226_STQT_START_TIME_SHIFT) ||
-            w->end_ns > (I226_ENDQT_END_TIME_MASK >> I226_ENDQT_END_TIME_SHIFT)) {
-            m->established = FALSE;
-        }
-        if (I226_STQT_GET(q->regs.stqt[k], I226_STQT_START_TIME_MASK, I226_STQT_START_TIME_SHIFT) != w->start_ns ||
-            I226_ENDQT_GET(q->regs.endqt[k], I226_ENDQT_END_TIME_MASK, I226_ENDQT_END_TIME_SHIFT) != w->end_ns) {
-            m->mismatch |= AVB_TAS_SLOT_RSN_WINDOW_MISMATCH;
-        }
-    }
-    if (I226_QBVCYCLET_GET(q->regs.qbvcyclet, I226_QBVCYCLET_QBV_CYCLE_TIME_MASK, I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) != s->cycle_ns) {
-        m->mismatch |= AVB_TAS_SLOT_RSN_CYCLE_MISMATCH;
-    }
 }
 
 /* A window of the schedule is shown too small at this speed (TAS-DR-05 without its unpublished overhead term, which only raises the bound).
