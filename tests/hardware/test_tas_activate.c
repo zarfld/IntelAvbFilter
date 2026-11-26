@@ -165,8 +165,10 @@
  *                          is FAIL. The answer is the Pause's only when FilterStatus was not entered on this context from before the
  *                          control to after the last reply (a link indication gives the same answer, META-007); otherwise INCONCLUSIVE
  *                          (tas_ev_pause_phase). The PHC reset is not required for it and is judged apart (RESEED, GENERATION, RECORD_RESTART).
- *              RECORD_RESTART  with RESTART and RESEED: the commit no longer RETAINED (PHC_DISCONTINUOUS, or HW_MISMATCH), the committed
- *                          schedule and its bracket kept, one epoch, next commit NONE (tas_ev_record_reset). Otherwise INCONCLUSIVE.
+ *              RECORD_RESTART  with RESTART and RESEED: the commit no longer RETAINED, the committed schedule and its (possible) bracket
+ *                          kept, one epoch, next commit NONE: otherwise FAIL. Its state from the reply's own registers against the
+ *                          committed schedule (tas_status_match): R1 PHC_DISCONTINUOUS, R2 also HW_MISMATCH; without that comparison
+ *                          INCONCLUSIVE (tas_ev_record_reset, PR #528 review). Without RESTART and RESEED: INCONCLUSIVE.
  *              ONCE        only with a shown end: two further queries, +0.
  *              STALE_VIEW  only with RESTART and RESEED: an ACTIVATE with the pair from before the event must be refused STATE_CONFLICT.
  *                          Both refusals complete STATUS_INVALID_DEVICE_STATE, so the #505 record of this arm and this op id decides
@@ -3999,13 +4001,23 @@ static avb_u64 run_meta_restart(HANDLE h, HANDLE h2, UINT32 index, const AVB_ADA
               (pause_out == TAS_EV_PASS ? "no status indication on this context: the answer is the Pause's" : "not every reply measured"))));
     verdict(pause_out == TAS_EV_PASS ? "PASS" : (pause_out == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "STATUS_RESTART", index, id->device_id, why);
     rec = tas_ev_record_reset(query_valid(&qt), &qt.q, query_valid(&qe), &qe.q, &op, event);
+    if (tas_status_observable(query_valid(&qe), &qe.q)) {
+        TAS_STATUS_MATCH m;
+
+        tas_status_match(&qe.q, &op.schedule, &m);
+        printf("    [EVIDENCE] RECORD_RESTART: the reply's registers against the committed schedule: %s, mismatch 0x%X (%s)\n",
+               m.established ? "compared" : "NOT established", m.mismatch, !m.established ? "no R1/R2" : (m.mismatch == 0 ? "R1" : "R2"));
+    } else {
+        printf("    [EVIDENCE] RECORD_RESTART: the reply's registers are not observable: no R1/R2\n");
+    }
     sprintf_s(why, sizeof(why), "commit %u -> %u, bracket [%llu, %llu] -> [%llu, %llu], committed schedule %s, epoch %llu -> %llu (commit %llu), "
               "next commit %u: %s", qt.q.current_commit.state, qe.q.current_commit.state, qt.q.current_commit.phc_before_commit_ns,
               qt.q.current_commit.phc_after_commit_ns, qe.q.current_commit.phc_before_commit_ns, qe.q.current_commit.phc_after_commit_ns,
               memcmp(&qe.q.current, &op.schedule, sizeof(op.schedule)) == 0 ? "kept" : "NOT kept", qt.q.context_epoch, qe.q.context_epoch,
               op.context_epoch, qe.q.next_commit.state,
-              rec == TAS_EV_PASS ? "the reset commit keeps its schedule and bracket and no longer claims RETAINED" :
-              (rec == TAS_EV_FAIL ? "the record after the reset is wrong" : "the reset or the control is not established (see RESTART, RESEED, CONTROL_BEFORE)"));
+              rec == TAS_EV_PASS ? "the reset commit keeps its schedule and bracket, its state fits the measured registers" :
+              (rec == TAS_EV_FAIL ? "the record after the reset is wrong" :
+               "the reset, the control or the register comparison is not established (see RESTART, RESEED, CONTROL_BEFORE, the evidence line)"));
     verdict(rec == TAS_EV_PASS ? "PASS" : (rec == TAS_EV_FAIL ? "FAIL" : "INCONCLUSIVE"), "RECORD_RESTART", index, id->device_id, why);
     record = read_state(h, &s);
     printf("    [EVIDENCE] record after the restart: %s%d; registers (TQAVCTRL 0x%08X BASET 0x%08X/0x%08X) against before (0x%08X 0x%08X/0x%08X), reported only (#364)\n",

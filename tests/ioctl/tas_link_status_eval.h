@@ -15,6 +15,7 @@
 #define TAS_LINK_STATUS_EVAL_H
 
 #include <windows.h>
+#include "tas_activate_eval.h"   /* tas_status_observable, tas_status_match: R1/R2 of a reply (PR #528 review) */
 
 typedef enum { TAS_EV_PASS = 0, TAS_EV_FAIL, TAS_EV_INCONCLUSIVE } TAS_EV_OUT;
 
@@ -106,23 +107,39 @@ static __inline TAS_EV_OUT tas_ev_pause_phase(const TAS_EV_COUNT *c, BOOL paused
     return c->pass == 0 || c->missing != 0 || !status_quiet ? TAS_EV_INCONCLUSIVE : TAS_EV_PASS;
 }
 
-/** The record after the same event, judged apart from the status (#352 R1 L10, #365 12.2): the bring-up reset the PHC (reset: the restart
- *  completed and the reset measured by the caller), so the commit no longer claims RETAINED. It keeps the committed schedule and the
- *  commit's own bracket in the commit's context; PHC_DISCONTINUOUS, or HW_MISMATCH (no published priority between the two). before: the
- *  control, which must show this commit RETAINED in its context */
+/** The record after the same event, judged apart from the status (#352 R1 L10, #365 12.2, 12.4): the bring-up reset the PHC (reset: the
+ *  restart completed and the reset measured by the caller). before: the control, which must show this commit RETAINED in its context.
+ *  - Facts of the record, FAIL whatever the registers show: the commit's context, a state other than PHC_DISCONTINUOUS or HW_MISMATCH,
+ *    the committed schedule, the commit's own bracket (kept from the control, and possible: begins before it ends, ends before BaseT),
+ *    next commit NONE.
+ *  - Which of the two states: R1 or R2 from the judged reply's own registers against the committed schedule (tas_status_match, the
+ *    generated SSOT fields), never from the retained record. R1 requires PHC_DISCONTINUOUS (HW_MISMATCH without a measured mismatch is
+ *    FAIL); R2 accepts either (reset and mismatch together: no published priority, as tas_status_reseed). A reply whose registers are not
+ *    observable, or a comparison that cannot be established, leaves the state unjudged: INCONCLUSIVE, never PASS */
 static __inline TAS_EV_OUT tas_ev_record_reset(BOOL before_valid, const AVB_TAS_QUERY_HW_REQUEST *before, BOOL valid,
                                                const AVB_TAS_QUERY_HW_REQUEST *q, const AVB_TAS_OP_REQUEST *op, BOOL reset)
 {
     const AVB_TAS_COMMIT_INFO *b = &before->current_commit, *i = &q->current_commit;
+    TAS_STATUS_MATCH m;
 
     if (!reset || !before_valid || !valid || op->context_epoch == 0 || before->context_epoch != op->context_epoch ||
         b->state != AVB_TAS_COMMIT_RETAINED || b->phc_after_commit_ns == 0) {
         return TAS_EV_INCONCLUSIVE;
     }
-    return q->context_epoch == op->context_epoch &&
-           (i->state == AVB_TAS_COMMIT_PHC_DISCONTINUOUS || i->state == AVB_TAS_COMMIT_HW_MISMATCH) &&
-           memcmp(&q->current, &op->schedule, sizeof(op->schedule)) == 0 && i->phc_before_commit_ns == b->phc_before_commit_ns &&
-           i->phc_after_commit_ns == b->phc_after_commit_ns && q->next_commit.state == AVB_TAS_COMMIT_NONE ? TAS_EV_PASS : TAS_EV_FAIL;
+    if (q->context_epoch != op->context_epoch || (i->state != AVB_TAS_COMMIT_PHC_DISCONTINUOUS && i->state != AVB_TAS_COMMIT_HW_MISMATCH) ||
+        memcmp(&q->current, &op->schedule, sizeof(op->schedule)) != 0 || i->phc_before_commit_ns != b->phc_before_commit_ns ||
+        i->phc_after_commit_ns != b->phc_after_commit_ns || i->phc_before_commit_ns > i->phc_after_commit_ns ||
+        i->phc_after_commit_ns >= op->schedule.base_time_ns || q->next_commit.state != AVB_TAS_COMMIT_NONE) {
+        return TAS_EV_FAIL;
+    }
+    if (!tas_status_observable(valid, q)) {
+        return TAS_EV_INCONCLUSIVE;
+    }
+    tas_status_match(q, &op->schedule, &m);
+    if (!m.established) {
+        return TAS_EV_INCONCLUSIVE;
+    }
+    return m.mismatch == 0 && i->state != AVB_TAS_COMMIT_PHC_DISCONTINUOUS ? TAS_EV_FAIL : TAS_EV_PASS;
 }
 
 #endif /* TAS_LINK_STATUS_EVAL_H */

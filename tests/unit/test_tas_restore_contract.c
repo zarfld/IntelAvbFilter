@@ -4829,6 +4829,16 @@ static void test_79_event_sequence(void)
     g_c6_events = 0;
 }
 
+/* PR #528 review: the S1 reply after the Pause and the reset, its registers as committed (st_query: R1); state: its commit state */
+static void m80_reply(AVB_TAS_QUERY_HW_REQUEST *q, avb_u32 state)
+{
+    st_query(q, 3000, 3100, AVB_TAS_ST_UNKNOWN, 0);
+    q->next_status = AVB_TAS_ST_UNKNOWN;
+    q->snapshot_reasons = AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED;
+    q->generation = 3;
+    q->current_commit.state = state;
+}
+
 /* TC-MOCK-080: the answer after a Pause under a retained schedule and the record after the bring-up's PHC reset (TC-TASACT-META-004,
  * #350, #365 K8 events decision 2026-11-26 B lifecycle row; test logic only, never a Pause) */
 static void test_80_pause_status(void)
@@ -4888,41 +4898,84 @@ static void test_80_pause_status(void)
     ZeroMemory(&c, sizeof(c));
     EXPECT_EQ("no reply: not measured", tas_ev_pause_phase(&c, TRUE, TRUE), TAS_EV_INCONCLUSIVE);
 
-    /* The record after the reset, apart from the status */
-    ZeroMemory(&op, sizeof(op));
-    op.context_epoch = 77;
-    op.schedule.base_time_ns = 19000000000ULL;
-    op.schedule.cycle_ns = 1000000000u;
-    m78_q(&b, U, LEU, N, 0, 0);
-    b.context_epoch = 77;
-    b.current = op.schedule;
-    b.current_commit.phc_before_commit_ns = 100;
-    b.current_commit.phc_after_commit_ns = 200;
-    b.next_commit.state = AVB_TAS_COMMIT_NONE;   /* as the driver reports it (1, not 0) */
-    q = b;
-    q.current_status = U;
-    q.current_reasons = 0;
-    q.next_status = U;
-    q.snapshot_reasons = EV;
+    /* The record after the reset, apart from the status. PR #528 review: R1 or R2 comes from the judged reply's own registers against the
+     * committed schedule (tas_status_match), never from the retained record; without that comparison the commit state is not judged.
+     * Fixtures of TC-MOCK-071/072: st_op commits epoch 7, BaseT 5000, cycle 1000, windows 200 to 400; st_query reads exactly that */
+    st_op(&op);
+    st_query(&b, 2000, 2100, U, LEU);   /* the control: RETAINED, bracket [1010, 1020] */
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    EXPECT_EQ("R1, PHC_DISCONTINUOUS, schedule and bracket kept: the ordinary reset", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    EXPECT_EQ("R1 with HW_MISMATCH: no mismatch measured, the classification is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE),
+              TAS_EV_FAIL);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    q.regs.endqt[1] = 450;
+    EXPECT_EQ("R2 (ENDQT1 contradicts the schedule) with HW_MISMATCH: reset and mismatch, no published priority",
+              tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
     q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
-    EXPECT_EQ("S1 reply: PHC_DISCONTINUOUS with the schedule and the bracket kept", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
-    q.current_commit.state = AVB_TAS_COMMIT_HW_MISMATCH;
-    EXPECT_EQ("... HW_MISMATCH as well (no published priority)", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
-    q.current_commit.state = AVB_TAS_COMMIT_RETAINED;
+    EXPECT_EQ("... PHC_DISCONTINUOUS for the same R2 as well", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    q.regs.tqavctrl = 0;
+    q.hw_mode = AVB_TAS_HWMODE_OFF;
+    EXPECT_EQ("R2 (TSN mode off while armed) with HW_MISMATCH", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    q.regs.qbvcyclet = 500;
+    EXPECT_EQ("R2 (cycle) with HW_MISMATCH", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_PASS);
+
+    /* The comparison unavailable: the commit state is not judged, never PASS */
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+    EXPECT_EQ("registers not read: INCONCLUSIVE, also with PHC_DISCONTINUOUS", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE),
+              TAS_EV_INCONCLUSIVE);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    q.regs.read_failed = 1u;
+    EXPECT_EQ("a compared register unreadable: INCONCLUSIVE", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
+    m80_reply(&q, AVB_TAS_COMMIT_HW_MISMATCH);
+    q.hw_mode = AVB_TAS_HWMODE_OFF;   /* disagrees with TQAVCTRL: tas_status_match leaves the comparison open */
+    EXPECT_EQ("hw_mode against the raw register: comparison not established, INCONCLUSIVE", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE),
+              TAS_EV_INCONCLUSIVE);
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.flags = AVB_TAS_FLAG_OP_IN_PROGRESS;
+    EXPECT_EQ("an operation in progress: INCONCLUSIVE", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
+
+    /* Facts of the record: FAIL whatever the comparison, also when it is unavailable */
+    m80_reply(&q, AVB_TAS_COMMIT_RETAINED);
     EXPECT_EQ("still RETAINED after a reset is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
-    q.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
-    q.current_commit.phc_after_commit_ns = 300;
-    EXPECT_EQ("a moved bracket is wrong (a fact of the commit)", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
-    q.current_commit.phc_after_commit_ns = 200;
-    q.current.cycle_ns = 500000000u;
-    EXPECT_EQ("another schedule is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
-    q.current = op.schedule;
-    q.context_epoch = 78;
+    q.hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+    EXPECT_EQ("... also without a register comparison", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+    q.current_commit.phc_after_commit_ns = 1030;
+    EXPECT_EQ("a moved bracket is wrong (a fact of the commit), without a comparison too", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE),
+              TAS_EV_FAIL);
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+    q.current.cycle_ns = 500;
+    EXPECT_EQ("another schedule in the record is wrong, without a comparison too", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.context_epoch = 8;
     EXPECT_EQ("another context is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
-    q.context_epoch = 77;
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
     q.next_commit.state = AVB_TAS_COMMIT_RETAINED;
     EXPECT_EQ("a next commit is wrong", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
-    q.next_commit.state = AVB_TAS_COMMIT_NONE;
+    m80_reply(&q, AVB_TAS_COMMIT_LOST);
+    EXPECT_EQ("LOST is wrong (the commit timing was kept)", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+
+    /* Impossible record fields, even when control and reply agree on them */
+    st_query(&b, 2000, 2100, U, LEU);
+    b.current_commit.phc_after_commit_ns = 6000;
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.current_commit.phc_after_commit_ns = 6000;
+    EXPECT_EQ("a commit bracket ending after BaseT is impossible", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+    st_query(&b, 2000, 2100, U, LEU);
+    b.current_commit.phc_before_commit_ns = 1030;
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
+    q.current_commit.phc_before_commit_ns = 1030;
+    EXPECT_EQ("a bracket that begins after it ends is impossible", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, TRUE), TAS_EV_FAIL);
+
+    /* Not judged at all */
+    st_query(&b, 2000, 2100, U, LEU);
+    m80_reply(&q, AVB_TAS_COMMIT_PHC_DISCONTINUOUS);
     EXPECT_EQ("the reset not established: not judged", tas_ev_record_reset(TRUE, &b, TRUE, &q, &op, FALSE), TAS_EV_INCONCLUSIVE);
     EXPECT_EQ("the reply missing: not judged", tas_ev_record_reset(TRUE, &b, FALSE, &q, &op, TRUE), TAS_EV_INCONCLUSIVE);
     b.current_commit.state = AVB_TAS_COMMIT_PHC_DISCONTINUOUS;
