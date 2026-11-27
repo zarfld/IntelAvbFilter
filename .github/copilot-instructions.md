@@ -42,7 +42,7 @@ GitHub Issues are the **source of truth** for stakeholder requirements (StR), fu
 - Before implementation, design, or testing work, identify/create/link the governing issue.
 - Query GitHub Issues for current lifecycle state; do not treat generated Markdown reports as authoritative state when they disagree with Issues.
 - Maintain bidirectional traceability and use the repository's exact relationship syntax. For any issue/PR/test traceability work, load the `lifecycle-traceability` skill.
-- Every PR must link to its implementing issue(s) with `Fixes #N` or `Implements #N`, reference relevant issues in commits, pass CI/traceability checks, and receive review as required by repository policy.
+- Every tracked implementation PR must link to its governing issue(s), using `Implements #N` while closure is pending, reference relevant issues in commits, pass CI/traceability checks, and receive required review. For issue status and closure follow `docs/github-issue-status-management.md` via `lifecycle-traceability`; candidate GREEN, merge or generic CI success alone cannot close implementation-related issues. Automatically close when all applicable issue-specific gates pass, without an additional manual approval step. Repository-governance-only changes do not create product requirements.
 
 ## 4. Existing GitHub issue integrity — overriding safety rule
 

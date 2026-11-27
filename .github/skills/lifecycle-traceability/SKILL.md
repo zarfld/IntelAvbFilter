@@ -19,6 +19,10 @@ Derived Markdown reports/matrices are evidence and views; they do not override c
 
 Before creating or modifying lifecycle artifacts, query the relevant GitHub Issues and use their issue numbers.
 
+## Issue lifecycle and closure
+
+For every issue status/closure decision, read [the canonical artifact-specific lifecycle contract](../../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27) (repository path `docs/github-issue-status-management.md`). Use `Implements #N` while closure is pending. Do not use a closing keyword to bypass the required gates. Automatically close as completed when all applicable artifact-specific gates pass; no separate manual closure approval is required. Historical combined CI/HIL runs may supply issue-specific evidence, but do not establish current GREEN without reconciliation. Do not create product lifecycle requirements for repository issue management. Follow `github-issue-integrity` for existing issue mutations.
+
 ## Canonical relationship syntax
 
 Use the repository's current templates/path-specific instructions as the executable contract.

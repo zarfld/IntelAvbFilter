@@ -58,7 +58,7 @@ Use the most specific repository guidance instead of expanding this file:
 - testing → `intelavbfilter-testing` / `run-tests`
 - SSOT/magic numbers → `ssot-and-magic-numbers`
 - GitHub issue mutation/recovery → `github-issue-integrity`
-- issue/PR/test traceability → `lifecycle-traceability`
+- issue lifecycle/status/closure and issue/PR/test traceability → `lifecycle-traceability` (canonical rules in `docs/github-issue-status-management.md`)
 - detailed working-principle rationale/examples → `engineering-governance`
 - cross-phase standards/lifecycle advice → `.github/agents/standards-compliance-advisor.agent.md`
 
