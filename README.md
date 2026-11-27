@@ -94,7 +94,15 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 **Runner 2** (`Dell Optiplex 7060`): Windows, 1× Intel I219-LM + 1× Intel I210 + 1× Intel I226-LM, driver installed — added April 2026.  
 **GitHub-hosted runners**: `windows-latest`, `windows-2022` — hardware-independent tests only.
 
-> ⚠️ **Driver provenance note:** The self-hosted runners run with a pre-installed driver. CI verifies that hardware tests pass against that installed driver, but does **not** currently confirm that the loaded kernel image SHA matches the current build artifact. All hardware results should be treated as `BASELINE_DRIVER_ONLY` until a provenance-verification step is added to CI.
+> ⚠️ > **Driver provenance note:** The dedicated HIL workflow automatically deploys the authorized Debug or Release driver package produced by the upstream CI run.
+>
+> Before hardware test execution, the workflow verifies the deployed driver against the staged build. SHA-256 identities of the staged artifact, installed driver and service-selected ImagePath file are recorded together with the source revision, configuration and CI/HIL run identity.
+>
+> Running-image provenance is established through the observed driver release, installation and reload sequence. The loaded kernel image itself is not directly hashed in memory.
+>
+> Hardware verification evidence with missing, inconsistent or invalid provenance cannot satisfy the HIL acceptance gate. Historical committed XML and local diagnostic results remain informational and do not substitute for current CI/HIL verification.
+>
+> See [HIL workflow](.github/workflows/hil.yml) and [HIL deployment and provenance — #442](https://github.com/zarfld/IntelAvbFilter/issues/442).
 
 <details>
 <summary>📸 Historical Test Snapshot — April 2026 (click to expand)</summary>
