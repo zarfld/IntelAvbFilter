@@ -75,7 +75,7 @@ Every artifact includes traceability:
 2. **Link in Code/Tests** (`Implements: #N`, `Verifies: #N`)
 3. **Reference in PR** (`Fixes #N`, `Part of #N`)
 4. **Validate in CI** (automated traceability check)
-5. **Close on Merge** (automated via `Fixes #N`)
+5. **Close after artifact-specific acceptance** — follow [issue lifecycle guidance](github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27); for implementation work use `Implements #N` until master integration and applicable verification are established.
 
 ---
 

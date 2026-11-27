@@ -3,6 +3,9 @@ description: "Phase 07 guidance for verification and validation following IEEE 1
 applyTo: "07-verification-validation/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 07: Verification & Validation (V&V)
 
 **Standards**: IEEE 1012-2016 (System, Software, and Hardware Verification and Validation)  

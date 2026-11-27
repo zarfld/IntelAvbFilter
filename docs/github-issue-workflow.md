@@ -4,6 +4,10 @@
 
 **Standards**: ISO/IEC/IEEE 12207:2017 (Configuration Management), ISO/IEC/IEEE 29148:2018 (Requirements Management)
 
+## Governing closure policy
+
+Follow [the canonical artifact-specific lifecycle and historical evidence rules](github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). These override generic examples below. Use `Implements #N` while closure is pending. A candidate GREEN, merge, or overall CI success cannot authorize issue closure. Master integration plus issue-specific applicable verification is required for implementation-related artifacts. Labels and Project fields are derived views; do not automate closure until the mapping and evidence mechanisms are reconciled.
+
 ## 🚀 Quick Start: Setting Up Your Workflow
 
 ### What Can Be Automated vs. Manual Setup
@@ -15,7 +19,7 @@
 | **Auto-add issues to project** | ✅ Yes (built-in) | Enable GitHub Projects auto-add workflow |
 | **Update issue status** | ✅ Yes (via MCP/Actions) | Copilot MCP tools + GitHub Actions |
 | **Move issues between columns** | ✅ Yes (built-in) | Automatic based on label changes |
-| **Close issues after CI** | ✅ Yes (via Actions) | GitHub Actions workflow |
+| **Close issues after CI** | Manual evidence review | No blanket CI-based closure |
 
 ### Initial Setup Steps
 
@@ -78,7 +82,7 @@ stateDiagram-v2
     Review --> Testing: PR Approved
     Testing --> InProgress: Test Failed
     Testing --> Completed: All Tests Pass
-    Completed --> Closed: Verified in Production
+    Completed --> Closed: Artifact-specific acceptance and evidence reviewed
     Closed --> [*]
     
     Backlog --> Closed: Won't Fix / Duplicate
@@ -260,198 +264,9 @@ jobs:
             }
 ```
 
-### Workflow: Auto-Update Issue Status
+### Workflow status and closure
 
-Create `.github/workflows/issue-status-automation.yml`:
-
-```yaml
-name: Issue Status Automation
-
-on:
-  pull_request:
-    types: [opened, closed, reopened]
-  issues:
-    types: [assigned, unassigned]
-
-jobs:
-  update-issue-status:
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      pull-requests: read
-    
-    steps:
-      - name: Update status when assigned
-        if: github.event_name == 'issues' && github.event.action == 'assigned'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Get current labels
-            const issue = await github.rest.issues.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number
-            });
-            
-            // Remove old status labels and add 'in-progress'
-            const labels = issue.data.labels
-              .map(l => l.name)
-              .filter(l => !l.startsWith('status:'));
-            
-            labels.push('status:in-progress');
-            
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: labels
-            });
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: '🚀 Issue moved to **In Progress** (assigned to @' + context.payload.assignee.login + ')'
-            });
-      
-      - name: Update status when PR opened
-        if: github.event_name == 'pull_request' && github.event.action == 'opened'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Extract issue numbers from PR body
-            const body = context.payload.pull_request.body || '';
-            const issueNumbers = [...body.matchAll(/#(\d+)/g)].map(m => parseInt(m[1]));
-            
-            for (const issueNum of issueNumbers) {
-              try {
-                const issue = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum
-                });
-                
-                // Update to 'review' status
-                const labels = issue.data.labels
-                  .map(l => l.name)
-                  .filter(l => !l.startsWith('status:'));
-                
-                labels.push('status:review');
-                
-                await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  labels: labels
-                });
-                
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  body: '🔍 PR #' + context.payload.pull_request.number + ' opened for review.'
-                });
-              } catch (error) {
-                console.log(`Could not update issue #${issueNum}: ${error.message}`);
-              }
-            }
-      
-      - name: Update status when PR merged
-        if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Extract issue numbers from PR body
-            const body = context.payload.pull_request.body || '';
-            const issueNumbers = [...body.matchAll(/(?:Fixes|Closes|Resolves|Implements)\s+#(\d+)/gi)]
-              .map(m => parseInt(m[1]));
-            
-            for (const issueNum of issueNumbers) {
-              try {
-                const issue = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum
-                });
-                
-                // Update to 'testing' status (don't close yet, wait for verification)
-                const labels = issue.data.labels
-                  .map(l => l.name)
-                  .filter(l => !l.startsWith('status:'));
-                
-                labels.push('status:testing');
-                
-                await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  labels: labels
-                });
-                
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  body: '✅ PR #' + context.payload.pull_request.number + ' merged. Moving to testing phase.'
-                });
-              } catch (error) {
-                console.log(`Could not update issue #${issueNum}: ${error.message}`);
-              }
-            }
-```
-
-### Workflow: Close Issues After CI Success
-
-Add to `.github/workflows/ci-standards-compliance.yml`:
-
-```yaml
-  close-completed-issues:
-    name: Close Completed Issues
-    runs-on: ubuntu-latest
-    needs: [compliance-report]  # Run after all tests pass
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    permissions:
-      issues: write
-    
-    steps:
-      - name: Close issues in testing status
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Find all issues with 'status:testing'
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'status:testing',
-              per_page: 100
-            });
-            
-            for (const issue of issues.data) {
-              // Update to completed and close
-              const labels = issue.labels
-                .map(l => l.name)
-                .filter(l => !l.startsWith('status:'));
-              
-              labels.push('status:completed');
-              
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                state: 'closed',
-                state_reason: 'completed',
-                labels: labels
-              });
-              
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: '✅ All CI checks passed. Issue completed and closed.\n\nCommit: ' + context.sha.substring(0, 7)
-              });
-            }
-```
+The former illustrative PR/status and bulk CI-closure workflows are superseded. Do not activate them. A PR merge only records integration into its actual target; closure requires the canonical artifact-specific review. Use the existing workflows for their actual functions, and record closure evidence manually until evidence-driven automation is separately reviewed.
 
 ## 🎯 GitHub Copilot Agent Integration
 
@@ -461,8 +276,8 @@ Copilot can suggest or perform status updates when:
 
 1. **User assigns themselves to an issue** → Suggest moving to `status:in-progress`
 2. **User creates a PR** → Suggest moving linked issues to `status:review`
-3. **PR is merged** → Suggest moving to `status:testing`
-4. **All tests pass** → Suggest closing with `status:completed`
+3. **PR is merged into master** → Record integration and pending issue-specific verification; other target branches remain candidate work.
+4. **Issue-specific integrated verification complete** → Recommend closure after the canonical artifact-specific review; do not close based on overall CI success.
 5. **User mentions a blocker** → Suggest marking as `status:blocked`
 
 ### Example Copilot Workflow

@@ -3,6 +3,9 @@ description: "Phase 01 guidance for stakeholder requirements definition followin
 applyTo: "01-stakeholder-requirements/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 01: Stakeholder Requirements Definition
 
 **Standards**: ISO/IEC/IEEE 29148:2018 (Stakeholder Requirements), ISO/IEC/IEEE 12207:2017  

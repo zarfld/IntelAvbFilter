@@ -13,6 +13,32 @@
 
 ---
 
+## Normative issue closure and historical evidence (2026-11-27)
+
+This is repository governance, not a driver requirement or driver lifecycle specification. No new product lifecycle artifact is needed to apply this policy. GitHub Issues remain the lifecycle SSOT; the current issue and its accepted amendments define the scope. This section governs closure and supersedes conflicting older examples. It does not change product acceptance criteria, test applicability, safety authorization or CI/HIL gates.
+
+| Artifact | Close as completed only when |
+|---|---|
+| StR | Stakeholder need validated and baselined, refinement complete, child REQs linked and baselined. Product satisfaction is evaluated separately. |
+| REQ-F / REQ-NF | Approved scope fulfilled, implementation (where applicable) in master, all accepted verification obligations satisfied by objective evidence. |
+| ADR | Decision finalized and recorded with rationale, alternatives and consequences; rejection/supersession is a disposition, not implementation. |
+| ARC-C / ADC | Component implemented, integrated into master and verified against its interfaces and allocated requirements. |
+| DES-C | Detailed design complete, reviewed, approved and traceable; associated version-controlled design artifact integrated where required. Code completion is separate. |
+| QA-SC | Accepted scenario response and response measure demonstrated using its approved verification method. For implemented behaviour, evidence covers the integrated baseline; architecture-analysis-only scenarios may use accepted analysis. |
+| TEST | Accepted test specification correctly implemented, registered, integrated and all required applicable cases actually executed and verified. Closed TESTs remain in regression selection. |
+| BUG / TEST-INTEGRITY | Original defect established, correction integrated into master, original symptom and applicable regressions verified; preserve separate defect ownership. |
+| INV | Questions answered with objective evidence and resulting defects tracked separately; no merge needed for evidence-only investigations. |
+
+### Implementation-related transitions
+
+Development-branch/local GREEN is candidate evidence, not closure. A PR merge to a development/integration branch is not master integration. A merge to master alone is not verification. Close only after issue-specific applicable integrated verification, with a record of the tested revision and evidence. Debug and Release are build configurations; publication of a GitHub Release is not required except for an explicit release/delivery obligation. A global GREEN workflow alone proves neither individual issue fulfilment nor testcase completeness. Record targeted passing evidence even if unrelated tests fail; do not treat it as global acceptance or bypass a merge gate. Where global acceptance remains RED, keep the closure recommendation pending maintainer review of issue-specific evidence and independent blockers.
+
+Use the existing native issue state and recorded decisions; status labels and Project fields are progress views, not independent evidence or authority to close. Until status ownership/synchronization is reconciled, neither free-text status nor a label alone authorizes closure. No bulk auto-close based on labels, PR merge or workflow conclusion. Use non-closing `Implements #N` links for pending closure. Record the closure disposition (completed, duplicate, not planned/superseded as applicable); do not count non-completion dispositions as verified requirements. Record rationale and evidence in an append-only issue comment without rewriting unrelated issue body content. A subsequent regression must be reported and tracked; reopen when original closure was invalid or implementation reverted, otherwise link a separate regression defect. Keep historical completion distinct from current verification.
+
+### Retrospective reconciliation of existing issues
+
+Use original combined CI/HIL runs before the workflow split as well as current CI/HIL runs. Historical evidence can establish completed work at its actual revision, not current GREEN by itself. For each open issue: (1) read its current accepted scope, comments, links and dependencies; (2) map every required verification obligation to actual testcase/analysis/inspection evidence; (3) identify source SHA, branch/event, run/attempt/job/artifact, configuration, physical adapter and deployment/test provenance where applicable; (4) inspect native outcomes, skipped/missing cases, cleanup/restoration and known test-integrity defects; (5) establish integration in master and review subsequent relevant changes, amended acceptance criteria, regressions and newer evidence; (6) recommend closure only where the complete obligation is supported, otherwise record partial/historical evidence and the remaining gap. Rerun applicable verification when evidence is missing, invalid, stale for the affected implementation, or contradicted. Historical committed XML, stale artifacts, aggregate PASS counts or an absent failure are not substitutes for provenance-verified actual execution. Do not mix revisions into a fictitious current baseline. For hardware claims follow the canonical intelavbfilter-testing contract. Preserve all existing gates. Do not automatically close issues during a historical evidence inventory.
+
 ## 🎯 Overview
 
 This guide defines when to set issues to "In Work" (Open), when to close them, and what detailed states make sense for different artifact types throughout the software lifecycle.
@@ -22,7 +48,7 @@ This guide defines when to set issues to "In Work" (Open), when to close them, a
 1. **Configuration Status Accounting**: Maintain status information for system elements and baselines to support decision-making (ISO/IEC/IEEE 12207)
 2. **Requirements Attributes**: Track inclusion in baselines, verification status, and priority (ISO/IEC/IEEE 29148)
 3. **Traceability**: Maintain bidirectional links between issues (StR ↔ REQ ↔ ADR ↔ ADC ↔ TEST)
-4. **Custom Fields Over Labels**: Use GitHub Projects Custom Fields for detailed states while keeping simple Open/Closed states
+4. **Status Views**: Use native issue state and recorded decisions as authority. Project fields and labels are derived progress views; neither authorizes closure.
 
 ---
 
@@ -152,7 +178,7 @@ Status Options:
 
 ### When to Close
 
-**Close only when**: Requirement has been **Approved/Baselined**, **Implemented**, and **Verified** (tests pass with objective evidence)
+**Close only when**: Requirement has been **Approved/Baselined**, **Implemented** (integrated into `master` where applicable), and **Verified** (all applicable acceptance obligations supported by objective evidence). Follow the normative section above.
 
 **Note**: Keep Open while requirement is active in system; use Custom Field for detailed tracking
 
@@ -233,7 +259,7 @@ Status Options:
 - Manual verification: Staging deployment (2025-12-17)
 
 **Verified By**: John Doe (QA Lead)
-**Closure Recommendation**: Ready to close after deployment to production
+**Closure Recommendation**: Ready for issue-specific closure review after integrated verification; production deployment is required only for an explicit delivery obligation.
 ```
 
 ---
@@ -270,7 +296,7 @@ stateDiagram-v2
     Proposed --> UnderReview: Alternatives Identified
     UnderReview --> Accepted: Approval Obtained
     UnderReview --> Rejected: Not Viable
-    Accepted --> [*]: Close (implemented)
+    Accepted --> [*]: Close (decision recorded)
     Rejected --> [*]: Close (rationale documented)
     Accepted --> Deprecated: System Evolution
     Deprecated --> [*]: Close (replacement recorded)
@@ -443,7 +469,7 @@ Status Options:
 **Integration Tests**: 8/8 passing (100%)
 **End-to-End Tests**: 3/3 passing (login, logout, token refresh)
 
-**Deployment**: Merged to develop, deployed to staging
+**Integration**: Merged into master and integrated verification complete (staging alone is insufficient).
 **Configuration Control**: DRB-2025-005
 ```
 
@@ -506,121 +532,14 @@ Status Options:
 
 ---
 
-## 🤖 Automation via GitHub Actions
+## Automation via GitHub Actions
 
-### Update Status on PR Merge
-
-```yaml
-name: Update Issue Status on PR Merge
-
-on:
-  pull_request:
-    types: [closed]
-
-jobs:
-  update-status:
-    if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
-    
-    steps:
-      - name: Update implemented requirements to "Implemented"
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = context.payload.pull_request.body || '';
-            const issueNumbers = [...body.matchAll(/(?:Fixes|Implements|Closes)\s+#(\d+)/gi)]
-              .map(m => parseInt(m[1]));
-            
-            for (const issueNum of issueNumbers) {
-              try {
-                // Get issue details
-                const issue = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum
-                });
-                
-                // Add comment with status update
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  body: `✅ PR #${context.payload.pull_request.number} merged.\n\n**Status Update**: Implemented (Code Complete)\n**Next Step**: Verify via tests (move to "Verified" status after CI passes)`
-                });
-                
-                console.log(`Updated issue #${issueNum} status to Implemented`);
-              } catch (error) {
-                console.log(`Could not update issue #${issueNum}: ${error.message}`);
-              }
-            }
-```
-
-### Update Status on Test Pass
-
-```yaml
-name: Update Issue Status on Tests Pass
-
-on:
-  push:
-    branches: [master, main, develop]
-
-jobs:
-  test-and-update:
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Run tests
-        run: npm test
-      
-      - name: Update verified issues
-        if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Find all issues mentioned in recent commits
-            const commits = await github.rest.repos.listCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.sha,
-              per_page: 10
-            });
-            
-            const issueNumbers = new Set();
-            for (const commit of commits.data) {
-              const matches = commit.commit.message.matchAll(/#(\d+)/g);
-              for (const match of matches) {
-                issueNumbers.add(parseInt(match[1]));
-              }
-            }
-            
-            for (const issueNum of issueNumbers) {
-              try {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNum,
-                  body: `✅ All tests passed for commit ${context.sha.substring(0, 7)}.\n\n**Status Update**: Verified (Tests Pass)\n**Next Step**: Integration testing or deployment`
-                });
-              } catch (error) {
-                console.log(`Could not update issue #${issueNum}: ${error.message}`);
-              }
-            }
-```
-
----
+The former illustrative merge/status and test-pass scripts are superseded. Do not deploy automatic closure based on generic CI success or free-text issue status. Evaluate the artifact-specific closure conditions above and record issue-specific evidence; initially use manual review. Existing project synchronization is a derived view and its mapping defects must be handled independently.
 
 ## ✅ Best Practices
 
 ### Always Do
-✅ Use GitHub Projects Custom Fields for detailed states (not labels)  
+✅ Treat Project fields and status labels as derived progress views; do not infer acceptance from either.  
 ✅ Keep GitHub Issue state simple (Open vs. Closed)  
 ✅ Update status in issue comments with rationale and next steps  
 ✅ Maintain traceability links when status changes  
@@ -629,7 +548,7 @@ jobs:
 ✅ Use automation to reduce manual status updates  
 
 ### Never Do
-❌ Use status labels for workflow states (use Custom Fields instead)  
+❌ Treat status labels, Project fields or free-text status as independent closure authority.  
 ❌ Close issues prematurely (before verification complete)  
 ❌ Skip status updates when making changes  
 ❌ Forget to document rationale for status changes  

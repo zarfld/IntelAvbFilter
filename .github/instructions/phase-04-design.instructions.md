@@ -3,6 +3,9 @@ description: "Phase 04 guidance for detailed design following IEEE 1016-2009. Co
 applyTo: "04-design/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 04: Detailed Design
 
 **Standards**: IEEE 1016-2009 (Software Design Descriptions)  

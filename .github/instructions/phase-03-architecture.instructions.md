@@ -3,6 +3,9 @@ description: "Phase 03 guidance for architecture design following ISO/IEC/IEEE 4
 applyTo: "03-architecture/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 03: Architecture Design
 
 **Standards**: ISO/IEC/IEEE 42010:2011 (Architecture Description), IEEE 1016-2009  
@@ -332,7 +335,7 @@ is:issue label:architecture-component
 **Status**: Integrated → Close
 **Integration Points**: Database, TokenService, API Gateway (all verified)
 **Integration Tests**: 8/8 passing (100%)
-**Deployment**: Merged to develop, deployed to staging
+**Integration**: Merged into master and required integrated verification complete.
 ```
 
 **Best Practices**:

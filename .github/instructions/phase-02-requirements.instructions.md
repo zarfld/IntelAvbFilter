@@ -3,6 +3,9 @@ description: "Phase 02 guidance for requirements analysis and specification foll
 applyTo: "02-requirements/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 02: Requirements Analysis & Specification
 
 **Standards**: ISO/IEC/IEEE 29148:2018 (System Requirements), ISO/IEC/IEEE 12207:2017  

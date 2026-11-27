@@ -3,6 +3,9 @@ description: "Phase 06 guidance for integration following ISO/IEC/IEEE 12207:201
 applyTo: "06-integration/**"
 ---
 
+
+> Issue status and closure: follow the canonical [artifact-specific lifecycle guidance](../../docs/github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). Phase readiness is distinct from issue completion; existing acceptance criteria and verification gates remain unchanged.
+
 # Phase 06: Integration
 
 **Standards**: ISO/IEC/IEEE 12207:2017 (Integration Process)  
@@ -48,7 +51,7 @@ Based on #78 (ADR-SECU-001)
 - [x] API Gateway ↔ UserService endpoints
 
 ## Deployment
-Merged to `develop` branch
+Merged into `master` for formal implementation-related issue closure (development/integration branches are candidate baselines).
 Deployed to staging environment
 ```
 

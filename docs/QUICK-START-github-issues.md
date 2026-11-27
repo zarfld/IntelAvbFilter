@@ -427,7 +427,7 @@ Implements ADR #150
 
 - GitHub Actions validate traceability
 - Tests pass
-- PR merged → Issue #145 auto-closed
+- PR merged → Issue #145 remains open until artifact-specific closure evidence is reviewed (use `Implements #145` while pending).
 
 #### 7. Update Parent
 
