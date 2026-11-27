@@ -6,7 +6,7 @@
 
 ## Governing closure policy
 
-Follow [the canonical artifact-specific lifecycle and historical evidence rules](github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). These override generic examples below. Use `Implements #N` while closure is pending. A candidate GREEN, merge, or overall CI success cannot authorize issue closure. Master integration plus issue-specific applicable verification is required for implementation-related artifacts. Labels and Project fields are derived views; do not automate closure until the mapping and evidence mechanisms are reconciled.
+Follow [the canonical artifact-specific lifecycle and historical evidence rules](github-issue-status-management.md#normative-issue-closure-and-historical-evidence-2026-11-27). These override generic examples below. Use `Implements #N` while closure is pending. A candidate GREEN, merge, or overall CI success cannot authorize issue closure. Master integration plus issue-specific applicable verification is required for implementation-related artifacts. Labels and Project fields are derived views. Automatically close an issue when all its applicable artifact-specific gates pass; do not require a separate manual closure approval. Unrelated failing issues do not block closure of independently verified integrated work. Existing merge and milestone gates remain unchanged.
 
 ## 🚀 Quick Start: Setting Up Your Workflow
 
@@ -19,7 +19,7 @@ Follow [the canonical artifact-specific lifecycle and historical evidence rules]
 | **Auto-add issues to project** | ✅ Yes (built-in) | Enable GitHub Projects auto-add workflow |
 | **Update issue status** | ✅ Yes (via MCP/Actions) | Copilot MCP tools + GitHub Actions |
 | **Move issues between columns** | ✅ Yes (built-in) | Automatic based on label changes |
-| **Close issues after CI** | Manual evidence review | No blanket CI-based closure |
+| **Close issues after CI/HIL or other applicable gates** | Automatic per-issue closure | Requires complete issue-specific evidence; no blanket CI-based closure |
 
 ### Initial Setup Steps
 
@@ -82,7 +82,7 @@ stateDiagram-v2
     Review --> Testing: PR Approved
     Testing --> InProgress: Test Failed
     Testing --> Completed: All Tests Pass
-    Completed --> Closed: Artifact-specific acceptance and evidence reviewed
+    Completed --> Closed: All artifact-specific gates passed (automatic)
     Closed --> [*]
     
     Backlog --> Closed: Won't Fix / Duplicate
@@ -266,7 +266,7 @@ jobs:
 
 ### Workflow status and closure
 
-The former illustrative PR/status and bulk CI-closure workflows are superseded. Do not activate them. A PR merge only records integration into its actual target; closure requires the canonical artifact-specific review. Use the existing workflows for their actual functions, and record closure evidence manually until evidence-driven automation is separately reviewed.
+The former illustrative PR/status and bulk CI-closure workflows are superseded. Do not activate them. A PR merge only records integration into its actual target. The closure evaluator automatically closes an issue as completed after all its applicable gates pass and records the evidence. No extra manual approval is required. Where executable automation is not yet available, apply the same rule directly during authorized reconciliation. Do not infer completion from an overall workflow result.
 
 ## 🎯 GitHub Copilot Agent Integration
 
@@ -277,7 +277,7 @@ Copilot can suggest or perform status updates when:
 1. **User assigns themselves to an issue** → Suggest moving to `status:in-progress`
 2. **User creates a PR** → Suggest moving linked issues to `status:review`
 3. **PR is merged into master** → Record integration and pending issue-specific verification; other target branches remain candidate work.
-4. **Issue-specific integrated verification complete** → Recommend closure after the canonical artifact-specific review; do not close based on overall CI success.
+4. **All applicable issue-specific gates passed** → Automatically close as completed, recording evidence; do not close based on overall CI success alone.
 5. **User mentions a blocker** → Suggest marking as `status:blocked`
 
 ### Example Copilot Workflow
